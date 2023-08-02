@@ -35,7 +35,7 @@ import import_expression
 import time
 
 
-from util.converter import CodeBlockConverter
+from utils.converter import CodeBlockConverter
 
 Dependencies = None
 
@@ -46,8 +46,6 @@ class Eval(commands.Cog):
         self._name: str = os.path.basename(__file__).title()
         self._logger = logging.getLogger()
         self._logger.info(f'**SUCCESS** Initializing {self._name} ')
-
-    
 
     # def CharConvertor(self, char: Union[discord.Emoji, str]) -> Union[discord.Emoji, str]:
     #     if isinstance(char, str):
@@ -112,21 +110,21 @@ class Eval(commands.Cog):
                     except:
                         pass
                 msg = f"n```py\n{err}\n```"
-                return await context.send(content= msg)
+                return await context.send(content=msg)
 
             ping = time.monotonic() - ping
             ping = ping * 1000
 
             if res:
                 msg = f"```py\n{res}\n{otp}\n```"
-                await context.send(content= msg)
+                await context.send(content=msg)
 
             else:
                 msg = f"```py\n{otp}\n```"
-                await context.send(content= msg)
+                await context.send(content=msg)
 
 
-async def setup(bot:commands.Bot):
+async def setup(bot: commands.Bot):
     await bot.add_cog(Eval(bot))
 
 

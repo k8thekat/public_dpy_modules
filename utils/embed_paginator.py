@@ -8,11 +8,12 @@ from typing import Any, Dict, Generic, List, Optional, TypeVar
 import discord
 from discord import ui
 
-#from cogs.errorhandling.errorlog import ErrorLog
+# from cogs.errorhandling.errorlog import ErrorLog
 
 T = TypeVar('T')
 
 _logger = logging.getLogger(__name__)
+
 
 class ToPageModal(ui.Modal, title="Go to page..."):
     new_page: ui.TextInput[ui.Modal] = ui.TextInput(label="Page", placeholder="What page are we going to?", min_length=1)
@@ -29,15 +30,17 @@ class ToPageModal(ui.Modal, title="Go to page..."):
         self.interaction = interaction
         self.stop()
 
+
 class BasePaginatorView(ABC, Generic[T], ui.View):
     """A base class for Paginator Views, you'll need to override some methods with your own behavior"""
+
     def __init__(self, *, owner: discord.Member | discord.User, pages: List[T], timeout: float = 30.0) -> None:
         super().__init__(timeout=timeout)
         assert len(pages) > 0
-        self.message: discord.Message | None = None # should be set when the paginator is sent.
+        self.message: discord.Message | None = None  # should be set when the paginator is sent.
         self.owner = owner
         self.pages = pages
-        self.max_index = len(pages) - 1 # List indecies
+        self.max_index = len(pages) - 1  # List indecies
         self.current_index = 0
 
         self._update_state()
@@ -128,7 +131,7 @@ class BasePaginatorView(ABC, Generic[T], ui.View):
             self.current_index += 1
         await self.update(interaction)
 
-    @ui.button(emoji="⏭️", style= discord.ButtonStyle.gray)
+    @ui.button(emoji="⏭️", style=discord.ButtonStyle.gray)
     async def to_last_btn(self, interaction: discord.Interaction, _: ui.Button) -> None:
         self.current_index = self.max_index
         await self.update(interaction)
@@ -138,7 +141,7 @@ class BasePaginatorView(ABC, Generic[T], ui.View):
         if self.message is None:
             return
 
-        modal = ToPageModal(max_pages=self.max_index + 1) # Their index is one higher than ours.
+        modal = ToPageModal(max_pages=self.max_index + 1)  # Their index is one higher than ours.
         await interaction.response.send_modal(modal)
         timed_out = await modal.wait()
 
@@ -157,11 +160,11 @@ class BasePaginatorView(ABC, Generic[T], ui.View):
         value = int(value)
         if not 0 < value <= self.max_index + 1:
             if not modal.interaction.response.is_done():
-                error = modal.new_page.placeholder.replace("Enter", "Expected") # type: ignore
+                error = modal.new_page.placeholder.replace("Enter", "Expected")  # type: ignore
                 await modal.interaction.response.send_message(error, ephemeral=True)
                 return
 
-        self.current_index = value - 1 # Our index is one lower than theirs
+        self.current_index = value - 1  # Our index is one lower than theirs
         await self.update(modal.interaction)
 
     @ui.button(label="Quit", style=discord.ButtonStyle.red)
@@ -201,7 +204,7 @@ class BasePaginatorView(ABC, Generic[T], ui.View):
         if len(self.pages) != 0:
             self.on_update()
 
-        self.count_btn.label = f"{self.current_index + 1}/{len(self.pages)}" # Start at 1 instead of 0.
+        self.count_btn.label = f"{self.current_index + 1}/{len(self.pages)}"  # Start at 1 instead of 0.
 
     async def update(self, interaction: discord.Interaction) -> None:
         self._update_state()

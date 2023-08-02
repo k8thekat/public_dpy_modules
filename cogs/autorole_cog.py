@@ -31,9 +31,10 @@ from discord import Embed
 from discord import app_commands
 from discord.ext import commands
 
-from util.ui.view import ReactionRoleView
+from utils.ui.view import ReactionRoleView
 
 interaction = discord.Interaction
+
 
 class AutoRole(commands.Cog):
 
@@ -46,27 +47,27 @@ class AutoRole(commands.Cog):
         self._logger.info(f'**SUCCESS** Initializing {self._name} ')
         super().__init__()
 
-    @app_commands.command(name= 'role_embed')
+    @app_commands.command(name='role_embed')
     async def role_embed(self, interaction: discord.Interaction, channel: Union[discord.TextChannel, None], role: discord.Role, field_body: str, emoji: Union[str, None]) -> None:
         """Displays an Embed in a channel that Users can interact with the button to `Add` or `Remove` a role."""
-        embed = Embed(title= f'**{role.name} Role**' , color= role.color, description= f'Click the button below if you\'d like to subscribe to the {role.mention} role for updates!')
-        embed.add_field(name= '**What is this for?**', value=  field_body)
-        
-        role_view = ReactionRoleView(timeout= None, custom_id= f"RR::BUTTON::{role.id}", button_label= role.name, button_emoji= emoji)
+        embed = Embed(title=f'**{role.name} Role**', color=role.color, description=f'Click the button below if you\'d like to subscribe to the {role.mention} role for updates!')
+        embed.add_field(name='**What is this for?**', value=field_body)
+
+        role_view = ReactionRoleView(timeout=None, custom_id=f"RR::BUTTON::{role.id}", button_label=role.name, button_emoji=emoji)
 
         if channel == None:
-            await interaction.response.send_message(embed= embed, view= role_view)
+            await interaction.response.send_message(embed=embed, view=role_view)
         else:
-            await channel.send(embed= embed, view= role_view)
+            await channel.send(embed=embed, view=role_view)
 
     @commands.Cog.listener('on_interaction')
     async def on_reaction_role(self, interaction: discord.Interaction):
         if interaction.type != discord.InteractionType.component:
             return
-        
+
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             return
-        
+
         custom_id = (interaction.data or {}).get('custom_id', '')
         match = self.REACTION_ROLES_BUTTON_REGEX.fullmatch(custom_id)
 
@@ -89,5 +90,6 @@ class AutoRole(commands.Cog):
                 return await interaction.response.send_message(f"Failed to assign role: {e.text}", ephemeral=True)
             await interaction.response.send_message(message.format(role.name), ephemeral=True)
 
-async def setup(bot:commands.Bot):
+
+async def setup(bot: commands.Bot):
     await bot.add_cog(AutoRole(bot))

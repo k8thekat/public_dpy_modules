@@ -20,6 +20,10 @@
 
 '''
 from __future__ import annotations
+from discord import app_commands
+from discord.ext import commands
+import discord
+
 # Python Libs
 import os
 import logging
@@ -40,11 +44,8 @@ import unicodedata
 import inspect
 from typing import Union
 
-print()
 # Discord Libs
-import discord
-from discord.ext import commands
-from discord import app_commands
+
 
 class Util(commands.Cog):
     PATTERN: re.Pattern[str] = re.compile(
@@ -57,7 +58,7 @@ class Util(commands.Cog):
         self._logger.info(f'**SUCCESS** Initializing {self._name} ')
 
     async def cog_load(self) -> None:
-        self._prefix: str = self._bot.command_prefix #type:ignore 
+        self._prefix: str = self._bot.command_prefix  # type:ignore
         self._message_timeout: int = 120
         self._start_time = time.time()
         self._mb_client = mystbin.Client()

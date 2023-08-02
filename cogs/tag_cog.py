@@ -6,11 +6,11 @@ This module uses the following third party libs installed via pip: asqlite (http
 import logging
 from dataclasses import dataclass
 
-import util.asqlite as asqlite
+import utils.asqlite as asqlite
 import discord
 from discord.ext import commands
 
-from util.embed_paginator import BasePaginatorView
+from utils.embed_paginator import BasePaginatorView
 
 ALLOWED_MENTIONS = discord.AllowedMentions.none()
 
@@ -196,7 +196,7 @@ class TagsCog(commands.Cog):
                 # results = list(enumerate(results, 1))
                 # embeds = []
 
-                #for result in discord.utils.as_chunks(results, 20):
+                # for result in discord.utils.as_chunks(results, 20):
                 #     out = "\n".join(f"{res[0]}.) {res[1]['name']}" for res in result)
                 #     embed = discord.Embed(color=discord.Color.blue(), description=out, title=query)
                 #     embeds.append(embed)
@@ -208,7 +208,7 @@ class TagsCog(commands.Cog):
                 # else:
                 #     await ctx.send(f"No tags matching search: `{discord.utils.escape_mentions(query)}`")
 
-                #IMPLEMENTATION WITHOUT PAGINATION:
+                # IMPLEMENTATION WITHOUT PAGINATION:
                 if results:
                     out = "\n".join(res['name'] for res in results[:20])
                     if (num_results := len(results)) > 20:
@@ -237,8 +237,8 @@ class TagsCog(commands.Cog):
                 await cur.execute("SELECT name FROM tags WHERE owner_id = ? and guild_id = ? ORDER BY name ASC", member.id, ctx.guild.id)
 
                 results = await cur.fetchall()
-                #results = list(enumerate(results, 1))
-                #embeds = []
+                # results = list(enumerate(results, 1))
+                # embeds = []
 
                 # for result in discord.utils.as_chunks(results, 20):  # `result` will be a list[index, Row]
                 #     out = "\n".join(f"{res[0]}.) {res[1]['name']}" for res in result)

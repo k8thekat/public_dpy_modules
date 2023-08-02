@@ -9,9 +9,9 @@ from attr import dataclass
 from dateutil.zoneinfo import get_zonefile_instance
 import discord
 import pytz
-import util.fuzzy as fuzzy
+import utils.fuzzy as fuzzy
 
-from discord.ext.commands import Context #This should point to your custom bot context
+from discord.ext.commands import Context  # This should point to your custom bot context
 
 from discord.ext import commands
 from discord import app_commands

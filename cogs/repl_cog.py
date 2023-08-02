@@ -85,7 +85,7 @@ class Repl(commands.Cog):
                 await ctx.send('Exiting.')
                 self._sessions.remove(ctx.channel.id)
                 return
-            
+
             if cleaned in ('?'):
                 await ctx.send(f"{variables.keys()}")
 

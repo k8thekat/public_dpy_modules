@@ -40,11 +40,12 @@ from discord.enums import ButtonStyle
 from discord.ext import commands, tasks
 
 import pytz
-import util.asqlite as asqlite
+import utils.asqlite as asqlite
 
 from typing import Any, List, NamedTuple, Optional, Self, Union
 
-import util.timezones
+
+import utils.timezones
 
 DB_FILENAME = "lovers.sqlite"
 
@@ -793,8 +794,8 @@ class Love(commands.Cog):
 
     async def cog_load(self) -> None:
         # Generate our list of "Choices"
-        self._timezones_choices: list[Choice[str]] = await util.timezones.parse_bcp47_timezones()
-        self._timezone_aliases: dict[str, str] = util.timezones._timezone_aliases
+        self._timezones_choices: list[Choice[str]] = await utils.timezones.parse_bcp47_timezones()
+        self._timezone_aliases: dict[str, str] = utils.timezones._timezone_aliases
         self._time_table = TimeTable()
 
         async with asqlite.connect(DB_FILENAME) as db:
@@ -1121,7 +1122,7 @@ class Love(commands.Cog):
 
             if tz is not None:
                 try:
-                    res = await util.timezones.convert_timezones(tz=tz)
+                    res = await utils.timezones.convert_timezones(tz=tz)
                 except:
                     return await interaction.response.send_message(
                         content=f"You provided an improper Timezone; please pick from the provided selection only.",
@@ -1197,7 +1198,7 @@ class Love(commands.Cog):
         if lover is not None:
             # This will error out if someone provides a timezone that does not exist acting as a "hacky" validation.
             try:
-                res = await util.timezones.convert_timezones(tz=tz)
+                res = await utils.timezones.convert_timezones(tz=tz)
             except:
                 return await interaction.response.send_message(
                     content=f"You provided an improper Timezone; please pick from the provided selection only.",
