@@ -179,7 +179,7 @@ class Util(commands.Cog):
         await ctx.send(embed=embed)
 
     @app_commands.command(name='clear')
-    @app_commands.describe(all='Default\'s to False, removes ALL messages from selected Channel regardless of who sent them.')
+    @app_commands.describe(all='Default\'s to False, removes ALL messages from selected Channel regardless of who sent them when True.')
     @app_commands.default_permissions(manage_messages=True)
     async def clear(self, interaction: discord.Interaction, channel: Union[discord.VoiceChannel, discord.TextChannel, discord.Thread, None], amount: app_commands.Range[int, 0, 100] = 15, all: bool = False):
         """Cleans up Messages sent by anyone. Limit 100"""
