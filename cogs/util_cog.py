@@ -72,7 +72,16 @@ class Util(commands.Cog):
 
     @commands.Cog.listener('on_message')
     async def on_message_listener(self, message: discord.Message) -> None:
-        if isinstance(message.channel, discord.abc.GuildChannel) and message.channel.type is not discord.ChannelType.news and str(message.channel.category).lower() not in ['staff', 'dev channels', 'gaming', 'info']:
+        assert message.guild
+        if self._self_check:
+            return
+        # If we are not in my own personal guild.
+        if message.guild.id != 602285328320954378:
+            return
+
+        if (isinstance(message.channel, discord.abc.GuildChannel) and
+            message.channel.type is not discord.ChannelType.news and
+                str(message.channel.category).lower() not in ['staff', 'dev channels', 'gaming', 'info']):
             # So if our message is over 1k char length and doesn't use our prefix; Lets push it to a mystbin URL.
             if len(message.content) > 1000 and not message.content.startswith(self._prefix):
                 await self._auto_on_mystbin(message)
@@ -103,7 +112,8 @@ class Util(commands.Cog):
 
             author = discord.utils.escape_markdown(str(message.author))
             await message.channel.send(f"Hey {message.author.mention}, *Kuma Kuma Bear* moved your codeblock(s) to `Mystbin`\n\n{content}\n\n{paste.url}")
-            await message.delete()
+            if message.channel.permissions_for(message.guild.me).manage_messages:  # type:ignore
+                await message.delete()
 
     async def _auto_on_hastebin(self, message: discord.Message) -> None:
         """Converts a `discord.Message` into a Hastebin URL"""
