@@ -9,12 +9,16 @@ from dataclasses import dataclass
 import utils.asqlite as asqlite
 import discord
 from discord.ext import commands
+import pathlib
+from pathlib import Path
 
 from utils.embed_paginator import BasePaginatorView
 
 ALLOWED_MENTIONS = discord.AllowedMentions.none()
 
+script_loc: Path = Path(__file__).parent
 DB_FILENAME = "tags.sqlite"
+DB_PATH = script_loc.joinpath(DB_FILENAME).as_posix()
 
 TAGS_SETUP_SQL = """
 CREATE TABLE IF NOT EXISTS tags (
@@ -38,7 +42,7 @@ class TagEntry:
 
     @classmethod
     async def get_or_none(cls, *, name: str, guild_id: int) -> TagEntry | None:
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 await cur.execute("SELECT * FROM tags WHERE name = ? AND guild_id = ?", name, guild_id)
                 res = await cur.fetchone()
@@ -47,7 +51,7 @@ class TagEntry:
 
     @classmethod
     async def create(cls, *, name: str, owner_id: int, guild_id: int, content: str) -> TagEntry | None:
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 # TODO upsert?
                 await cur.execute("""INSERT INTO tags (name, owner_id, guild_id, content) VALUES (?, ?, ?, ?)
@@ -59,7 +63,7 @@ class TagEntry:
                 return cls(**res) if res is not None else None
 
     async def delete(self) -> int:
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 await cur.execute("DELETE FROM tags WHERE name = ? AND guild_id = ?", self.name, self.guild_id)
                 await db.commit()
@@ -67,7 +71,7 @@ class TagEntry:
                 return cur.get_cursor().rowcount
 
     async def update(self, *, new_content: str) -> TagEntry:
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 await cur.execute("UPDATE tags SET content = ? WHERE name = ? AND guild_id = ? RETURNING *", new_content, self.name, self.guild_id)
                 await db.commit()
@@ -82,7 +86,7 @@ class TagsCog(commands.Cog):
         self.bot = bot
 
     async def cog_load(self) -> None:
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             await db.execute(TAGS_SETUP_SQL)
 
     @commands.group(invoke_without_command=True)
@@ -188,7 +192,7 @@ class TagsCog(commands.Cog):
         """
         assert ctx.guild
 
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 await cur.execute("SELECT name FROM tags WHERE name LIKE ? and guild_id = ?", f"%{query}%", ctx.guild.id)
 
@@ -232,7 +236,7 @@ class TagsCog(commands.Cog):
 
         member = member or ctx.author
 
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 await cur.execute("SELECT name FROM tags WHERE owner_id = ? and guild_id = ? ORDER BY name ASC", member.id, ctx.guild.id)
 

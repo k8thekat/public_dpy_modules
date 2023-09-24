@@ -29,7 +29,10 @@ from discord.ext import commands, tasks
 
 from typing_extensions import Any
 
+
+script_loc: Path = Path(__file__).parent
 DB_FILENAME = "reddit_scrape.sqlite"
+DB_PATH: str = script_loc.joinpath(DB_FILENAME).as_posix()
 
 SUBREDDIT_SETUP_SQL = """
 CREATE TABLE IF NOT EXISTS subreddit (
@@ -57,7 +60,7 @@ async def _get_subreddit(name: str) -> Row | None:
     Returns:
         Row['id', 'name', 'webhook_id'] | None
     """
-    async with asqlite.connect(DB_FILENAME) as db:
+    async with asqlite.connect(DB_PATH) as db:
         async with db.cursor() as cur:
             await cur.execute("""SELECT id, name, webhook_id FROM subreddit where name = ?""", name)
             res: Row | None = await cur.fetchone()
@@ -79,7 +82,7 @@ async def _add_subreddit(name: str) -> Row | None:
     if res is not None:
         return None
     else:
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 await cur.execute("""INSERT INTO subreddit(name) VALUES(?) ON CONFLICT(name) DO NOTHING RETURNING *""", name)
                 await db.commit()
@@ -102,7 +105,7 @@ async def _del_subreddit(name: str) -> int | None:
     if res is None:
         return None
     else:
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 await cur.execute("""DELETE FROM subreddit WHERE name = ?""", name)
                 res = await cur.fetchone()
@@ -123,7 +126,7 @@ async def _get_all_subreddits() -> list[Union[Any, dict[str, str]]]:
         Otherwise a list of dictionaries structured as `[{"subreddit", "webhook url"}]`
     """
     _subreddits: list[dict[str, Union[str, None]]] = []
-    async with asqlite.connect(DB_FILENAME) as db:
+    async with asqlite.connect(DB_PATH) as db:
         async with db.cursor() as cur:
             await cur.execute("""SELECT name, webhook_id FROM subreddit""")
             res = await cur.fetchall()
@@ -163,7 +166,7 @@ async def _update_subreddit(name: str, webhook: Union[int, str]) -> Row | None:
             else:
                 webhook_id = res["ID"]
 
-    async with asqlite.connect(DB_FILENAME) as db:
+    async with asqlite.connect(DB_PATH) as db:
         async with db.cursor() as cur:
             await cur.execute("""UPDATE subreddit SET webhook_id = ? WHERE name = ?  RETURNING *""", webhook_id, name)
             await db.commit()
@@ -181,7 +184,7 @@ async def _get_webhook(arg: Union[str, int, None]) -> Row | None:
     Returns:
         Row["name", "id", "url"] | None
     """
-    async with asqlite.connect(DB_FILENAME) as db:
+    async with asqlite.connect(DB_PATH) as db:
         async with db.cursor() as cur:
             if arg is None:
                 return None
@@ -211,7 +214,7 @@ async def _add_webhook(name: str, url: str) -> Row | None:
     if res is not None:
         return None
     else:
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 await cur.execute("""INSERT INTO webhook(name, url) VALUES(?, ?) ON CONFLICT(url) DO NOTHING RETURNING *""", name, url)
                 await db.commit()
@@ -234,7 +237,7 @@ async def _del_webook(arg: Union[int, str]) -> int | None:
     if res is None:
         return None
     else:
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 await cur.execute("""UPDATE subreddit SET webhook_id = ? WHERE webhook_id = ?  RETURNING *""", None, res["id"])
                 await db.commit()
@@ -252,7 +255,7 @@ async def _get_all_webhooks() -> list[Any] | list[dict[str, str | int]]:
         list[Any] | list[dict[str, str | int]]: Structure `[{"name": str , "url": str , "id": int}]`
     """
     _webhooks: list[dict[str, Union[str, int]]] = []
-    async with asqlite.connect(DB_FILENAME) as db:
+    async with asqlite.connect(DB_PATH) as db:
         async with db.cursor() as cur:
             await cur.execute("""SELECT name, id, url FROM webhook""")
             res: list[Row] = await cur.fetchall()
@@ -325,7 +328,7 @@ class Reddit_IS(commands.Cog):
             Creates our _subreddit list.
             """
         # Setup our DB tables
-        async with asqlite.connect(DB_FILENAME) as db:
+        async with asqlite.connect(DB_PATH) as db:
             await db.execute(SUBREDDIT_SETUP_SQL)
             await db.execute(WEBHOOK_SETUP_SQL)
         # Grab our PRAW settings
@@ -492,7 +495,7 @@ class Reddit_IS(commands.Cog):
                 async for submission in cur_subreddit.new(limit=self._submission_limit):
                     post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
                     found_post = False
-                    # self._logger.info(f'Checking subreddit {sub} -> submission title: {submission.title} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
+                    self._logger.info(f'Checking subreddit {sub} -> submission title: {submission.title} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
 
                     if post_time >= last_check:  # The more recent time will be greater than..
                         # reset our img list
