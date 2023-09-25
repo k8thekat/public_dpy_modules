@@ -342,7 +342,6 @@ class Reddit_IS(commands.Cog):
 
         self._subreddits = await _get_all_subreddits()
 
-        # TODO - Once finished un-comment code.
         if self.check_loop.is_running() is False:
             self.check_loop.start()
 
@@ -417,9 +416,8 @@ class Reddit_IS(commands.Cog):
         return last_check
 
     def json_save(self) -> None:
-        # TODO - Converting from Set to List is messing up insertion order.
-        # I generate an upper limit of the list based upon the subreddits times the submissin search limit;
-        # this allows for configuration changes and not having to scale the limit of the list
+        """I generate an upper limit of the list based upon the subreddits times the submissin search limit;
+         this allows for configuration changes and not having to scale the limit of the list"""
         _temp_url_list: list[str] = []
         _temp_hash_list: list[str] = []
 
@@ -427,12 +425,12 @@ class Reddit_IS(commands.Cog):
 
         # Turn our set into a list, truncate it via indexing then replace our current set.
         if len(self._url_list) > limiter:
-            # self._logger.info(f'Trimming down url list...')
+            # 'Trimming down url list...'
             _temp_url_list = list(self._url_list)
             _temp_url_list = _temp_url_list[len(self._url_list) - limiter:]
 
         if len(self._hash_list) > limiter:
-            # self._logger.info(f'Trimming down hash list...')
+            # 'Trimming down hash list...
             _temp_hash_list = list(self._hash_list)
             _temp_hash_list = _temp_hash_list[len(self._hash_list) - limiter:]
 
@@ -443,7 +441,7 @@ class Reddit_IS(commands.Cog):
         }
         with open(self._json, "w") as jfile:
             json.dump(data, jfile)
-            # self._logger.info('Saving our settings...')
+            # 'Saving our settings...'
             jfile.close()
 
         self._url_list = _temp_url_list
@@ -476,8 +474,6 @@ class Reddit_IS(commands.Cog):
         # We check self._subreddits in `check_loop`
         for entry in self._subreddits:
             for sub, url in entry.items():
-                # sub = entry[sub]
-                # url = entry[url]
                 if url == None:
                     self._logger.warn(f"No Webhook URL for {sub}, skipping...")
                     continue
@@ -503,9 +499,6 @@ class Reddit_IS(commands.Cog):
                         img_url_to_send = []
                         # Usually submissions with multiple images will be using this `attr`
                         if hasattr(submission, "media_metadata"):
-                            # print('Found media_metadata')
-                            # print(submission.media_metadata)
-
                             for key, img in submission.media_metadata.items():
                                 # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': LN 105}
                                 # This allows us to only get Images.
@@ -519,8 +512,6 @@ class Reddit_IS(commands.Cog):
                                     continue
 
                         elif hasattr(submission, "url_overridden_by_dest"):
-                            # print('Found url_overridden_by_dest')
-                            # img_url = submission.url_overridden_by_dest
                             if submission.url_overridden_by_dest.startswith(self._url_prefixs):
                                 img_url_to_send.append(submission.url_overridden_by_dest)
                             else:
@@ -529,7 +520,6 @@ class Reddit_IS(commands.Cog):
                         else:
                             continue
 
-                        # if img_url != None:
                         if len(img_url_to_send) > 0:
                             for img_url in img_url_to_send:
                                 if self._interrupt_loop:
@@ -587,7 +577,6 @@ class Reddit_IS(commands.Cog):
         data = {"content": content, "username": self._user_name}
         result: ClientResponse = await self._sessions.post(url, json=data)
         if 200 <= result.status < 300:
-            # self._logger.info(f"Webhook sent {result.status}")
             return
         else:
             self._logger.warn(f"Webhook not sent with {result.status}, response:\n{result.json()}")
