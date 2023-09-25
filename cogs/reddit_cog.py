@@ -291,8 +291,8 @@ class Reddit_IS(commands.Cog):
 
         # Image hash and Url storage
         self._json: Path = self._file_dir.joinpath("reddit.json")
-        self._url_list: set = set()  # []  # Recently sent URLs
-        self._hash_list: set = set()  # []  # Recently hashed images
+        self._url_list: list = []  # []  # Recently sent URLs
+        self._hash_list: list = []  # []  # Recently hashed images
         self._url_prefixs: tuple[str, ...] = ("http://", "https://")
 
         # This is how many posts in each subreddit the script will look back.
@@ -406,17 +406,18 @@ class Reddit_IS(commands.Cog):
             # self._logger.info('Last Check... Done.')
 
         if 'url_list' in data:
-            self._url_list = set(data['url_list'])
+            self._url_list = list(data['url_list'])
             # self._logger.info('URL List... Done.')
 
         if 'hash_list' in data:
-            self._hash_list = set(data['hash_list'])
+            self._hash_list = list(data['hash_list'])
             # self._logger.info('Hash List... Done.')
 
         jfile.close()
         return last_check
 
     def json_save(self) -> None:
+        # TODO - Converting from Set to List is messing up insertion order.
         # I generate an upper limit of the list based upon the subreddits times the submissin search limit;
         # this allows for configuration changes and not having to scale the limit of the list
         _temp_url_list: list[str] = []
@@ -445,8 +446,8 @@ class Reddit_IS(commands.Cog):
             # self._logger.info('Saving our settings...')
             jfile.close()
 
-        self._url_list = set(_temp_url_list)
-        self._hash_list = set(_temp_hash_list)
+        self._url_list = _temp_url_list
+        self._hash_list = _temp_hash_list
 
     @tasks.loop(minutes=5)
     async def check_loop(self) -> None:
@@ -495,7 +496,7 @@ class Reddit_IS(commands.Cog):
                 async for submission in cur_subreddit.new(limit=self._submission_limit):
                     post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
                     found_post = False
-                    self._logger.info(f'Checking subreddit {sub} -> submission title: {submission.title} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
+                    # self._logger.info(f'Checking subreddit {sub} -> submission title: {submission.title} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
 
                     if post_time >= last_check:  # The more recent time will be greater than..
                         # reset our img list
@@ -536,7 +537,7 @@ class Reddit_IS(commands.Cog):
                                 if img_url in self._url_list:
                                     continue
 
-                                self._url_list.add(img_url)
+                                self._url_list.append(img_url)
                                 status: bool = await self.hash_process(img_url)
 
                                 if status:
@@ -550,11 +551,7 @@ class Reddit_IS(commands.Cog):
 
         return count
 
-    async def hash_process(self, img_url: str) -> bool:
-        """Checks the Hash of the supplied url against our hash list."""
-        # TODO - Make this ASYNC if at all possible.
-        # async with aiohttp.ClientSession() as session:
-        #     req = await session.request(method="GET", url=img_url, headers={'User-Agent': str(self._User_Agent)})
+    async def hash_url(self, img_url: str):
         req = urllib.request.Request(url=img_url, headers={'User-Agent': str(self._User_Agent)})
 
         try:
@@ -564,18 +561,25 @@ class Reddit_IS(commands.Cog):
             self._logger.error(f'Unable to handle {img_url} with error: {e}')
             return False
 
-        # This only gets "Images" and not "Videos" -> content_type() returns something like 'image/jpeg' or 'text/html'
         if 'image' in req_open.headers.get_content_type():
             my_hash = hashlib.sha256(req_open.read()).hexdigest()
-            if my_hash not in self._hash_list:
-                self._hash_list.add(my_hash)
-                return True
-
-            else:
-                self._logger.info('Found a duplicate hash...')
-                return False
+            return my_hash
         else:  # Failed to find a 'image'
             self._logger.warn(f'URL: {img_url} is not an image -> {req_open.headers.get_content_type()}')
+            return False
+
+    async def hash_process(self, img_url: str) -> bool:
+        """Checks the Hash of the supplied url against our hash list."""
+        # TODO - Make this ASYNC if at all possible.
+        # async with aiohttp.ClientSession() as session:
+        #     req = await session.request(method="GET", url=img_url, headers={'User-Agent': str(self._User_Agent)})
+        my_hash = await self.hash_url(img_url=img_url)
+        if my_hash not in self._hash_list or my_hash != False:
+            self._hash_list.append(my_hash)
+            return True
+
+        else:
+            self._logger.info('Found a duplicate hash...')
             return False
 
     async def webhook_send(self, url: str, content: str) -> bool | None:
@@ -696,6 +700,27 @@ class Reddit_IS(commands.Cog):
         else:
             return await context.send(content=f"You must use these words {','.join(start)} | {','.join(end)}", delete_after=self._message_timeout)
         return await context.send(content=f"The Scrapper loop is {status}", delete_after=self._message_timeout)
+
+    @commands.command(help="Sha256 comparison of two URLs", aliases=["sha256", "hash"])
+    async def compare_images(self, context: commands.Context, url_one: str, url_two: str | None):
+        failed: bool = False
+        res = await self.hash_url(img_url=url_one)
+        if res == False:
+            failed = True
+
+        elif url_two is not None:
+            res_two = await self.hash_url(img_url=url_two)
+            if res_two == False:
+                failed = True
+            elif res == res_two:
+                return await context.send(content=f"The Images match!")
+            elif res != res_two:
+                return await context.send(content=f"The Images do not match.\n `{res}` \n `{res_two}`")
+        else:
+            return await context.send(content=f"Hash: `{res}`")
+
+        if failed:
+            return await context.send(content=f"Unable to hash the URLs provided.")
 
 
 async def setup(bot: commands.Bot):
