@@ -32,6 +32,7 @@ import os
 import logging
 from dataclasses import dataclass
 from pprint import pprint
+from pathlib import Path
 
 from discord import Member, app_commands
 from discord.app_commands import Choice
@@ -47,7 +48,9 @@ from typing import Any, List, NamedTuple, Optional, Self, Union
 
 import utils.timezones
 
+script_loc: Path = Path(__file__).parent
 DB_FILENAME = "lovers.sqlite"
+DB_PATH: str = script_loc.joinpath(DB_FILENAME).as_posix()
 
 LOVERS_SETUP_SQL = """
 CREATE TABLE IF NOT EXISTS lovers (
