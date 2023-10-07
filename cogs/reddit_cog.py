@@ -426,26 +426,25 @@ class Reddit_IS(commands.Cog):
         # Turn our set into a list, truncate it via indexing then replace our current set.
         if len(self._url_list) > limiter:
             # 'Trimming down url list...'
-            _temp_url_list = list(self._url_list)
+            _temp_url_list = self._url_list
             _temp_url_list = _temp_url_list[len(self._url_list) - limiter:]
+            self._url_list = _temp_url_list
 
         if len(self._hash_list) > limiter:
             # 'Trimming down hash list...
-            _temp_hash_list = list(self._hash_list)
+            _temp_hash_list = self._hash_list
             _temp_hash_list = _temp_hash_list[len(self._hash_list) - limiter:]
+            self._hash_list = _temp_hash_list
 
         data = {
             "last_check": self._last_check.timestamp(),
-            "url_list": list(self._url_list),
-            "hash_list": list(self._hash_list)
+            "url_list": self._url_list,
+            "hash_list": self._hash_list
         }
         with open(self._json, "w") as jfile:
             json.dump(data, jfile)
             # 'Saving our settings...'
             jfile.close()
-
-        self._url_list = _temp_url_list
-        self._hash_list = _temp_hash_list
 
     @tasks.loop(minutes=5)
     async def check_loop(self) -> None:
@@ -482,7 +481,7 @@ class Reddit_IS(commands.Cog):
                     return count
 
                 res: int = await self.check_subreddit(subreddit=sub)
-                if not res:
+                if res != 200:
                     # await _del_subreddit(name= sub)
                     self._logger.warn(f"Failed to find the subreddit /r/{sub} , skipping entry.")
                     continue
@@ -537,7 +536,7 @@ class Reddit_IS(commands.Cog):
                                     time.sleep(1)  # Soft buffer delay between sends to prevent rate limiting.
 
                 if found_post == False:
-                    self._logger.info(f'No new Submissions in {sub} since {last_check.ctime()}')
+                    self._logger.info(f'No new Submissions in {sub} since {last_check.ctime()}(UTC)')
 
         return count
 
@@ -593,7 +592,7 @@ class Reddit_IS(commands.Cog):
 
         status: int = await self.check_subreddit(subreddit=sub)
         if status != 200:
-            return await context.send(content=f"Unable to find the subreddit `/r/{sub}`.\n *Status code: {status}*")
+            return await context.send(content=f"Unable to find the subreddit `/r/{sub}`.\n *Status code: {status}*", delete_after=self._message_timeout)
 
         res: Row | None = await _add_subreddit(name=sub)
 
@@ -621,6 +620,7 @@ class Reddit_IS(commands.Cog):
     @commands.command(help="List of subreddits", aliases=["rslist", "rsl"])
     async def list_subreddit(self, context: commands.Context):
         res: list[Any | dict[str, str]] = await _get_all_subreddits()
+        # TODO - Possibly place an * next to subreddits without a webhook?
         temp_list = []
         for entry in res:
             for name, webhook in entry.items():
@@ -702,14 +702,14 @@ class Reddit_IS(commands.Cog):
             if res_two == False:
                 failed = True
             elif res == res_two:
-                return await context.send(content=f"The Images match!")
+                return await context.send(content=f"The Images match!", delete_after=self._message_timeout)
             elif res != res_two:
-                return await context.send(content=f"The Images do not match.\n `{res}` \n `{res_two}`")
+                return await context.send(content=f"The Images do not match.\n `{res}` \n `{res_two}`", delete_after=self._message_timeout)
         else:
-            return await context.send(content=f"Hash: `{res}`")
+            return await context.send(content=f"Hash: `{res}`", delete_after=self._message_timeout)
 
         if failed:
-            return await context.send(content=f"Unable to hash the URLs provided.")
+            return await context.send(content=f"Unable to hash the URLs provided.", delete_after=self._message_timeout)
 
 
 async def setup(bot: commands.Bot):
