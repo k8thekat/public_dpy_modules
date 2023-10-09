@@ -28,6 +28,7 @@ import discord
 import os
 import logging
 import aiofiles
+
 import psutil
 import re
 import time
@@ -50,6 +51,8 @@ from typing import Union
 class Util(commands.Cog):
     PATTERN: re.Pattern[str] = re.compile(
         r'`{3}(?P<LANG>\w+)?\n?(?P<CODE>(?:(?!`{3}).)+)\n?`{3}', flags=re.DOTALL | re.MULTILINE)
+    _default_repo = "https://github.com/k8thekat/dpy_cogs"
+    _default_branch = "main"
 
     def __init__(self, bot: commands.Bot) -> None:
         self._bot: commands.Bot = bot
@@ -162,7 +165,7 @@ class Util(commands.Cog):
         # embed.add_field(name="Latest updates:", value=get_latest_commits(limit=5), inline=False)
 
         embed.set_author(
-            name=f"Made by {information.owner}", icon_url=information.owner.display_avatar.url,)
+            name=f"Made by {information.owner.name}", icon_url=information.owner.display_avatar.url,)
         memory_usage = psutil.Process().memory_full_info().uss / 1024**2
         cpu_usage = psutil.cpu_percent()
 
@@ -189,8 +192,8 @@ class Util(commands.Cog):
         await ctx.send(embed=embed)
 
     @app_commands.command(name='clear')
-    @app_commands.describe(all='Default\'s to False, removes ALL messages from selected Channel regardless of who sent them when True.')
     @app_commands.default_permissions(manage_messages=True)
+    @app_commands.describe(all='Default\'s to False, removes ALL messages from selected Channel regardless of who sent them when True.')
     async def clear(self, interaction: discord.Interaction, channel: Union[discord.VoiceChannel, discord.TextChannel, discord.Thread, None], amount: app_commands.Range[int, 0, 100] = 15, all: bool = False):
         """Cleans up Messages sent by anyone. Limit 100"""
         await interaction.response.defer()
@@ -339,6 +342,17 @@ class Util(commands.Cog):
 
         final_url = f'<{source_url}/blob/{branch}/{location}#L{firstlineno}-L{firstlineno + len(lines) - 1}>'
         await context.send(final_url)
+
+    @commands.command(name="gpull", aliases=["gp"])
+    async def git_pull(self, context: commands.Context, repo: str = _default_repo, branch: str = _default_branch):
+        # TODO - Implement a git pull method to be used for cog edits
+        import git
+        repo = git.Repo().init()  # type:ignore
+        res = git.remote.Remote(repo=repo, name="origin")  # type:ignore
+        res.pull(self._default_branch)  # type:ignore
+        # import git
+        # g = git.Git('git-repo')
+        # g.pull('origin','branch-name')
 
 
 async def setup(bot: commands.Bot):
