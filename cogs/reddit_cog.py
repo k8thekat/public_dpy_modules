@@ -483,7 +483,7 @@ class Reddit_IS(commands.Cog):
                 res: int = await self.check_subreddit(subreddit=sub)
                 if res != 200:
                     # await _del_subreddit(name= sub)
-                    self._logger.warn(f"Failed to find the subreddit /r/{sub} , skipping entry.")
+                    self._logger.warn(f"Failed to find the subreddit /r/{sub}, skipping entry. Value: {res}")
                     continue
 
                 cur_subreddit: Subreddit = await self._reddit.subreddit(display_name=sub)
@@ -541,27 +541,31 @@ class Reddit_IS(commands.Cog):
         return count
 
     async def hash_url(self, img_url: str):
-        req = urllib.request.Request(url=img_url, headers={'User-Agent': str(self._User_Agent)})
+        # req = urllib.request.Request(url=img_url, headers={'User-Agent': str(self._User_Agent)})
 
         try:
+            req: ClientResponse = await self._sessions.get(url=img_url)
 
-            req_open = urllib.request.urlopen(req)
+            # req_open = urllib.request.urlopen(req)
         except Exception as e:
             self._logger.error(f'Unable to handle {img_url} with error: {e}')
             return False
 
-        if 'image' in req_open.headers.get_content_type():
-            my_hash = hashlib.sha256(req_open.read()).hexdigest()
+        # if 'image' in req_open.headers.get_content_type():
+        if "Content-Type" not in req.headers:
+            self._logger.error(f"Unable to find the Content-Type for {img_url}")
+            return False
+
+        if "image" in req.headers["Content-Type"]:
+            my_hash = hashlib.sha256(await req.read()).hexdigest()
             return my_hash
+
         else:  # Failed to find a 'image'
-            self._logger.warn(f'URL: {img_url} is not an image -> {req_open.headers.get_content_type()}')
+            self._logger.warn(f'URL: {img_url} is not an image -> {req.headers}')
             return False
 
     async def hash_process(self, img_url: str) -> bool:
         """Checks the Hash of the supplied url against our hash list."""
-        # TODO - Make this ASYNC if at all possible.
-        # async with aiohttp.ClientSession() as session:
-        #     req = await session.request(method="GET", url=img_url, headers={'User-Agent': str(self._User_Agent)})
         my_hash = await self.hash_url(img_url=img_url)
         if my_hash not in self._hash_list or my_hash != False:
             self._hash_list.append(my_hash)
