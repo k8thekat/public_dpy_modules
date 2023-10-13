@@ -109,14 +109,28 @@ class WorldBoss():
         return copy.deepcopy(self)
 
     def _time_diff(self, value: int, offset: Union[None, int], ):
-        # TODO - Docstring this
+        """
+        Used to calculate the time change difference from UTC to another timezone without having to update the arrays.
+        See `_offset (int)`
+
+        Args:
+            value (int): The starting value.
+            offset (Union[None, int]): The time offset value (eg. 7) -- `(PST +7/+8 from UTC)`
+
+        Returns:
+            _type_: int
+        """
         if offset == None:
             return value
         return (value + offset) % 24
 
     def get_upcoming_boss(self) -> Union[None, dict[str, datetime]]:
-        """Updates the `_next_boss` attribute and returns the next boss to spawn!"""
-        # TODO - Docstring this
+        """
+        Get's the next boss spawn in the future and returns the value in a dict. Updates the `_next_boss` attribute.
+
+        Returns:
+            _type_: `{"name": boss, "time": _time}`
+        """
         _world_boss: WorldBoss = self.copy_boss
         _time: datetime = _world_boss._last_known_spawn
         _found = False
@@ -128,7 +142,15 @@ class WorldBoss():
                 return self._next_boss
 
     def sequence_bosses(self, num: int) -> list:
-        # TODO - Docstring this
+        """
+        Get's the next `num` of spawns in sequence from the next boss forward.
+
+        Args:
+            num (int): The number of spawns into the future to count.
+
+        Returns:
+            list: [{"name": boss, "time": f'{_time} {(self._display_tz)} (+/- 1 minute)'}]
+        """
         _future_bosses: list[dict[str, Union[str, datetime]]] = []
         _next_boss: dict[str, datetime] | None = self.get_upcoming_boss()
         if _next_boss is not None and isinstance(_next_boss["time"], datetime):
@@ -192,7 +214,6 @@ class WorldBoss():
         if time_pattern > (len(self._time_pattern) - 1):
             raise ValueError(f"It appears you have provided a time pattern out of range 0 - {len(self._time_pattern)-1}")
         offset: timedelta = self._time_offsets[time_index]
-        # TODO - We have an anomaly that causes our times to "slowly" creep further into the future.
         spawn_time: datetime = start_time + offset
         return spawn_time
 
