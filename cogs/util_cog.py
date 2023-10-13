@@ -347,9 +347,9 @@ class Util(commands.Cog):
     async def git_pull(self, context: commands.Context, repo: str = _default_repo, branch: str = _default_branch):
         # TODO - Implement a git pull method to be used for cog edits
         import git
-        repo = git.Repo().init()  # type:ignore
-        res = git.remote.Remote(repo=repo, name="origin")  # type:ignore
-        res.pull(self._default_branch)  # type:ignore
+        repo = git.Repo().init()  # type: ignore
+        res = git.remote.Remote(repo=repo, name="origin")  # type: ignore
+        res.pull(branch)
         # import git
         # g = git.Git('git-repo')
         # g.pull('origin','branch-name')
