@@ -24,7 +24,6 @@ from asyncpraw.models import Subreddit
 
 import utils.asqlite as asqlite
 from sqlite3 import Row
-
 from discord.ext import commands, tasks
 
 from typing_extensions import Any
@@ -577,6 +576,8 @@ class Reddit_IS(commands.Cog):
 
     async def webhook_send(self, url: str, content: str) -> bool | None:
         """Sends content to the Discord Webhook url provided."""
+        # TODO - See about switching to channel,guilds and storing the values in the DB.
+        # Could check channels for NSFW tags and prevent NSFW subreddits from making it to those channels/etc.
         data = {"content": content, "username": self._user_name}
         result: ClientResponse = await self._sessions.post(url, json=data)
         if 200 <= result.status < 300:
@@ -624,11 +625,13 @@ class Reddit_IS(commands.Cog):
     @commands.command(help="List of subreddits", aliases=["rslist", "rsl"])
     async def list_subreddit(self, context: commands.Context):
         res: list[Any | dict[str, str]] = await _get_all_subreddits()
-        # TODO - Possibly place an * next to subreddits without a webhook?
         temp_list = []
         for entry in res:
             for name, webhook in entry.items():
-                sub_entry = f"**/r/**`{name}`"
+                emoji = "\U00002705"  # White Heavy Check Mark
+                if webhook is None:
+                    emoji = "\U0000274c"  # Negative Squared Cross Mark
+                sub_entry = f"{emoji} - **/r/**`{name}`"
                 temp_list.append(sub_entry)
 
         return await context.send(content="**__Current Subreddit List__:**\n" + "\n".join(temp_list))
