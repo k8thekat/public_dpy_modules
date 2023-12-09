@@ -20,13 +20,13 @@
 
 '''
 from __future__ import annotations
+# Discord Libs
 from discord import app_commands
 from discord.ext import commands
 import discord
 
 # Python Libs
 import os
-import logging
 import aiofiles
 
 import psutil
@@ -45,20 +45,18 @@ import unicodedata
 import inspect
 from typing import Union
 
-# Discord Libs
+# Local libs
+from utils import cog
 
 
-class Util(commands.Cog):
+class Util(cog.KumaCog):
     PATTERN: re.Pattern[str] = re.compile(
         r'`{3}(?P<LANG>\w+)?\n?(?P<CODE>(?:(?!`{3}).)+)\n?`{3}', flags=re.DOTALL | re.MULTILINE)
     _default_repo = "https://github.com/k8thekat/dpy_cogs"
     _default_branch = "main"
 
-    def __init__(self, bot: commands.Bot) -> None:
-        self._bot: commands.Bot = bot
-        self._name: str = os.path.basename(__file__).title()
-        self._logger = logging.getLogger()
-        self._logger.info(f'**SUCCESS** Initializing {self._name} ')
+    def __init__(self, bot: commands.Bot):
+        super().__init__(bot=bot)
 
     async def cog_load(self) -> None:
         self._prefix: str = self._bot.command_prefix  # type:ignore
@@ -191,16 +189,16 @@ class Util(commands.Cog):
         embed.timestamp = discord.utils.utcnow()
         await ctx.send(embed=embed)
 
-    @app_commands.command(name='clear')
+    @commands.hybrid_command(name='clear')
     @app_commands.default_permissions(manage_messages=True)
     @app_commands.describe(all='Default\'s to False, removes ALL messages from selected Channel regardless of who sent them when True.')
-    async def clear(self, interaction: discord.Interaction, channel: Union[discord.VoiceChannel, discord.TextChannel, discord.Thread, None], amount: app_commands.Range[int, 0, 100] = 15, all: bool = False):
+    async def clear(self, interaction: discord.Interaction | commands.Context, channel: Union[discord.VoiceChannel, discord.TextChannel, discord.Thread, None], amount: app_commands.Range[int, 0, 100] = 15, all: bool = False):
         """Cleans up Messages sent by anyone. Limit 100"""
-        await interaction.response.defer()
+        if isinstance(interaction, discord.Interaction):
+            await interaction.response.defer()
 
-        assert isinstance(
-            interaction.channel, (discord.VoiceChannel, discord.TextChannel, discord.Thread))
-        channel = channel or interaction.channel  # type:ignore
+        assert isinstance(interaction.channel, (discord.VoiceChannel, discord.TextChannel, discord.Thread))
+        channel = channel or interaction.channel
 
         if all:
             messages = await channel.purge(limit=amount, bulk=False)
@@ -265,7 +263,7 @@ class Util(commands.Cog):
     @commands.command(name='link')
     async def url_linking(self, context: commands.Context, var: str):
         """Provides a Useful URL based upon the var parameter"""
-        listing = {
+        listing: dict[str, str] = {
             # Gatekeeper Github Links
             "gatekeeper": "https://github.com/k8thekat/GatekeeperV2",
             "gk": "https://github.com/k8thekat/GatekeeperV2",
@@ -282,13 +280,11 @@ class Util(commands.Cog):
             "dpy_docs": "https://discordpy.readthedocs.io/en/stable/",
 
             # Gatekeeper Wiki Links
-            "wiki": "https://github.com/k8thekat/GatekeeperV2/wiki",
-            "commands": "https://github.com/k8thekat/GatekeeperV2/wiki/Commands",
-            "perms": "https://github.com/k8thekat/GatekeeperV2/wiki/Permissions",
-            "banners": "https://github.com/k8thekat/GatekeeperV2/wiki/Server-Banners",
-            "whitelist": "https://github.com/k8thekat/GatekeeperV2/wiki/Auto-Whitelisting",
-            "autowl": "https://github.com/k8thekat/GatekeeperV2/wiki/Auto-Whitelisting",
-            "wl": "https://github.com/k8thekat/GatekeeperV2/wiki/Auto-Whitelisting",
+            "gkwiki": "https://github.com/k8thekat/GatekeeperV2/wiki",
+            "gkcommands": "https://github.com/k8thekat/GatekeeperV2/wiki/Commands",
+            "gkperms": "https://github.com/k8thekat/GatekeeperV2/wiki/Permissions",
+            "gkbanners": "https://github.com/k8thekat/GatekeeperV2/wiki/Server-Banners",
+            "gkwl": "https://github.com/k8thekat/GatekeeperV2/wiki/Auto-Whitelisting",
 
             # Patreon/Donation Links
             "patreon": "https://www.patreon.com/Gatekeeperv2"}
@@ -306,7 +302,6 @@ class Util(commands.Cog):
         periods, e.g. tag.create for the create subcommand of the tag command
         or by spaces.
         """
-
         source_url = 'https://github.com/k8thekat/Kuma_Kuma'
         branch = 'main'
         if command is None:
@@ -327,6 +322,12 @@ class Util(commands.Cog):
             src = obj.callback.__code__
             module = obj.callback.__module__
             filename = src.co_filename
+            code_class = obj._cog
+
+            # Handles my seperate repo URLs. (Could store this as part of the cog class?)
+            # This requires you do define `repo_url` per script for files in a different parent directory than your bot.py
+            if code_class != None and hasattr(code_class, "repo_url"):
+                source_url = getattr(obj._cog, "repo_url")
 
         lines, firstlineno = inspect.getsourcelines(src)
         if not module.startswith('discord'):
@@ -335,9 +336,9 @@ class Util(commands.Cog):
                 return await context.send('Could not find source for command.')
 
             location = os.path.relpath(filename).replace('\\', '/')
+
         else:
             location = module.replace('.', '/') + '.py'
-            source_url = 'https://github.com/k8thekat/Kuma_Kuma'
             branch = 'main'
 
         final_url = f'<{source_url}/blob/{branch}/{location}#L{firstlineno}-L{firstlineno + len(lines) - 1}>'
