@@ -34,19 +34,15 @@ from io import StringIO
 import import_expression
 import time
 
-
+from utils import cog
 from utils.converter import CodeBlockConverter
 
 Dependencies = None
 
 
-class Eval(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
-        self._bot: commands.Bot = bot
-        self._name: str = os.path.basename(__file__).title()
-        self._logger = logging.getLogger()
-        self._logger.info(f'**SUCCESS** Initializing {self._name} ')
-
+class Eval(cog.KumaCog):
+    def __init__(self, bot: commands.Bot):
+        super().__init__(bot=bot)
     # def CharConvertor(self, char: Union[discord.Emoji, str]) -> Union[discord.Emoji, str]:
     #     if isinstance(char, str):
     #         return char.encode("unicode_escape").decode("ASCII")
