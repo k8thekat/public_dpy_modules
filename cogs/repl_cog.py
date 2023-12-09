@@ -30,13 +30,12 @@ import os
 import discord
 from discord.ext import commands
 
+from utils import cog
 
-class Repl(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
-        self._bot: commands.Bot = bot
-        self._name: str = os.path.basename(__file__).title()
-        self._logger = logging.getLogger()
-        self._logger.info(f'**SUCCESS** Initializing {self._name} ')
+
+class Repl(cog.KumaCog):
+    def __init__(self, bot: commands.Bot):
+        super().__init__(bot=bot)
 
     async def cog_load(self) -> None:
         self._sessions: set[int] = set()

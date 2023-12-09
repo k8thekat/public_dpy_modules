@@ -14,6 +14,8 @@ from pathlib import Path
 
 from utils.embed_paginator import BasePaginatorView
 
+from utils import cog
+
 ALLOWED_MENTIONS = discord.AllowedMentions.none()
 
 script_loc: Path = Path(__file__).parent
@@ -81,9 +83,9 @@ class TagEntry:
                 return TagEntry(**res)
 
 
-class TagsCog(commands.Cog):
+class TagsCog(cog.KumaCog):
     def __init__(self, bot: commands.Bot):
-        self.bot = bot
+        super().__init__(bot=bot)
 
     async def cog_load(self) -> None:
         async with asqlite.connect(DB_PATH) as db:
