@@ -588,34 +588,28 @@ class Reddit_IS(cog.KumaCog):
         """
         stime: float = time.time()
         res: ClientResponse | Literal[False] = await self._get_img(img_url=img_url)
-        print("got the image")
         if res == False:
-            print("Failed to get_img")
+            self._logger.error(f"Failed to `_get_img` {img_url}")
             return False
-        # var = await res.read()
-        # print(type(var), var[:10])
 
         source: Image = IMG.open(io.BytesIO(await res.read()))
         source = self.IMAGE_COMP._convert(image=source)
         res_image: tuple[Image, Image | None] = self.IMAGE_COMP._image_resize(source=source)
         source = self.IMAGE_COMP._filter(image=res_image[0])
-        print("getting edges")
         edges: list[tuple[int, int]] | None = self.IMAGE_COMP._edge_detect(image=source)
         if edges == None:
-            print("Found no Edges")
             return False
         # We set our max match req to do a full comparison via len of edges. eg. 500 * 10% (50 points)
         # We also set our min match req before we "abort"             eg. (50 * 90%) / 100 (40 points)
         # Track our failures and break if we exceed the diff.                    eg. 50-40 (10 points)
         match_req: int = int((len(edges) / self.IMAGE_COMP.sample_percent))
         min_match_req: int = int((match_req * self.IMAGE_COMP.match_percent) / 100)
-        print("len of edges", len(edges), "10percent=", match_req, "min_match", min_match_req)
         for array in self._pixel_cords_array:
             match_count: int = 0
             failures: int = 0
             # [(1,1),(2,2)(2,3)]
             for cords in range(0, len(edges), self.IMAGE_COMP.sample_percent):
-                if match_count > match_req:
+                if match_count >= min_match_req:
                     match: bool = await self.full_edge_comparison(array=array, edges=edges)
                     if match == False:
                         break
@@ -650,7 +644,7 @@ class Reddit_IS(cog.KumaCog):
         match_req: int = int((len(edges) / self.IMAGE_COMP.match_percent) / 100)
         min_match_req: int = len(edges) - match_req
         for cords in edges:
-            if match_count > match_req:
+            if match_count >= min_match_req:
                 return True
             elif failures > min_match_req:
                 return False
@@ -878,7 +872,7 @@ class Reddit_IS(cog.KumaCog):
         return await context.send(content=f"The Scrapper loop is {status}", delete_after=self._message_timeout)
 
     @commands.hybrid_command(help="Sha256 comparison of two URLs", aliases=["sha256", "hash"])
-    async def compare_images(self, context: commands.Context, url_one: str, url_two: str | None):
+    async def hash_comparison(self, context: commands.Context, url_one: str, url_two: str | None):
         failed: bool = False
         res = await self._get_img(img_url=url_one)
         if res == False:
@@ -897,6 +891,16 @@ class Reddit_IS(cog.KumaCog):
 
         if failed:
             return await context.send(content=f"Unable to hash the URLs provided.", delete_after=self._message_timeout)
+
+    @commands.hybrid_command(help="Edge comparison of two URLs", aliases=["edge"])
+    async def edge_comparison(self, context: commands.Context, url_one: str, url_two: str):
+        res_one: ClientResponse | Literal[False] = await self._get_img(img_url=url_one)
+        res_two: ClientResponse | Literal[False] = await self._get_img(img_url=url_two)
+        if res_one and res_two != False:
+            img_one: Image = IMG.open(io.BytesIO(await res_one.read()))
+            img_two: Image = IMG.open(io.BytesIO(await res_two.read()))
+            self.IMAGE_COMP.compare(source=img_one, comparison=img_two)
+            return await context.send(f"{self.IMAGE_COMP.results}")
 
 
 async def setup(bot: commands.Bot):
