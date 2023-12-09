@@ -24,7 +24,6 @@ from re import Pattern, compile
 from typing import Union
 import os
 import logging
-from attr import field
 
 import discord
 from discord import Embed
@@ -32,20 +31,16 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.ui.view import ReactionRoleView
+from utils import cog
 
 interaction = discord.Interaction
 
 
-class AutoRole(commands.Cog):
+class AutoRole(cog.KumaCog):
+    def __init__(self, bot: commands.Bot):
+        super().__init__(bot=bot)
 
     REACTION_ROLES_BUTTON_REGEX: Pattern[str] = compile(r'RR::BUTTON::(?P<ROLE_ID>\d+)')
-
-    def __init__(self, bot: commands.Bot) -> None:
-        self._bot: commands.Bot = bot
-        self._name: str = os.path.basename(__file__).title()
-        self._logger = logging.getLogger()
-        self._logger.info(f'**SUCCESS** Initializing {self._name} ')
-        super().__init__()
 
     @app_commands.command(name='role_embed')
     async def role_embed(self, interaction: discord.Interaction, channel: Union[discord.TextChannel, None], role: discord.Role, field_body: str, emoji: Union[str, None]) -> None:
