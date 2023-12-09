@@ -4,3 +4,4 @@ __pycache__
 *.ini
 
 cogs/reddit.json
+local.py
