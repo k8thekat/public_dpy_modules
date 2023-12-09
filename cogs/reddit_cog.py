@@ -1,32 +1,31 @@
 # Reddit Image Scraper cog
-import os
-import logging
-from typing import TYPE_CHECKING, Union
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from configparser import ConfigParser
+import io
 from pathlib import Path
+from PIL import Image as IMG
+from PIL.Image import Image
+import discord
 import pytz
 import json
 import hashlib
 import sys
-
 import tzlocal
 import time
 import aiohttp
 from aiohttp import ClientResponse
-
-import urllib.request
-import urllib.error
-
+from typing import TYPE_CHECKING, TypedDict, Union, Literal, reveal_type
+from typing_extensions import Any
 from fake_useragent import UserAgent
 import asyncpraw
 from asyncpraw.models import Subreddit
-
 import utils.asqlite as asqlite
 from sqlite3 import Row
 from discord.ext import commands, tasks
+from discord import app_commands
 
-from typing_extensions import Any
+from utils import cog
+from utils import ImageComp
 
 
 script_loc: Path = Path(__file__).parent
@@ -47,6 +46,12 @@ CREATE TABLE IF NOT EXISTS webhook (
     name TEXT COLLATE NOCASE NOT NULL UNIQUE,
     url TEXT NOT NULL UNIQUE
 )"""
+
+
+class Webhook(TypedDict):
+    name: str
+    url: str
+    id: int
 
 
 async def _get_subreddit(name: str) -> Row | None:
@@ -115,10 +120,12 @@ async def _del_subreddit(name: str) -> int | None:
                 # return res if not None else None
 
 
-async def _get_all_subreddits() -> list[Union[Any, dict[str, str]]]:
+async def _get_all_subreddits(webhooks: bool = True) -> list[str | Union[Any, str, dict[str, str | None]]]:
     """
-    Gets all Row entries of the Subreddit Table.
+    Gets all Row entries of the Subreddit Table. Typically including the webhook IDs.
 
+    Args:
+        webooks(bool): Set to False to not include webhook IDs when getting subreddits. Defaults True.
     Returns:
         list[Union[Any, dict[str, str]]]: An empty list if no entries in the Subreddit table.  
 
@@ -131,11 +138,17 @@ async def _get_all_subreddits() -> list[Union[Any, dict[str, str]]]:
             res = await cur.fetchall()
             if res is None or len(res) == 0:
                 return []
-            for entry in res:
-                res_webhook = await _get_webhook(arg=entry["webhook_id"])
-                if res_webhook is not None:
-                    res_webhook = res_webhook["url"]
-                _subreddits.append({entry["name"]: res_webhook})
+
+            if webhooks == False:
+                _subs: list[str] = [entry["name"] for entry in res]
+                return _subs
+            else:
+                for entry in res:
+                    res_webhook = await _get_webhook(arg=entry["webhook_id"])
+                    if res_webhook is not None:
+                        res_webhook = res_webhook["url"]
+                    _subreddits.append({entry["name"]: res_webhook})
+
         return _subreddits
 
 
@@ -224,7 +237,9 @@ async def _add_webhook(name: str, url: str) -> Row | None:
 
 async def _del_webook(arg: Union[int, str]) -> int | None:
     """
-    Delete a Row matching the args from the Webhook Table.
+    Delete a Row matching the args from the Webhook Table.\n
+
+    Converts string numbers into `ints` if they are digits.
 
     Args:
         arg (Union[int, str]): Supports Webhook ID, Name or URL.
@@ -232,6 +247,8 @@ async def _del_webook(arg: Union[int, str]) -> int | None:
     Returns:
         int | None: Row Count
     """
+    if isinstance(arg, str) and arg.isdigit():
+        arg = int(arg)
     res = await _get_webhook(arg=arg)
     if res is None:
         return None
@@ -246,14 +263,14 @@ async def _del_webook(arg: Union[int, str]) -> int | None:
                 return cur.get_cursor().rowcount
 
 
-async def _get_all_webhooks() -> list[Any] | list[dict[str, str | int]]:
+async def _get_all_webhooks() -> list[None | Webhook]:
     """
     Gets all Webhook Table Rows.
 
     Returns:
         list[Any] | list[dict[str, str | int]]: Structure `[{"name": str , "url": str , "id": int}]`
     """
-    _webhooks: list[dict[str, Union[str, int]]] = []
+    _webhooks: list[None | Webhook] = []
     async with asqlite.connect(DB_PATH) as db:
         async with db.cursor() as cur:
             await cur.execute("""SELECT name, id, url FROM webhook""")
@@ -261,32 +278,27 @@ async def _get_all_webhooks() -> list[Any] | list[dict[str, str | int]]:
             if res is None or len(res) == 0:
                 return []
             for entry in res:
-                _webhooks.append({"name": entry["name"], "url": entry["url"], "id": entry["id"]})
+                webhook: Webhook = {"name": entry["name"], "url": entry["url"], "id": entry["id"]}
+                _webhooks.append(webhook)
+                # _webhooks.append({"name": entry["name"], "url": entry["url"], "id": entry["id"]})
         await db.close()
         return _webhooks
 
 
-class Reddit_IS(commands.Cog):
+class Reddit_IS(cog.KumaCog):
     def __init__(self, bot: commands.Bot) -> None:
-        self._bot: commands.Bot = bot
-        self._name: str = os.path.basename(__file__).title()
-        self._logger = logging.getLogger()
-        self._logger.info(f'**SUCCESS** Initializing {self._name} ')
+        super().__init__(bot=bot)
         self._file_dir = Path(__file__).parent
         self._message_timeout = 120
 
         self._interrupt_loop: bool = False
+        self._delay_loop: float = 1
+        self._loop_iterations: int = 0
 
         self._sessions = aiohttp.ClientSession()
 
         # Used to possible keep track of edits to the DB to prevent un-needed DB lookups on submissions.
         self._recent_edit: bool = False
-
-        # # PRAW information
-        # self._reddit_secret = ""
-        # self._reddit_client_id = ""
-        # self._reddit_username = ""
-        # self._reddit_password = ""
 
         # Image hash and Url storage
         self._json: Path = self._file_dir.joinpath("reddit.json")
@@ -294,12 +306,15 @@ class Reddit_IS(commands.Cog):
         self._hash_list: list = []  # []  # Recently hashed images
         self._url_prefixs: tuple[str, ...] = ("http://", "https://")
 
+        # Edge Detection comparison.
+        self._pixel_cords_array: list[list[tuple[int, int]]] = []
+        self.IMAGE_COMP = ImageComp.Image_Comparison()
+
         # This is how many posts in each subreddit the script will look back.
         # By default the subreddit script looks at subreddits in `NEW` listing order.
         self._submission_limit = 30
         self._subreddits: list[Union[Any, dict[str, Union[str, None]]]] = []  # {"subreddit" : "webhook_url"}
 
-        # TODO - Set default last check as posix and write out blank values to json file. See line 221
         self._last_check: datetime = datetime.now(tz=timezone.utc)
 
         # This forces the timezone to change based upon your OS for better readability in your prints()
@@ -382,6 +397,12 @@ class Reddit_IS(commands.Cog):
             raise ValueError("Failed to load .ini")
 
     def json_load(self) -> datetime:
+        """
+        Loads our last_check, url_list and hash_list from a json file; otherwise creates the file and sets our intial last_check time.
+
+        Returns:
+            datetime: The last check unix timestamp value from the json file.
+        """
         last_check: datetime = datetime.now(tz=timezone.utc)
 
         if self._json.is_file() is False:
@@ -415,8 +436,10 @@ class Reddit_IS(commands.Cog):
         return last_check
 
     def json_save(self) -> None:
-        """I generate an upper limit of the list based upon the subreddits times the submissin search limit;
-         this allows for configuration changes and not having to scale the limit of the list"""
+        """
+        I generate an upper limit of the list based upon the subreddits times the submissin search limit; 
+        this allows for configuration changes and not having to scale the limit of the list
+        """
         _temp_url_list: list[str] = []
         _temp_hash_list: list[str] = []
 
@@ -445,6 +468,14 @@ class Reddit_IS(commands.Cog):
             # 'Saving our settings...'
             jfile.close()
 
+    async def autocomplete_subreddit(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        res: list[str | Any | dict[str, str | None]] = await _get_all_subreddits(webhooks=False)
+        return [app_commands.Choice(name=subreddit, value=subreddit) for subreddit in res if type(subreddit) == str and current.lower() in subreddit.lower()][:25]
+
+    async def autocomplete_webhook(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        res: list[None | Webhook] = await _get_all_webhooks()
+        return [app_commands.Choice(name=webhook["name"], value=webhook["name"]) for webhook in res if webhook is not None and current.lower() in webhook["name"].lower()][:25]
+
     @tasks.loop(minutes=5)
     async def check_loop(self) -> None:
         if self._recent_edit:
@@ -465,7 +496,6 @@ class Reddit_IS(commands.Cog):
     async def subreddit_media_handler(self, last_check: datetime) -> int:
         """Iterates through the subReddits Submissions and sends media_metadata"""
         count = 0
-        found_post = False
         img_url: Union[str, None] = None
         img_url_to_send: list[str] = []
 
@@ -481,7 +511,6 @@ class Reddit_IS(commands.Cog):
 
                 res: int = await self.check_subreddit(subreddit=sub)
                 if res != 200:
-                    # await _del_subreddit(name= sub)
                     self._logger.warn(f"Failed to find the subreddit /r/{sub}, skipping entry. Value: {res}")
                     continue
 
@@ -489,13 +518,14 @@ class Reddit_IS(commands.Cog):
                 # limit - controls how far back to go (true limit is 100 entries)
                 async for submission in cur_subreddit.new(limit=self._submission_limit):
                     post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
-                    found_post = False
+                    # found_post = False
                     # self._logger.info(f'Checking subreddit {sub} -> submission title: {submission.title} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
 
                     if post_time >= last_check:  # The more recent time will be greater than..
                         # reset our img list
                         img_url_to_send = []
                         # Usually submissions with multiple images will be using this `attr`
+                        # TODO - Support reddit gallery (temp url) https://www.reddit.com/gallery/18dx6q0
                         if hasattr(submission, "media_metadata"):
                             for key, img in submission.media_metadata.items():
                                 # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': LN 105}
@@ -526,20 +556,120 @@ class Reddit_IS(commands.Cog):
                                     continue
 
                                 self._url_list.append(img_url)
-                                status: bool = await self.hash_process(img_url)
+
+                                # status: bool = await self.hash_process(img_url)
+                                self._logger.info("checking edges")
+                                status: bool = await self.partial_edge_comparison(img_url=img_url)
 
                                 if status:
-                                    found_post = True
+                                    # found_post = True
                                     count += 1
                                     await self.webhook_send(url=url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
-                                    time.sleep(1)  # Soft buffer delay between sends to prevent rate limiting.
 
-                if found_post == False:
-                    self._logger.info(f'No new Submissions in {sub} since {last_check.ctime()}(UTC)')
+                                    time.sleep(self._delay_loop)  # Soft buffer delay between sends to prevent rate limiting.
+
+                # if found_post == False:
+                    # self._logger.info(f'No new Submissions in {sub} since {last_check.ctime()}(UTC)')
 
         return count
 
-    async def hash_url(self, img_url: str):
+    async def partial_edge_comparison(self, img_url: str) -> bool:
+        """
+        Uses aiohttp to `GET` the image url, we modify/convert the image via PIL and get the edges as a list of tuples.\n
+        We take a partial of the edges list and see if the entries exists in `_pixel_cords_array`. \n
+
+        If a partial match is found; we run `full_edge_comparison`. If no full match found; we add the edges to `_pixel_cords_array`.
+
+        Args:
+            img_url (str): Web url to Image.
+
+        Returns:
+            bool: Returns `False` on any failed methods/checks or the array already exists else returns `True`.
+        """
+        stime: float = time.time()
+        res: ClientResponse | Literal[False] = await self._get_img(img_url=img_url)
+        print("got the image")
+        if res == False:
+            print("Failed to get_img")
+            return False
+        # var = await res.read()
+        # print(type(var), var[:10])
+
+        source: Image = IMG.open(io.BytesIO(await res.read()))
+        source = self.IMAGE_COMP._convert(image=source)
+        res_image: tuple[Image, Image | None] = self.IMAGE_COMP._image_resize(source=source)
+        source = self.IMAGE_COMP._filter(image=res_image[0])
+        print("getting edges")
+        edges: list[tuple[int, int]] | None = self.IMAGE_COMP._edge_detect(image=source)
+        if edges == None:
+            print("Found no Edges")
+            return False
+        # We set our max match req to do a full comparison via len of edges. eg. 500 * 10% (50 points)
+        # We also set our min match req before we "abort"             eg. (50 * 90%) / 100 (40 points)
+        # Track our failures and break if we exceed the diff.                    eg. 50-40 (10 points)
+        match_req: int = int((len(edges) / self.IMAGE_COMP.sample_percent))
+        min_match_req: int = int((match_req * self.IMAGE_COMP.match_percent) / 100)
+        print("len of edges", len(edges), "10percent=", match_req, "min_match", min_match_req)
+        for array in self._pixel_cords_array:
+            match_count: int = 0
+            failures: int = 0
+            # [(1,1),(2,2)(2,3)]
+            for cords in range(0, len(edges), self.IMAGE_COMP.sample_percent):
+                if match_count > match_req:
+                    match: bool = await self.full_edge_comparison(array=array, edges=edges)
+                    if match == False:
+                        break
+                    else:
+                        return False
+                elif failures > (match_req - min_match_req):
+                    break
+                elif edges[cords] not in array:
+                    failures += 1
+                else:
+                    match_count += 1
+
+        # TODO - Store this array to a file for future reference.
+        self._pixel_cords_array.append(edges)
+        self._etime: float = (time.time() - stime)
+        print("comparsion time", self._etime)
+        return True
+
+    async def full_edge_comparison(self, array: list[tuple[int, int]], edges: list[tuple[int, int]]) -> bool:
+        """
+        Similar to `partial_edge_comparison` but we use the full list of the image edges against our array
+
+        Args:
+            array (list[tuple[int, int]]): List of tuple's containing pixel cords. (X,Y)
+            edges (list[tuple[int, int]]): List of tuple's containing pixel cords. (X,Y)
+
+        Returns:
+            bool: Returns `False` if the pixel cords are not in the array else `True` if the pixel cords are in the array.
+        """
+        failures: int = 0
+        match_count: int = 0
+        match_req: int = int((len(edges) / self.IMAGE_COMP.match_percent) / 100)
+        min_match_req: int = len(edges) - match_req
+        for cords in edges:
+            if match_count > match_req:
+                return True
+            elif failures > min_match_req:
+                return False
+            elif cords not in array:
+                failures += 1
+            else:
+                match_count += 1
+        return False
+
+    async def _get_img(self, img_url: str) -> ClientResponse | Literal[False]:
+        """
+        Calls a `.get()` method to get the image data.
+
+        Args:
+            img_url (str): Web URL for the image.
+
+        Returns:
+            ClientResponse | Literal[False]: Returns data if it exists otherwise bool.
+        """
         # req = urllib.request.Request(url=img_url, headers={'User-Agent': str(self._User_Agent)})
 
         try:
@@ -556,43 +686,77 @@ class Reddit_IS(commands.Cog):
             return False
 
         if "image" in req.headers["Content-Type"]:
-            my_hash = hashlib.sha256(await req.read()).hexdigest()
-            return my_hash
+            return req
 
         else:  # Failed to find a 'image'
             self._logger.warn(f'URL: {img_url} is not an image -> {req.headers}')
             return False
 
     async def hash_process(self, img_url: str) -> bool:
-        """Checks the Hash of the supplied url against our hash list."""
-        my_hash = await self.hash_url(img_url=img_url)
+        """
+        Checks the Hash of the supplied url against our hash list.
+
+        Args:
+            img_url (str): Web URL for the image.
+        Returns:
+            bool: `True` if the sha256 is not in our list; otherwise `False`.
+        """
+        res = await self._get_img(img_url=img_url)
+        my_hash = None
+        if isinstance(res, bytes):
+            my_hash = hashlib.sha256(await res.read()).hexdigest()
         if my_hash not in self._hash_list or my_hash != False:
             self._hash_list.append(my_hash)
             return True
 
         else:
-            self._logger.info('Found a duplicate hash...')
+            # self._logger.info('Found a duplicate hash...')
             return False
 
     async def webhook_send(self, url: str, content: str) -> bool | None:
-        """Sends content to the Discord Webhook url provided."""
-        # TODO - See about switching to channel,guilds and storing the values in the DB.
+        """
+        Sends content to the Discord Webhook url provided.
+
+        Args:
+            url(str): The Webhook URL to use.
+            content(str): The content to send to the url.
+        Returns:
+            bool | None: Returns `False` due to status code not in range `200 <= result.status < 300` else returns `None`
+        """
         # Could check channels for NSFW tags and prevent NSFW subreddits from making it to those channels/etc.
+
         data = {"content": content, "username": self._user_name}
         result: ClientResponse = await self._sessions.post(url, json=data)
         if 200 <= result.status < 300:
             return
+
         else:
-            self._logger.warn(f"Webhook not sent with {result.status}, response:\n{result.json()}")
+            # Attempting to dynamically adjust the delay in sending messages.
+            if result.status == 429:
+                self._delay_loop += .1
+
+            self._loop_iterations += 1
+            if self._loop_iterations > 10:
+                self._delay_loop -= .1
+                self._loop_iterations = 0
+
+            self._logger.warn(f"Webhook not sent with {result.status} - delay {self._delay_loop}s, response:\n{result.json()}")
             return False
 
     async def check_subreddit(self, subreddit: str) -> int:
-        """Attempts a `GET` request of the passed in subreddit. Returns status"""
+        """
+        Attempts a `GET` request of the passed in subreddit.
+        Args:
+            subreddit(str): The subreddit to check. Do not include the `/r/`. eg `NoStupidQuestions` 
+        Returns:
+            int: Returns status code
+        """
         temp_url: str = f"https://www.reddit.com/r/{subreddit}/"
         check: ClientResponse = await self._sessions.head(url=temp_url)
         return check.status
 
-    @commands.command(help="Add a subreddit to the DB", aliases=["rsadd", "rsa"])
+    @commands.hybrid_command(help="Add a subreddit to the DB", aliases=["rsadd", "rsa"])
+    @app_commands.describe(sub="The sub Reddit name.")
     async def add_subreddit(self, context: commands.Context, sub: str):
 
         status: int = await self.check_subreddit(subreddit=sub)
@@ -607,14 +771,19 @@ class Reddit_IS(commands.Cog):
         else:
             return await context.send(content=f"Unable to add `/r/{sub}` to the database.", delete_after=self._message_timeout)
 
-    @commands.command(help="Remove a subreddit from the DB", aliases=["rsdel", "rsd"])
+    @commands.hybrid_command(help="Remove a subreddit from the DB", aliases=["rsdel", "rsd"])
+    @app_commands.describe(sub="The sub Reddit name.")
+    @app_commands.autocomplete(sub=autocomplete_subreddit)
     async def del_subreddit(self, context: commands.Context, sub: str):
         res: int | None = await _del_subreddit(name=sub)
         self._recent_edit = True
         await context.send(content=f"Removed {res} {'subreddit' if res else ''}", delete_after=self._message_timeout)
 
-    @commands.command(help="Update a subreddit with a Webhook", aliases=["rsupdate", "rsu"])
-    async def update_subreddit(self, context: commands.Context, sub: str, webhook: Union[str, int]):
+    @commands.hybrid_command(help="Update a subreddit with a Webhook", aliases=["rsupdate", "rsu"])
+    @app_commands.describe(sub="The sub Reddit name.")
+    @app_commands.autocomplete(sub=autocomplete_subreddit)
+    @app_commands.autocomplete(webhook=autocomplete_webhook)
+    async def update_subreddit(self, context: commands.Context, sub: str, webhook: str):
         res: Row | None = await _update_subreddit(name=sub, webhook=webhook)
         if res is None:
             return await context.send(content=f"Unable to update `/r/{sub}`.", delete_after=self._message_timeout)
@@ -622,7 +791,7 @@ class Reddit_IS(commands.Cog):
             self._recent_edit = True
             return await context.send(content=f"Updated `/r/{sub}` in our database.", delete_after=self._message_timeout)
 
-    @commands.command(help="List of subreddits", aliases=["rslist", "rsl"])
+    @commands.hybrid_command(help="List of subreddits", aliases=["rslist", "rsl"])
     async def list_subreddit(self, context: commands.Context):
         res: list[Any | dict[str, str]] = await _get_all_subreddits()
         temp_list = []
@@ -636,7 +805,9 @@ class Reddit_IS(commands.Cog):
 
         return await context.send(content="**__Current Subreddit List__:**\n" + "\n".join(temp_list))
 
-    @commands.command(help="Info about a subreddit", aliases=["rsinfo", "rsi"])
+    @commands.hybrid_command(help="Info about a subreddit", aliases=["rsinfo", "rsi"])
+    @app_commands.describe(sub="The sub Reddit name.")
+    @app_commands.autocomplete(sub=autocomplete_subreddit)
     async def info_subreddit(self, context: commands.Context, sub: str):
         res: Row | None = await _get_subreddit(name=sub)
         if res is not None:
@@ -648,7 +819,7 @@ class Reddit_IS(commands.Cog):
         else:
             return await context.send(content=f"Unable to find /r/`{sub} in the database.", delete_after=self._message_timeout)
 
-    @commands.command(help="Add a webhook to the database.", aliases=["rswhadd", "rswha"])
+    @commands.hybrid_command(help="Add a webhook to the database.", aliases=["rswhadd", "rswha"])
     async def add_webhook(self, context: commands.Context, webhook_name: str, webhook_url: str):
         data: str = f"Testing webhook {webhook_name}"
         success: bool | None = await self.webhook_send(url=webhook_url, content=data)
@@ -662,21 +833,23 @@ class Reddit_IS(commands.Cog):
         else:
             return await context.send(content=f"Unable to add {webhook_url} to the database.", delete_after=self._message_timeout)
 
-    @commands.command(help="Remove a webhook from the database.", aliases=["rswhdel", "rswhd"])
-    async def del_webhook(self, context: commands.Context, webhook: Union[int, str]):
+    @commands.hybrid_command(help="Remove a webhook from the database.", aliases=["rswhdel", "rswhd"])
+    @app_commands.autocomplete(webhook=autocomplete_webhook)
+    async def del_webhook(self, context: commands.Context, webhook: str):
         res: int | None = await _del_webook(arg=webhook)
         self._recent_edit = True
         await context.send(content=f"Removed {res} {'webhook' if res else ''}", delete_after=self._message_timeout)
 
-    @commands.command(help="List all webhook in the database.", aliases=["rswhlist", "rswhl"])
+    @commands.hybrid_command(help="List all webhook in the database.", aliases=["rswhlist", "rswhl"])
     async def list_webhook(self, context: commands.Context):
-        res: list | None = await _get_all_webhooks()
-        return await context.send(content="**Webhooks**:\n" + "\n".join([f"**{entry['name']}** ({entry['id']})\n> `{entry['url']}`\n" for entry in res]), delete_after=self._message_timeout)
+        res: list[Webhook | None] = await _get_all_webhooks()
+        return await context.send(content="**Webhooks**:\n" + "\n".join([f"**{entry['name']}** ({entry['id']})\n> `{entry['url']}`\n" for entry in res if entry is not None]), delete_after=self._message_timeout)
 
-    @commands.command(help="Start/Stop the Scrapper loop", aliases=["rsloop"])
-    async def scrapper_loop(self, context: commands.Context, util: str):
+    @commands.hybrid_command(help="Start/Stop the Scrapper loop", aliases=["rsloop"])
+    async def scrape_loop(self, context: commands.Context, util: Literal["start", "stop", "restart"]):
         start: list[str] = ["start", "on", "run"]
         end: list[str] = ["stop", "off", "end"]
+        restart: list[str] = ["restart", "reboot", "cycle"]
         status: str = ""
 
         if util in start:
@@ -693,19 +866,26 @@ class Reddit_IS(commands.Cog):
                 status = "stopping."
             else:
                 status = "not currently running."
+
+        elif util in restart:
+            # Force cancel and start the loop. Clean up any open sessions.
+            self.check_loop.cancel()
+            await self._sessions.close()
+            self.check_loop.start()
+            status = "restarting."
         else:
             return await context.send(content=f"You must use these words {','.join(start)} | {','.join(end)}", delete_after=self._message_timeout)
         return await context.send(content=f"The Scrapper loop is {status}", delete_after=self._message_timeout)
 
-    @commands.command(help="Sha256 comparison of two URLs", aliases=["sha256", "hash"])
+    @commands.hybrid_command(help="Sha256 comparison of two URLs", aliases=["sha256", "hash"])
     async def compare_images(self, context: commands.Context, url_one: str, url_two: str | None):
         failed: bool = False
-        res = await self.hash_url(img_url=url_one)
+        res = await self._get_img(img_url=url_one)
         if res == False:
             failed = True
 
         elif url_two is not None:
-            res_two = await self.hash_url(img_url=url_two)
+            res_two = await self._get_img(img_url=url_two)
             if res_two == False:
                 failed = True
             elif res == res_two:
