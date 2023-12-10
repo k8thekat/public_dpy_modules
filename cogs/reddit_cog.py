@@ -532,67 +532,73 @@ class Reddit_IS(cog.KumaCog):
                     post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
                     # found_post = False
                     # self._logger.info(f'Checking subreddit {sub} -> submission title: {submission.title} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
+                    if post_time < last_check:
+                        continue
+                    # if post_time >= last_check:  # The more recent time will be greater than..
+                    # reset our img list
+                    img_url_to_send = []
+                    # Usually submissions with multiple images will be using this `attr`
+                    if hasattr(submission, "media_metadata"):
+                        for key, img in submission.media_metadata.items():
+                            # for key, img in submission.media_metadata.items():
+                            # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': LN 105}
+                            # This allows us to only get Images.
+                            if "e" in img and img["e"] == 'Image':
+                                # example 's': {'y': 2340, 'x': 1080, 'u': 'https://preview.redd.it/0u8xnxknijha1.jpg?width=1080&format=pjpg&auto=webp&v=enabled&s=04e505ade5889f6a5f559dacfad1190446607dc4'}, 'id': '0u8xnxknijha1'}
+                                # img_url = img["s"]["u"]
+                                img_url_to_send.append(img["s"]["u"])
+                                continue
 
-                    if post_time >= last_check:  # The more recent time will be greater than..
-                        # reset our img list
-                        img_url_to_send = []
-                        # Usually submissions with multiple images will be using this `attr`
-                        if hasattr(submission, "media_metadata"):
-                            for key, img in submission.media_metadata.items():
-                                # for key, img in submission.media_metadata.items():
-                                # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': LN 105}
-                                # This allows us to only get Images.
-                                if "e" in img and img["e"] == 'Image':
-                                    # example 's': {'y': 2340, 'x': 1080, 'u': 'https://preview.redd.it/0u8xnxknijha1.jpg?width=1080&format=pjpg&auto=webp&v=enabled&s=04e505ade5889f6a5f559dacfad1190446607dc4'}, 'id': '0u8xnxknijha1'}
-                                    # img_url = img["s"]["u"]
-                                    img_url_to_send.append(img["s"]["u"])
-                                    continue
-
-                                else:
-                                    continue
-
-                        elif hasattr(submission, "url_overridden_by_dest"):
-                            if submission.url_overridden_by_dest.startswith(self._url_prefixs):
-                                img_url_to_send.append(submission.url_overridden_by_dest)
                             else:
                                 continue
 
+                    elif hasattr(submission, "url_overridden_by_dest"):
+                        if submission.url_overridden_by_dest.startswith(self._url_prefixs):
+                            img_url_to_send.append(submission.url_overridden_by_dest)
                         else:
                             continue
 
-                        if len(img_url_to_send) > 0:
-                            temp_url_to_send: list[str] = []
-                            for img_url in img_url_to_send:
-                                # TODO - Support reddit gallery (temp url) https://www.reddit.com/gallery/18dx6q0
-                                if img_url.find("gallery") != -1:
-                                    my_file: io.TextIOWrapper = open('dump.txt', "w")
-                                    my_file.write(f"{dir(submission)}")
-                                    my_file.close()
+                    else:
+                        continue
 
-                                    gallery: list[str] | Literal[False] = await self._get_gallery_urls(img_url=img_url)
-                                    if gallery == False:
-                                        continue
-                                    for g_url in gallery:
-                                        temp_url_to_send.append(g_url)
-                                else:
-                                    temp_url_to_send.append(img_url)
+                    if len(img_url_to_send) > 0:
+                        temp_url_to_send: list[str] = []
+                        for img_url in img_url_to_send:
+                            # TODO - Support reddit gallery (temp url) https://www.reddit.com/gallery/18dx6q0
+                            if img_url.find("gallery") != -1:
+                                my_file: io.TextIOWrapper = open('dump.txt', "w")
+                                my_file.write(f"{dir(submission)}")
+                                my_file.close()
 
-                            for img_url in temp_url_to_send:
-                                if self._interrupt_loop:
-                                    return count
-                                elif img_url in self._url_list:
+                                gallery: list[str] | Literal[False] = await self._get_gallery_urls(img_url=img_url)
+                                if gallery == False:
                                     continue
 
-                                status: bool = await self.hash_process(img_url)
-                                if status == False:
-                                    status: bool = await self.partial_edge_comparison(img_url=img_url)
+                                for g_url in gallery:
+                                    temp_url_to_send.append(g_url)
 
-                                self._url_list.append(img_url)
-                                if status:
-                                    count += 1
-                                    await self.webhook_send(url=url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
-                                    # Soft buffer delay between sends to prevent rate limiting.
-                                    time.sleep(self._delay_loop)
+                            # We are skipping gif urls.
+                            elif img_url.find("gifs") != -1:
+                                continue
+                            else:
+                                temp_url_to_send.append(img_url)
+
+                        for img_url in temp_url_to_send:
+                            if self._interrupt_loop:
+                                return count
+                            if img_url in self._url_list:
+                                continue
+
+                            status: bool = await self.hash_process(img_url)
+                            if status == False:
+                                status: bool = await self.partial_edge_comparison(img_url=img_url)
+
+                            self._url_list.append(img_url)
+                            if status:
+                                count += 1
+                                await self.webhook_send(url=url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
+                                # Soft buffer delay between sends to prevent rate limiting.
+                                time.sleep(self._delay_loop)
 
         return count
 
@@ -995,7 +1001,7 @@ class Reddit_IS(cog.KumaCog):
             # Re open a session and start the loop again.
             self.check_loop.cancel()
             await self._sessions.close()
-            self._sessions = aiohttp.ClientSession()
+            # self._sessions = aiohttp.ClientSession()
             self.check_loop.start()
             status = "restarting."
         else:
