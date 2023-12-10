@@ -23,6 +23,7 @@ import utils.asqlite as asqlite
 from sqlite3 import Row
 from discord.ext import commands, tasks
 from discord import app_commands
+import struct
 
 from utils import cog
 from utils import ImageComp
@@ -307,7 +308,8 @@ class Reddit_IS(cog.KumaCog):
         self._url_prefixs: tuple[str, ...] = ("http://", "https://")
 
         # Edge Detection comparison.
-        self._pixel_cords_array: list[list[tuple[int, int]]] = []
+        self._array_bin: Path = self._file_dir.joinpath("array.bin")
+        self._pixel_cords_array: list[bytes] = []
         self.IMAGE_COMP = ImageComp.Image_Comparison()
 
         # This is how many posts in each subreddit the script will look back.
@@ -340,7 +342,7 @@ class Reddit_IS(cog.KumaCog):
             Creates`reddit.json`if not present and Gets URL and Hash lists.
 
             Creates our _subreddit list.
-            """
+        """
         # Setup our DB tables
         async with asqlite.connect(DB_PATH) as db:
             await db.execute(SUBREDDIT_SETUP_SQL)
@@ -355,22 +357,32 @@ class Reddit_IS(cog.KumaCog):
             self._last_check: datetime = datetime.now(tz=timezone.utc)
 
         self._subreddits = await _get_all_subreddits()
+        # Load our array data.
+        await self._read_array()
+        # If for some reason our session is closed on cog load.
+        # lets re-open a new session.
+        if self._sessions.closed:
+            self._sessions = aiohttp.ClientSession()
 
         if self.check_loop.is_running() is False:
             self.check_loop.start()
 
     async def cog_unload(self) -> None:
-        """Saves our URL and hash list,
-        stops our Scrapper loop if running and
-        closes any open connections."""
+        """
+        Saves our URL and hash list.\n
+        Stops our scrape loop if running and closes any open connections.
+        """
         self.json_save()
+        await self._save_array()
         await self._reddit.close()
         await self._sessions.close()
         if self.check_loop.is_running():
             self.check_loop.stop()
 
     async def _ini_load(self) -> None:
-        """Gets the Reddit login information and additional settings."""
+        """
+        Gets the Reddit login information and additional settings.
+        """
         _setting_file: Path = self._file_dir.joinpath("reddit_cog.ini")
         if _setting_file.is_file():
             settings = ConfigParser(converters={"list": lambda setting: [value.strip() for value in setting.split(",")]})
@@ -490,6 +502,7 @@ class Reddit_IS(cog.KumaCog):
         count = await self.subreddit_media_handler(last_check=self._last_check)
         self._last_check = datetime.now(tz=timezone.utc)
         self.json_save()
+        await self._save_array()
         if count >= 1:
             self._logger.info(f'Finished Sending {str(count) + " Images" if count > 1 else str(count) + " Image"}')
 
@@ -525,9 +538,9 @@ class Reddit_IS(cog.KumaCog):
                         # reset our img list
                         img_url_to_send = []
                         # Usually submissions with multiple images will be using this `attr`
-                        # TODO - Support reddit gallery (temp url) https://www.reddit.com/gallery/18dx6q0
                         if hasattr(submission, "media_metadata"):
                             for key, img in submission.media_metadata.items():
+                                # for key, img in submission.media_metadata.items():
                                 # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': LN 105}
                                 # This allows us to only get Images.
                                 if "e" in img and img["e"] == 'Image':
@@ -549,34 +562,45 @@ class Reddit_IS(cog.KumaCog):
                             continue
 
                         if len(img_url_to_send) > 0:
+                            temp_url_to_send: list[str] = []
                             for img_url in img_url_to_send:
+                                # TODO - Support reddit gallery (temp url) https://www.reddit.com/gallery/18dx6q0
+                                if img_url.find("gallery") != -1:
+                                    my_file: io.TextIOWrapper = open('dump.txt', "w")
+                                    my_file.write(f"{dir(submission)}")
+                                    my_file.close()
+
+                                    gallery: list[str] | Literal[False] = await self._get_gallery_urls(img_url=img_url)
+                                    if gallery == False:
+                                        continue
+                                    for url in gallery:
+                                        temp_url_to_send.append(url)
+                                else:
+                                    temp_url_to_send.append(url)
+
+                            for img_url in temp_url_to_send:
                                 if self._interrupt_loop:
                                     return count
-                                if img_url in self._url_list:
+                                elif img_url in self._url_list:
                                     continue
 
+                                status: bool = await self.hash_process(img_url)
+                                if status == False:
+                                    status: bool = await self.partial_edge_comparison(img_url=img_url)
+
                                 self._url_list.append(img_url)
-
-                                # status: bool = await self.hash_process(img_url)
-                                self._logger.info("checking edges")
-                                status: bool = await self.partial_edge_comparison(img_url=img_url)
-
                                 if status:
-                                    # found_post = True
                                     count += 1
                                     await self.webhook_send(url=url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
-
-                                    time.sleep(self._delay_loop)  # Soft buffer delay between sends to prevent rate limiting.
-
-                # if found_post == False:
-                    # self._logger.info(f'No new Submissions in {sub} since {last_check.ctime()}(UTC)')
+                                    # Soft buffer delay between sends to prevent rate limiting.
+                                    time.sleep(self._delay_loop)
 
         return count
 
     async def partial_edge_comparison(self, img_url: str) -> bool:
         """
-        Uses aiohttp to `GET` the image url, we modify/convert the image via PIL and get the edges as a list of tuples.\n
-        We take a partial of the edges list and see if the entries exists in `_pixel_cords_array`. \n
+        Uses aiohttp to `GET` the image url, we modify/convert the image via PIL and get the edges as a binary string.\n
+        We take a partial of the edges binary string and see if the blobs exists in `_pixel_cords_array`. \n
 
         If a partial match is found; we run `full_edge_comparison`. If no full match found; we add the edges to `_pixel_cords_array`.
 
@@ -599,60 +623,92 @@ class Reddit_IS(cog.KumaCog):
         edges: list[tuple[int, int]] | None = self.IMAGE_COMP._edge_detect(image=source)
         if edges == None:
             return False
+        b_edges: bytes = await self.struct_pack(edges)
         # We set our max match req to do a full comparison via len of edges. eg. 500 * 10% (50 points)
         # We also set our min match req before we "abort"             eg. (50 * 90%) / 100 (40 points)
         # Track our failures and break if we exceed the diff.                    eg. 50-40 (10 points)
-        match_req: int = int((len(edges) / self.IMAGE_COMP.sample_percent))
+        match_req: int = int((len(b_edges) / self.IMAGE_COMP.sample_percent))
         min_match_req: int = int((match_req * self.IMAGE_COMP.match_percent) / 100)
-        for array in self._pixel_cords_array:
+        for array in self._pixel_cords_array:  # list[b'\x07\x00\x08\x00\x02\x00\x02\x00', b'\x07\x00\x08\x00\x02\x00\x02\x00']
             match_count: int = 0
             failures: int = 0
-            # [(1,1),(2,2)(2,3)]
-            for cords in range(0, len(edges), self.IMAGE_COMP.sample_percent):
+            # b'\x07\x00 \x08\x00 \x02\x00 \x02\x00'
+            # We skip the first two bytes as that is the struct_pack value count.
+            for cords in range(2, len(b_edges), 40):
                 if match_count >= min_match_req:
-                    match: bool = await self.full_edge_comparison(array=array, edges=edges)
+                    match: bool = await self.full_edge_comparison(array=array, edges=b_edges)
                     if match == False:
                         break
                     else:
                         return False
                 elif failures > (match_req - min_match_req):
                     break
-                elif edges[cords] not in array:
+                elif array.find(b_edges[cords:cords + 4]) == -1:
                     failures += 1
                 else:
                     match_count += 1
 
-        # TODO - Store this array to a file for future reference.
-        self._pixel_cords_array.append(edges)
+        self._pixel_cords_array.append(b_edges)
         self._etime: float = (time.time() - stime)
-        print("comparsion time", self._etime)
         return True
 
-    async def full_edge_comparison(self, array: list[tuple[int, int]], edges: list[tuple[int, int]]) -> bool:
+    async def full_edge_comparison(self, array: bytes, edges: bytes) -> bool:
         """
         Similar to `partial_edge_comparison` but we use the full list of the image edges against our array
 
         Args:
-            array (list[tuple[int, int]]): List of tuple's containing pixel cords. (X,Y)
-            edges (list[tuple[int, int]]): List of tuple's containing pixel cords. (X,Y)
+            array (bytes): A binary representation of pixel cords.
+            edges (bytes): A binary representation of pixel cords.
 
         Returns:
-            bool: Returns `False` if the pixel cords are not in the array else `True` if the pixel cords are in the array.
+            bool: Returns `False` if the binary blob is not in the array else `True` if the binary blob is in the array.
         """
         failures: int = 0
         match_count: int = 0
         match_req: int = int((len(edges) / self.IMAGE_COMP.match_percent) / 100)
         min_match_req: int = len(edges) - match_req
-        for cords in edges:
+        for pos in range(2, len(edges), 4):
             if match_count >= min_match_req:
                 return True
             elif failures > min_match_req:
                 return False
-            elif cords not in array:
+            elif array.find(edges[pos:pos + 4]) == -1:
                 failures += 1
             else:
                 match_count += 1
         return False
+
+    async def _get_gallery_urls(self, img_url: str) -> list[str] | Literal[False]:
+        """
+        Inspects the HTML/JSON of a Reddit url that is of a `Gallery` type. 
+
+        Args:
+            img_url (str): The URL to parse.
+
+        Returns:
+            list[str] | Literal[False]: Returns a list of IMG urls it finds inside the `Gallery` or False if it fails to get the url.
+        """
+        try:
+            req: ClientResponse = await self._sessions.get(url=img_url)
+
+        except Exception as e:
+            self._logger.error(f'Unable to handle {img_url} with error: {e}')
+            return False
+
+        res: bytes = await req.content.read()
+        data: str = res.decode("utf-8")
+        data = data.split("<script id=\"data\">window.___r = ")[1]
+        data = data.split("</script>")[0]
+
+        jdata = json.loads(data)
+
+        models = jdata["posts"]["models"]
+        model = models[list(models.keys())[0]]
+        images = model["media"]["mediaMetadata"]
+        urls: list[str] = []
+        for entry in images:
+            urls.append(images[entry]["s"]["u"])
+        return urls
 
     async def _get_img(self, img_url: str) -> ClientResponse | Literal[False]:
         """
@@ -685,6 +741,74 @@ class Reddit_IS(cog.KumaCog):
         else:  # Failed to find a 'image'
             self._logger.warn(f'URL: {img_url} is not an image -> {req.headers}')
             return False
+
+    async def struct_pack(self, array: list[tuple[int, int]]) -> bytes:
+        """
+        Converts our list of tuples into a binary blob.
+
+        Args:
+            array (list[tuple[int, int]]): The list of (X,Y) cords as tuples.
+
+        Returns:
+            bytes: Returns a binary representation of all the edges as a blob. \n
+            `list[tuple(7,8),tuple(2,2)]` -> list[b'(\x07\x00,\x08\x00),(\x02\x00,\x02\x00)']
+        """
+        var: bytes = b""
+        # We need to store our array len, we multiple it by two since we are storing tuples.
+        # list[b'(\x07\x00,\x08\x00),(\x02\x00,\x02\x00)'] = list[tuple(7,8),tuple(2,2)] # 4 bytes per tuple()
+        # len of the array would be 2, but times by 2 to decern total number of values (2 values per tuple())
+        # len in b"(\x04\x00)" for our comment tuple example.
+        var += struct.pack("<H", (len(array) * 2))
+        for tuple in array:
+            # 0x makes it a Hex
+            # < = little endian
+            # > = big endian
+            # H = 2 byte integer (aka half-word)
+            # Up to 32 bits in INT (Each number represents 4 bits.)
+            var += struct.pack("<HH", tuple[0], tuple[1])
+        return var
+
+    async def _save_array(self) -> None:
+        """
+        Saves the list of bytes to `array.bin`\n
+        We truncate the list depending on the length of subreddits and submission limits.
+
+        """
+        limiter: int = (len(self._subreddits) * self._submission_limit) * 3
+        if len(self._pixel_cords_array) > limiter:
+            self._pixel_cords_array = self._pixel_cords_array[len(self._pixel_cords_array) - limiter:]
+
+        data: bytes = b""
+        for entry in self._pixel_cords_array:
+            data += entry
+        my_file: io.BufferedWriter = open("array.bin", "wb")
+        my_file.write(data)
+        my_file.close()
+
+    async def _read_array(self) -> None:
+        """
+        Reads from `array.bin`\n
+        Makes the file if it doesn't exist in `file_dir`
+        """
+        if self._array_bin.is_file() is False:
+            cur_file: io.BufferedWriter = open(self._array_bin, "xb")
+            cur_file.close()
+            b_file: io.BufferedReader = open(self._array_bin, "rb")
+
+        else:
+            b_file: io.BufferedReader = open(self._array_bin, "rb")
+
+        data: bytes = b_file.read()
+        # We unpack our array len from the previous comment resulting in 4 or b"(\x04\x00)"
+        # we *2 to account for 2 bytes per value stored, 2 values go into a single tuple()
+        self._pixel_cords_array = []
+        total_pos = 0
+        while total_pos < len(data):
+            array_len: int = (struct.unpack("<H", data[total_pos:total_pos + 2])[0] * 2)
+            # We incriment total_pos +2 to pass our array len blob.
+            total_pos += 2
+            self._pixel_cords_array.append(data[total_pos: total_pos + array_len])
+            total_pos += array_len
 
     async def hash_process(self, img_url: str) -> bool:
         """
@@ -740,13 +864,19 @@ class Reddit_IS(cog.KumaCog):
     async def check_subreddit(self, subreddit: str) -> int:
         """
         Attempts a `GET` request of the passed in subreddit.
+
         Args:
             subreddit(str): The subreddit to check. Do not include the `/r/`. eg `NoStupidQuestions` 
         Returns:
             int: Returns status code
         """
+        # If for some reason our session is closed.
+        # lets re-open a new session.
+        if self._sessions.closed:
+            self._sessions = aiohttp.ClientSession()
+
         temp_url: str = f"https://www.reddit.com/r/{subreddit}/"
-        check: ClientResponse = await self._sessions.head(url=temp_url)
+        check: ClientResponse = await self._sessions.head(url=temp_url, allow_redirects=True)
         return check.status
 
     @commands.hybrid_command(help="Add a subreddit to the DB", aliases=["rsadd", "rsa"])
@@ -863,8 +993,10 @@ class Reddit_IS(cog.KumaCog):
 
         elif util in restart:
             # Force cancel and start the loop. Clean up any open sessions.
+            # Re open a session and start the loop again.
             self.check_loop.cancel()
             await self._sessions.close()
+            self._sessions = aiohttp.ClientSession()
             self.check_loop.start()
             status = "restarting."
         else:
@@ -874,12 +1006,12 @@ class Reddit_IS(cog.KumaCog):
     @commands.hybrid_command(help="Sha256 comparison of two URLs", aliases=["sha256", "hash"])
     async def hash_comparison(self, context: commands.Context, url_one: str, url_two: str | None):
         failed: bool = False
-        res = await self._get_img(img_url=url_one)
+        res: ClientResponse | Literal[False] = await self._get_img(img_url=url_one)
         if res == False:
             failed = True
 
         elif url_two is not None:
-            res_two = await self._get_img(img_url=url_two)
+            res_two: ClientResponse | Literal[False] = await self._get_img(img_url=url_two)
             if res_two == False:
                 failed = True
             elif res == res_two:
