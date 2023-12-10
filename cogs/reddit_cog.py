@@ -590,7 +590,7 @@ class Reddit_IS(cog.KumaCog):
                                 continue
 
                             status: bool = await self.hash_process(img_url)
-                            if status == False:
+                            if status == True:
                                 status: bool = await self.partial_edge_comparison(img_url=img_url)
 
                             self._url_list.append(img_url)
