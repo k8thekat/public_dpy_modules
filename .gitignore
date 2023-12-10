@@ -5,3 +5,5 @@ __pycache__
 
 cogs/reddit.json
 local.py
+dump.*
+*.bin
