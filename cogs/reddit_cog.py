@@ -257,7 +257,6 @@ async def _del_webook(arg: Union[int, str]) -> int | None:
         async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 await cur.execute("""UPDATE subreddit SET webhook_id = ? WHERE webhook_id = ?  RETURNING *""", None, res["id"])
-                await db.commit()
                 await cur.execute("""DELETE FROM webhook WHERE id = ?""", res["id"])
                 await db.commit()
                 await db.close()
@@ -573,10 +572,10 @@ class Reddit_IS(cog.KumaCog):
                                     gallery: list[str] | Literal[False] = await self._get_gallery_urls(img_url=img_url)
                                     if gallery == False:
                                         continue
-                                    for url in gallery:
-                                        temp_url_to_send.append(url)
+                                    for g_url in gallery:
+                                        temp_url_to_send.append(g_url)
                                 else:
-                                    temp_url_to_send.append(url)
+                                    temp_url_to_send.append(img_url)
 
                             for img_url in temp_url_to_send:
                                 if self._interrupt_loop:
