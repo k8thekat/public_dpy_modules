@@ -1,4 +1,5 @@
 # Reddit Image Scraper cog
+import asyncio
 from datetime import datetime, timezone
 from configparser import ConfigParser
 import io
@@ -346,6 +347,7 @@ class Reddit_IS(cog.KumaCog):
 
             Creates our _subreddit list.
         """
+        # self._logger.setLevel("DEBUG")
         # Setup our DB tables
         async with asqlite.connect(DB_PATH) as db:
             await db.execute(SUBREDDIT_SETUP_SQL)
@@ -509,6 +511,12 @@ class Reddit_IS(cog.KumaCog):
         if count >= 1:
             self._logger.info(f'Finished Sending {str(count) + " Images" if count > 1 else str(count) + " Image"}')
 
+    # @check_loop.error
+    # async def check_loop_error(self, error: Any):
+    #     print(error)
+    #     self.check_loop.cancel()
+    #     self.check_loop.start()
+
     async def subreddit_media_handler(self, last_check: datetime) -> int:
         """Iterates through the subReddits Submissions and sends media_metadata"""
         count = 0
@@ -518,31 +526,37 @@ class Reddit_IS(cog.KumaCog):
         if self._sessions.closed:
             self._sessions = aiohttp.ClientSession()
 
+        self._logger.debug(f"subreddit_media_handler starting.. | Delay {self._delay_loop} | # of subreddits {len(self._subreddits)}")
         # We check self._subreddits in `check_loop`
         for entry in self._subreddits:
-            for sub, url in entry.items():
-                if url == None:
+            for sub, webhook_url in entry.items():
+                self._logger.debug(f"Looking @ {sub} with {webhook_url}")
+                if webhook_url == None:
                     self._logger.warn(f"No Webhook URL for {sub}, skipping...")
                     continue
 
-                if self._interrupt_loop:
+                if self._interrupt_loop == True:
+                    self._interrupt_loop = False
+                    self._logger.warn("The Media Handler loop was interrupted.")
                     return count
 
                 res: int = await self.check_subreddit(subreddit=sub)
+                self._logger.debug(f"Check Subreddit | Status Code {res}")
                 if res != 200:
                     self._logger.warn(f"Failed to find the subreddit /r/{sub}, skipping entry. Value: {res}")
                     continue
 
-                cur_subreddit: Subreddit = await self._reddit.subreddit(display_name=sub)
+                cur_subreddit: Subreddit = await self._reddit.subreddit(display_name=sub, fetch=True)
                 # limit - controls how far back to go (true limit is 100 entries)
                 # submission is of class type asyncpraw.
                 # TODO --
                 # Possibly define a custom class based on Submission to have attributes populate for linter purpose.
-                submission: Submission
+                # submission: Submission
+                self._logger.debug(f"getting submissions for {sub}")
                 async for submission in cur_subreddit.new(limit=self._submission_limit):
                     post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
                     # found_post = False
-                    self._logger.info(f'Checking subreddit {sub} -> submission title: {submission.title} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
+                    self._logger.debug(f'Checking subreddit {sub} -> submission title: {submission.title} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
                     if post_time < last_check:
                         continue
                     # if post_time >= last_check:  # The more recent time will be greater than..
@@ -550,6 +564,7 @@ class Reddit_IS(cog.KumaCog):
                     img_url_to_send = []
                     # Usually submissions with multiple images will be using this `attr`
                     if hasattr(submission, "media_metadata"):
+                        self._logger.debug(f"{submission.title} has attribute media_metadata, getting urls")
                         for key, img in submission.media_metadata.items():
                             # for key, img in submission.media_metadata.items():
                             # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': LN 105}
@@ -560,25 +575,17 @@ class Reddit_IS(cog.KumaCog):
                                 img_url_to_send.append(img["s"]["u"])
                                 continue
 
-                            else:
-                                continue
-
                     elif hasattr(submission, "url_overridden_by_dest"):
+                        self._logger.debug(f"{submission.title} has attribute url_overridden_by_dest, getting url")
                         if submission.url_overridden_by_dest.startswith(self._url_prefixs):
                             img_url_to_send.append(submission.url_overridden_by_dest)
-                        else:
-                            continue
 
                     else:
+                        self._logger.debug(f"Failed to find a usable attribute, skipping {submission.title}")
                         continue
-
-                    # if len(img_url_to_send) > 0:
-                    if len(img_url_to_send) == 0:
-                        return count
 
                     # temp_url_to_send: list[str] = []
                     # for img_url in img_url_to_send:
-                    #     # TODO - Support reddit gallery (temp url) https://www.reddit.com/gallery/18dx6q0
                     #     if img_url.lower().find("gallery") != -1:
                     #         dump_p: Path = self._file_dir.joinpath("dump.txt")
                     #         my_file: io.TextIOWrapper = open(dump_p, "w")
@@ -604,28 +611,32 @@ class Reddit_IS(cog.KumaCog):
                     # for img_url in temp_url_to_send:
                     for img_url in img_url_to_send:
 
-                        if self._interrupt_loop:
-                            return count
+                        # if self._interrupt_loop:
+                        #     return count
+
                         if img_url in self._url_list:
                             continue
 
                         if img_url.lower().find("gifs") != -1:
                             self._logger.info(f"Found a gif URL -> {img_url}")
                             continue
-
+                        self._logger.debug(f"Checking the hash of {img_url}")
                         hash_res: bool = await self.hash_process(img_url)
+                        self._logger.debug(f"Checking Image Edge Array...{img_url}")
                         edge_res: bool = await self._partial_edge_comparison(img_url=img_url)
-                        if hash_res or edge_res == False:
-                            self._logger.info(f"Duplicate check failed | hash - {hash_res} | edge - {edge_res}")
+                        if hash_res or edge_res == True:
+                            self._logger.debug(f"Duplicate check failed | hash - {hash_res} | edge - {edge_res}")
                             continue
 
                         else:
                             self._url_list.append(img_url)
                             count += 1
-                            await self.webhook_send(url=url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
+                            await self.webhook_send(url=webhook_url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
                             # Soft buffer delay between sends to prevent rate limiting.
-                            time.sleep(self._delay_loop)
+                            await asyncio.sleep(self._delay_loop)
+                            # time.sleep(self._delay_loop)
 
+        self._logger.debug("subreddit_media_handler ending")
         return count
 
     async def _partial_edge_comparison(self, img_url: str) -> bool:
@@ -639,12 +650,12 @@ class Reddit_IS(cog.KumaCog):
             img_url (str): Web url to Image.
 
         Returns:
-            bool: Returns `False` on any failed methods/checks or the array already exists else returns `True`.
+            bool: Returns `True` on any failed methods/checks or the array already exists else returns `False`.
         """
         stime: float = time.time()
         res: ClientResponse | Literal[False] = await self._get_url_req(img_url=img_url, ignore_validation=False)
         if res == False:
-            return False
+            return True
 
         source: Image = IMG.open(io.BytesIO(await res.read()))
         source = self.IMAGE_COMP._convert(image=source)
@@ -653,9 +664,10 @@ class Reddit_IS(cog.KumaCog):
         edges: list[tuple[int, int]] | None = self.IMAGE_COMP._edge_detect(image=source)
         if edges == None:
             self._logger.error(f"Found no edges for url -> {img_url}")
-            return False
+            return True
 
         b_edges: bytes = await self._struct_pack(edges)
+        # self._logger.info(f"Packed | {len(edges)}")
         # We set our max match req to do a full comparison via len of edges. eg. 500 * 10% (50 points)
         # We also set our min match req before we "abort"             eg. (50 * 90%) / 100 (40 points)
         # Track our failures and break if we exceed the diff.                    eg. 50-40 (10 points)
@@ -668,14 +680,16 @@ class Reddit_IS(cog.KumaCog):
             # We skip the first two bytes as that is the struct_pack value count.
             for cords in range(2, len(b_edges), 40):
                 if match_count >= min_match_req:
-                    self._logger.info(f"Running full edge comparison on {img_url} | {len(b_edges)}")
+                    self._logger.debug(f"Running full edge comparison on {img_url} | {len(b_edges)}")
                     match: bool = await self._full_edge_comparison(array=array, edges=b_edges)
                     if match == False:
                         break
                     else:
-                        return False
+                        return True
                 elif failures > (match_req - min_match_req):
+                    self._logger.debug(f"{img_url} Match count {match_count}/{min_match_req} | Failure count {failures}/{match_req-min_match_req}")  # \n Looking for {b_edges[cords:cords + 4]} in {array}")
                     break
+
                 elif array.find(b_edges[cords:cords + 4]) == -1:
                     failures += 1
                 else:
@@ -683,7 +697,7 @@ class Reddit_IS(cog.KumaCog):
 
         self._pixel_cords_array.append(b_edges)
         self._etime: float = (time.time() - stime)
-        return True
+        return False
 
     async def _full_edge_comparison(self, array: bytes, edges: bytes) -> bool:
         """
@@ -738,7 +752,7 @@ class Reddit_IS(cog.KumaCog):
         urls: list[str] = []
         for entry in images:
             urls.append(images[entry]["s"]["u"])
-        self._logger.info(f"Processed Gallery url {img_url}, found {len(urls)} urls.")
+        self._logger.debug(f"Processed Gallery url {img_url}, found {len(urls)} urls.")
         return urls
 
     async def _get_url_req(self, img_url: str, ignore_validation: bool = False) -> ClientResponse | Literal[False]:
@@ -747,13 +761,11 @@ class Reddit_IS(cog.KumaCog):
 
         Args:
             img_url (str): Web URL for the image.
-            ignore_validation (bool): Ignore header check on web request for `Image`. Defaults to False
+            ignore_validation (bool): Ignore header check on web request for `image`. Defaults to `False`
 
         Returns:
             ClientResponse | Literal[False]: Returns `ClientResponse` if the url returns a status code between `200-299`. Otherwise `False` on any other case.
         """
-        # req = urllib.request.Request(url=img_url, headers={'User-Agent': str(self._User_Agent)})
-
         req: ClientResponse = await self._sessions.get(url=img_url)
 
         if 199 >= req.status > 299:
@@ -818,7 +830,7 @@ class Reddit_IS(cog.KumaCog):
         data: bytes = b""
         for entry in self._pixel_cords_array:
             data += entry
-        # self._logger.info(f"Writing our Pixel Array to `reddit_array.bin` || bytes {len(data)}")
+        self._logger.debug(f"Writing our Pixel Array to `reddit_array.bin` || bytes {len(data)}")
 
         my_file: io.BufferedWriter = open(self._array_bin, "wb")
         my_file.write(data)
@@ -835,19 +847,22 @@ class Reddit_IS(cog.KumaCog):
 
         b_file: io.BufferedReader = open(self._array_bin, "rb")
         data: bytes = b_file.read()
+        self._logger.debug(f"Loading array from file | bytes {len(data)}")
         b_file.close()
         # We unpack our array len from the previous comment resulting in 4 or b"(\x04\x00)"
         # we *2 to account for 2 bytes per value stored, 2 values go into a single tuple()
         self._pixel_cords_array = []
         total_pos = 0
         while total_pos < len(data):
+            # struct.unpack returns a tuple of the unpacked data, we are using the first 4 bytes to store an array count.
+            # we multiple by 2 to get true length as we are storing 2 bytes per value.
             array_len: int = (struct.unpack("<I", data[total_pos:total_pos + 4])[0] * 2)
-            # self._logger.info(f"Unpacking our edge binary | length of array {array_len}")
-            # We incriment total_pos +2 to pass our array len blob.
-            total_pos += 2
+
+            # We incriment total_pos +4 to pass our array len blob.
+            total_pos += 4
             self._pixel_cords_array.append(data[total_pos: total_pos + array_len])
             total_pos += array_len
-        # self._logger.info(f"Reading our Array File... | total entries {len(self._pixel_cords_array)}")
+        self._logger.debug(f"Reading our Array File... | total entries {len(self._pixel_cords_array)}")
 
     async def hash_process(self, img_url: str) -> bool:
         """
@@ -858,21 +873,25 @@ class Reddit_IS(cog.KumaCog):
         Returns:
             bool: `True` if the sha256 hash is in our list; otherwise `False`.
         """
-        res = await self._get_url_req(img_url=img_url)
+        res: ClientResponse | Literal[False] = await self._get_url_req(img_url=img_url)
         my_hash = None
-        if isinstance(res, bytes):
+
+        if isinstance(res, ClientResponse):
             my_hash = hashlib.sha256(await res.read()).hexdigest()
-        if my_hash not in self._hash_list or my_hash != False:
+
+        if my_hash != None and my_hash not in self._hash_list:
             self._hash_list.append(my_hash)
             return False
 
         else:
-            # self._logger.info('Found a duplicate hash...')
             return True
 
     async def webhook_send(self, url: str, content: str) -> bool | None:
         """
-        Sends content to the Discord Webhook url provided.
+        Sends content to the Discord Webhook url provided. \n
+        Implements a dynamic delay based upon the status code when sending a webhook.\n
+            - If status code is `429` the delay between posts will be incrimented by `.1` seconds. 
+            - After 10 successful sends it will remove `.1` seconds from the delay.
 
         Args:
             url(str): The Webhook URL to use.
@@ -881,7 +900,6 @@ class Reddit_IS(cog.KumaCog):
             bool | None: Returns `False` due to status code not in range `200 <= result.status < 300` else returns `None`
         """
         # Could check channels for NSFW tags and prevent NSFW subreddits from making it to those channels/etc.
-
         data = {"content": content, "username": self._user_name}
         result: ClientResponse = await self._sessions.post(url, json=data)
         if 200 <= result.status < 300:
@@ -908,14 +926,30 @@ class Reddit_IS(cog.KumaCog):
             subreddit(str): The subreddit to check. Do not include the `/r/`. eg `NoStupidQuestions` 
         Returns:
             int: Returns status code
+        Except:
+            TimeoutError: Returns status code `400` if the aiohttp.ClientResponse takes longer than 5 seconds to respond.
+            Exception(Any): Returns status code `400` if the aiohttp.ClientResponse fails.
         """
         # If for some reason our session is closed.
         # lets re-open a new session.
         if self._sessions.closed:
             self._sessions = aiohttp.ClientSession()
 
+        self._logger.debug(f"Checking subreddit {subreddit}")
         temp_url: str = f"https://www.reddit.com/r/{subreddit}/"
-        check: ClientResponse = await self._sessions.head(url=temp_url, allow_redirects=True)
+        try:
+            # We are having issues with aiohttp.ClientResponse when using `.head()`; we are going to forcibly time it out after 5 seconds.
+            async with asyncio.timeout(delay=5):
+                check: ClientResponse = await self._sessions.head(url=temp_url, allow_redirects=True)
+
+        except TimeoutError:
+            self._logger.error(f"Timed out checking {subreddit} | Returning 400")
+            return 400
+
+        except Exception as e:
+            self._logger.error(f"Failed to check {subreddit} | check returned {e}")
+            return 400
+
         return check.status
 
     @commands.hybrid_command(help="Add a subreddit to the DB", aliases=["rsadd", "rsa"])
