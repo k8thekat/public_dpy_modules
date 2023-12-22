@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from configparser import ConfigParser
 import io
 from pathlib import Path
-import traceback
 from PIL import Image as IMG
 from PIL.Image import Image
 import discord
@@ -17,12 +16,11 @@ import tzlocal
 import time
 import aiohttp
 from aiohttp import ClientResponse
-from typing import TYPE_CHECKING, TypedDict, Union, Literal, reveal_type
+from typing import TypedDict, Union, Literal
 from typing_extensions import Any
 from fake_useragent import UserAgent
 import asyncpraw
 from asyncpraw.models import Subreddit
-from asyncpraw.models.reddit.submission import Submission as Submission
 import utils.asqlite as asqlite
 from sqlite3 import Row
 from discord.ext import commands, tasks
@@ -293,6 +291,7 @@ class Reddit_IS(cog.KumaCog):
     def __init__(self, bot: commands.Bot) -> None:
         super().__init__(bot=bot)
         self._name: str = os.path.basename(__file__).title()
+        self._logger.info(f'**SUCCESS** Initializing {self._name}')
         self._file_dir: Path = Path(__file__).parent
         self._message_timeout = 120
 
@@ -378,7 +377,7 @@ class Reddit_IS(cog.KumaCog):
         Stops our scrape loop if running and closes any open connections.
         """
         self.json_save()
-        await self._save_array()
+        await asyncio.to_thread(self._save_array)
         await self._reddit.close()
         await self._sessions.close()
         if self.check_loop.is_running():
@@ -504,10 +503,10 @@ class Reddit_IS(cog.KumaCog):
             self._logger.warn("No Subreddits found...")
             return
 
-        count = await self.subreddit_media_handler(last_check=self._last_check)
+        count: int = await self.subreddit_media_handler(last_check=self._last_check)
         self._last_check = datetime.now(tz=timezone.utc)
         self.json_save()
-        await self._save_array()
+        await asyncio.to_thread(self._save_array)
         if count >= 1:
             self._logger.info(f'Finished Sending {str(count) + " Images" if count > 1 else str(count) + " Image"}')
 
@@ -522,6 +521,7 @@ class Reddit_IS(cog.KumaCog):
         count = 0
         img_url: Union[str, None] = None
         img_url_to_send: list[str] = []
+        temp_urls: list[str] = []
 
         if self._sessions.closed:
             self._sessions = aiohttp.ClientSession()
@@ -548,82 +548,45 @@ class Reddit_IS(cog.KumaCog):
 
                 cur_subreddit: Subreddit = await self._reddit.subreddit(display_name=sub, fetch=True)
                 # limit - controls how far back to go (true limit is 100 entries)
-                # submission is of class type asyncpraw.
-                # TODO --
-                # Possibly define a custom class based on Submission to have attributes populate for linter purpose.
-                # submission: Submission
                 self._logger.debug(f"getting submissions for {sub}")
                 async for submission in cur_subreddit.new(limit=self._submission_limit):
                     post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
-                    # found_post = False
                     self._logger.debug(f'Checking subreddit {sub} -> submission title: {submission.title} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
                     if post_time < last_check:
                         continue
-                    # if post_time >= last_check:  # The more recent time will be greater than..
-                    # reset our img list
+
                     img_url_to_send = []
+                    if hasattr(submission, "url") and getattr(submission, "url").lower().find("gallery") != -1:
+                        self._logger.info(f"{submission.title} -> Found a gallery url, getting the image urls.")
+                        img_url_to_send.extend(await self._convert_gallery_submissions(submission=submission))
+
                     # Usually submissions with multiple images will be using this `attr`
-                    if hasattr(submission, "media_metadata"):
-                        self._logger.debug(f"{submission.title} has attribute media_metadata, getting urls")
-                        for key, img in submission.media_metadata.items():
-                            # for key, img in submission.media_metadata.items():
-                            # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': LN 105}
-                            # This allows us to only get Images.
-                            if "e" in img and img["e"] == 'Image':
-                                # example 's': {'y': 2340, 'x': 1080, 'u': 'https://preview.redd.it/0u8xnxknijha1.jpg?width=1080&format=pjpg&auto=webp&v=enabled&s=04e505ade5889f6a5f559dacfad1190446607dc4'}, 'id': '0u8xnxknijha1'}
-                                # img_url = img["s"]["u"]
-                                img_url_to_send.append(img["s"]["u"])
-                                continue
+                    elif hasattr(submission, "media_metadata"):
+                        self._logger.info(f"{submission.title} -> Found a media_metadata attribute.")
+                        img_url_to_send.extend(await self._get_media_metadata_urls(submission=submission))
 
                     elif hasattr(submission, "url_overridden_by_dest"):
-                        self._logger.debug(f"{submission.title} has attribute url_overridden_by_dest, getting url")
+                        self._logger.info(f"{submission.title} has attribute url_overridden_by_dest, getting the url.")
                         if submission.url_overridden_by_dest.startswith(self._url_prefixs):
                             img_url_to_send.append(submission.url_overridden_by_dest)
 
                     else:
-                        self._logger.debug(f"Failed to find a usable attribute, skipping {submission.title}")
+                        self._logger.info(f"Failed to find a usable attribute, skipping {submission.title}")
                         continue
 
-                    # temp_url_to_send: list[str] = []
-                    # for img_url in img_url_to_send:
-                    #     if img_url.lower().find("gallery") != -1:
-                    #         dump_p: Path = self._file_dir.joinpath("dump.txt")
-                    #         my_file: io.TextIOWrapper = open(dump_p, "w")
-                    #         n_line = "\n"
-                    #         my_file.write(f"{type(submission)} | {[f'{getattr(submission, entry)}{n_line}' for entry in dir(submission)]}")
-                    #         my_file.close()
-
-                    #         self._logger.info(f"Found a gallery URL {img_url} - Created `dump.txt`")
-                    #         gallery: list[str] | Literal[False] = await self._get_gallery_urls(img_url=img_url)
-                    #         if gallery == False:
-                    #             continue
-
-                    #         for g_url in gallery:
-                    #             temp_url_to_send.append(g_url)
-
-                    # We are skipping gif urls.
-                    # elif img_url.lower().find("gifs") != -1:
-                    #     self._logger.info(f"Found a gif URL -> {img_url}")
-                    #     continue
-                    # else:
-                    #     temp_url_to_send.append(img_url)
-
-                    # for img_url in temp_url_to_send:
                     for img_url in img_url_to_send:
-
-                        # if self._interrupt_loop:
-                        #     return count
-
                         if img_url in self._url_list:
                             continue
 
                         if img_url.lower().find("gifs") != -1:
                             self._logger.info(f"Found a gif URL -> {img_url}")
                             continue
+
                         self._logger.debug(f"Checking the hash of {img_url}")
                         hash_res: bool = await self.hash_process(img_url)
                         self._logger.debug(f"Checking Image Edge Array...{img_url}")
                         edge_res: bool = await self._partial_edge_comparison(img_url=img_url)
+
                         if hash_res or edge_res == True:
                             self._logger.debug(f"Duplicate check failed | hash - {hash_res} | edge - {edge_res}")
                             continue
@@ -634,10 +597,22 @@ class Reddit_IS(cog.KumaCog):
                             await self.webhook_send(url=webhook_url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
                             # Soft buffer delay between sends to prevent rate limiting.
                             await asyncio.sleep(self._delay_loop)
-                            # time.sleep(self._delay_loop)
 
         self._logger.debug("subreddit_media_handler ending")
         return count
+
+    async def _get_submission_by_id(self, id: str):
+        """
+        Test function for getting individual submissions. Used for dev.
+
+        Args:
+            id (str): _description_
+        """
+        res = await self._reddit.submission(id=id)
+        # print(type(res), dir(res))
+        # pprint(res.__dict__["crosspost_parent_list"][0]["media_metadata"])
+        # for entry in dir(res):
+        #     pprint(f"attr:{entry} -> {getattr(res, entry)}")
 
     async def _partial_edge_comparison(self, img_url: str) -> bool:
         """
@@ -725,35 +700,71 @@ class Reddit_IS(cog.KumaCog):
                 match_count += 1
         return False
 
-    async def _get_gallery_urls(self, img_url: str) -> list[str] | Literal[False]:
+    async def _get_media_metadata_urls(self, submission: asyncpraw.reddit.Submission) -> list[str]:
         """
-        Inspects the HTML/JSON of a Reddit url that is of a `Gallery` type. 
+        Checks the asyncpraw reddit Submission object for the "media_metadata" attribute; validates it is a dictionary and iterates through the url keys returning a list of urls to send.
+
+        Args:
+            submission (asyncpraw.reddit.Submission): The subreddit Submission.
+
+        Returns:
+            list(str): Image urls.
+        """
+        _urls: list[str] = []
+        self._logger.info(f"{submission.title} has attribute media_metadata, getting urls")
+        if hasattr(submission, "media_metadata") and getattr(submission, "media_metadata") == isinstance(submission.media_metadata, dict):
+            for key, img in submission.media_metadata.items():
+                # for key, img in submission.media_metadata.items():
+                # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': LN 105}
+                # This allows us to only get Images.
+                if "e" in img and img["e"] == 'Image':
+                    # example 's': {'y': 2340, 'x': 1080, 'u': 'https://preview.redd.it/0u8xnxknijha1.jpg?width=1080&format=pjpg&auto=webp&v=enabled&s=04e505ade5889f6a5f559dacfad1190446607dc4'}, 'id': '0u8xnxknijha1'}
+                    # img_url = img["s"]["u"]
+                    _urls.append(img["s"]["u"])
+                    continue
+        return _urls
+
+    async def _convert_gallery_submissions(self, submission: asyncpraw.reddit.Submission) -> list[str]:
+        """
+        Take's a gallery url asyncpraw's Submission object and checks its `__dict__` attribute as it contains the "media_metadata" key we need to get all the urls, just nested in another dictionary under "crosspost_parent_list".
+        We use a setattr to add `__dict__["crosspost_parent_list"][0]["media_metadata"]` as an attribute to Submission as `Submission.media_metadata`
 
         Args:
             img_url (str): The URL to parse.
 
         Returns:
-            list[str] | Literal[False]: Returns a list of IMG urls it finds inside the `Gallery` or False if it fails to get the url.
+            list[str]: Returns a list of IMG urls it finds inside the `Gallery`.
         """
-        req: ClientResponse | Literal[False] = await self._get_url_req(img_url=img_url, ignore_validation=True)
-        if req == False:
-            return []
+        # req: ClientResponse | Literal[False] = await self._get_url_req(img_url=img_url, ignore_validation=True)
+        # if req == False:
+        #     return []
 
-        res: bytes = await req.content.read()
-        data: str = res.decode("utf-8")
-        data = data.split("<script id=\"data\">window.___r = ")[1]
-        data = data.split("</script>")[0]
+        # res: bytes = await req.content.read()
+        # data: str = res.decode("utf-8")
+        # data = data.split("<script id=\"data\">window.___r = ")[1]
+        # data = data.split("</script>")[0]
 
-        jdata = json.loads(data)
+        # jdata = json.loads(data)
 
-        models = jdata["posts"]["models"]
-        model = models[list(models.keys())[0]]
-        images = model["media"]["mediaMetadata"]
-        urls: list[str] = []
-        for entry in images:
-            urls.append(images[entry]["s"]["u"])
-        self._logger.debug(f"Processed Gallery url {img_url}, found {len(urls)} urls.")
-        return urls
+        # models = jdata["posts"]["models"]
+        # model = models[list(models.keys())[0]]
+        # images = model["media"]["mediaMetadata"]
+        # urls: list[str] = []
+        # for entry in images:
+        #     urls.append(images[entry]["s"]["u"])
+        # self._logger.debug(f"Processed Gallery url {img_url}, found {len(urls)} urls.")
+        _urls: list[str] = []
+        if hasattr(submission, "url") and getattr(submission, "url").lower().find("gallery") != -1:
+            res: dict = getattr(submission, "__dict__")
+            if isinstance(res, dict) and "crosspost_parent_list" in res:
+                data: dict = res["crosspost_parent_list"][0]["media_metadata"]
+                # ["crosspost_parent_list"][0]["media_metadata"]
+                # We know inside the __dict__["crosspost_parent_list"][0] attribute that it may have a key value "media_metadata"
+                # we are going to "spoof" the objects attribute to use in the _get_media_metadata_urls() by setting it from the __dict__ key.
+                setattr(submission, "media_metadata", data)
+                _urls = await self._get_media_metadata_urls(submission=submission)
+
+        return _urls
 
     async def _get_url_req(self, img_url: str, ignore_validation: bool = False) -> ClientResponse | Literal[False]:
         """
@@ -824,12 +835,10 @@ class Reddit_IS(cog.KumaCog):
 
         """
         limiter: int = (len(self._subreddits) * self._submission_limit) * 3
-        if len(self._pixel_cords_array) > limiter:
-            self._pixel_cords_array = self._pixel_cords_array[len(self._pixel_cords_array) - limiter:]
+        while len(self._pixel_cords_array) > limiter:
+            self._pixel_cords_array.pop(0)
 
-        data: bytes = b""
-        for entry in self._pixel_cords_array:
-            data += entry
+        data: bytes = b"".join(self._pixel_cords_array)
         self._logger.debug(f"Writing our Pixel Array to `reddit_array.bin` || bytes {len(data)}")
 
         my_file: io.BufferedWriter = open(self._array_bin, "wb")
@@ -866,12 +875,14 @@ class Reddit_IS(cog.KumaCog):
 
     async def hash_process(self, img_url: str) -> bool:
         """
-        Checks the Hash of the supplied url against our hash list.
+        Checks the sha256 of the supplied `img_url` against our `_hash_list`.
 
         Args:
             img_url (str): Web URL for the image.
+
         Returns:
-            bool: `True` if the sha256 hash is in our list; otherwise `False`.
+            bool: Returns `False` if the sha256 results DO NOT exist in `_hash_list`.\n
+            Otherwise returns `True` if the sha256 results already exist in our `_hash_list` or it failed to hash the `img_url` parameter.
         """
         res: ClientResponse | Literal[False] = await self._get_url_req(img_url=img_url)
         my_hash = None
@@ -886,7 +897,7 @@ class Reddit_IS(cog.KumaCog):
         else:
             return True
 
-    async def webhook_send(self, url: str, content: str) -> bool | None:
+    async def webhook_send(self, url: str, content: str) -> None:
         """
         Sends content to the Discord Webhook url provided. \n
         Implements a dynamic delay based upon the status code when sending a webhook.\n
@@ -897,8 +908,9 @@ class Reddit_IS(cog.KumaCog):
             url(str): The Webhook URL to use.
             content(str): The content to send to the url.
         Returns:
-            bool | None: Returns `False` due to status code not in range `200 <= result.status < 300` else returns `None`
+            None: Returns `None`
         """
+        # None: Returns `False` due to status code not in range `200 <= result.status < 300` else returns `None`
         # Could check channels for NSFW tags and prevent NSFW subreddits from making it to those channels/etc.
         data = {"content": content, "username": self._user_name}
         result: ClientResponse = await self._sessions.post(url, json=data)
@@ -916,11 +928,11 @@ class Reddit_IS(cog.KumaCog):
                 self._loop_iterations = 0
 
             self._logger.warn(f"Webhook not sent with {result.status} - delay {self._delay_loop}s, response:\n{result.json()}")
-            return False
+            return
 
     async def check_subreddit(self, subreddit: str) -> int:
         """
-        Attempts a `GET` request of the passed in subreddit.
+        Attempts a `HEAD` request of the passed in subreddit.
 
         Args:
             subreddit(str): The subreddit to check. Do not include the `/r/`. eg `NoStupidQuestions` 
@@ -943,11 +955,11 @@ class Reddit_IS(cog.KumaCog):
                 check: ClientResponse = await self._sessions.head(url=temp_url, allow_redirects=True)
 
         except TimeoutError:
-            self._logger.error(f"Timed out checking {subreddit} | Returning 400")
+            self._logger.error(f"Timed out checking {subreddit} | Returning status code 400")
             return 400
 
         except Exception as e:
-            self._logger.error(f"Failed to check {subreddit} | check returned {e}")
+            self._logger.error(f"Failed to check {subreddit} | Response returned {e}")
             return 400
 
         return check.status
@@ -1069,9 +1081,9 @@ class Reddit_IS(cog.KumaCog):
             # Re open a session and start the loop again.
             self.check_loop.cancel()
             await self._sessions.close()
-            # self._sessions = aiohttp.ClientSession()
             self.check_loop.start()
             status = "restarting."
+
         else:
             return await context.send(content=f"You must use these words {','.join(start)} | {','.join(end)}", delete_after=self._message_timeout)
         return await context.send(content=f"The Scrapper loop is {status}", delete_after=self._message_timeout)
