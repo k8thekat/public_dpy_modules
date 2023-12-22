@@ -9,7 +9,5 @@ class KumaCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         super().__init__()
         self._bot: commands.Bot = bot
-        self._name: str = os.path.basename(__file__).title()
         self._logger = logging.getLogger()
-        self._logger.info(f'**SUCCESS** Initializing {self._name} ')
         self.repo_url = "https://github.com/k8thekat/dpy_cogs"

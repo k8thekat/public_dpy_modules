@@ -23,7 +23,6 @@ from functools import partial
 from re import Pattern, compile
 from typing import Union
 import os
-import logging
 
 import discord
 from discord import Embed
@@ -39,6 +38,8 @@ interaction = discord.Interaction
 class AutoRole(cog.KumaCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot=bot)
+        self._name: str = os.path.basename(__file__).title()
+        self._logger.info(f'**SUCCESS** Initializing {self._name}')
 
     REACTION_ROLES_BUTTON_REGEX: Pattern[str] = compile(r'RR::BUTTON::(?P<ROLE_ID>\d+)')
 

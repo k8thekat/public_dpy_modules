@@ -36,6 +36,8 @@ from utils import cog
 class Repl(cog.KumaCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot=bot)
+        self._name: str = os.path.basename(__file__).title()
+        self._logger.info(f'**SUCCESS** Initializing {self._name}')
 
     async def cog_load(self) -> None:
         self._sessions: set[int] = set()

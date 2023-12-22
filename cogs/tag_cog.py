@@ -9,8 +9,8 @@ from dataclasses import dataclass
 import utils.asqlite as asqlite
 import discord
 from discord.ext import commands
-import pathlib
 from pathlib import Path
+import os
 
 from utils.embed_paginator import BasePaginatorView
 
@@ -86,6 +86,8 @@ class TagEntry:
 class TagsCog(cog.KumaCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot=bot)
+        self._name: str = os.path.basename(__file__).title()
+        self._logger.info(f'**SUCCESS** Initializing {self._name}')
 
     async def cog_load(self) -> None:
         async with asqlite.connect(DB_PATH) as db:

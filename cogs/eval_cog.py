@@ -23,7 +23,6 @@ import discord
 from discord.ext import commands
 
 import os
-import logging
 from typing import Annotated
 import io
 import sys
@@ -43,6 +42,8 @@ Dependencies = None
 class Eval(cog.KumaCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot=bot)
+        self._name: str = os.path.basename(__file__).title()
+        self._logger.info(f'**SUCCESS** Initializing {self._name}')
     # def CharConvertor(self, char: Union[discord.Emoji, str]) -> Union[discord.Emoji, str]:
     #     if isinstance(char, str):
     #         return char.encode("unicode_escape").decode("ASCII")

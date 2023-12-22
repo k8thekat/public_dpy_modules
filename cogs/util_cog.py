@@ -47,6 +47,8 @@ from typing import Union
 
 # Local libs
 from utils import cog
+# TODO - Write get log function.
+# Possibly pull the entire file, parts of the file (0-50) and or key words/errors from `logger.warn` or `logger.error`
 
 
 class Util(cog.KumaCog):
@@ -57,6 +59,8 @@ class Util(cog.KumaCog):
 
     def __init__(self, bot: commands.Bot):
         super().__init__(bot=bot)
+        self._name: str = os.path.basename(__file__).title()
+        self._logger.info(f'**SUCCESS** Initializing {self._name}')
 
     async def cog_load(self) -> None:
         self._prefix: str = self._bot.command_prefix  # type:ignore
@@ -73,11 +77,10 @@ class Util(cog.KumaCog):
 
     @commands.Cog.listener('on_message')
     async def on_message_listener(self, message: discord.Message) -> None:
-        assert message.guild
         if self._self_check:
             return
         # If we are not in my own personal guild.
-        if message.guild.id != 602285328320954378:
+        if message.guild != None and message.guild.id != 602285328320954378:
             return
 
         if (isinstance(message.channel, discord.abc.GuildChannel) and
