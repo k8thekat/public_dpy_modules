@@ -502,14 +502,19 @@ class Reddit_IS(cog.KumaCog):
         if self._subreddits == None:
             self._logger.warn("No Subreddits found...")
             return
+        try:
+            count: int = await self.subreddit_media_handler(last_check=self._last_check)
+        except Exception as e:
+            count = 0
+            self._logger.error(f"{type(e)} -> {e}")
 
-        count: int = await self.subreddit_media_handler(last_check=self._last_check)
         self._last_check = datetime.now(tz=timezone.utc)
         self.json_save()
         await asyncio.to_thread(self._save_array)
         if count >= 1:
             self._logger.info(f'Finished Sending {str(count) + " Images" if count > 1 else str(count) + " Image"}')
-
+        else:
+            self._logger.info("No new Images to send.")
     # @check_loop.error
     # async def check_loop_error(self, error: Any):
     #     print(error)
@@ -551,28 +556,24 @@ class Reddit_IS(cog.KumaCog):
                 self._logger.debug(f"getting submissions for {sub}")
                 async for submission in cur_subreddit.new(limit=self._submission_limit):
                     post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
-                    self._logger.debug(f'Checking subreddit {sub} -> submission title: {submission.title} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
+                    self._logger.info(f'Checking subreddit {sub} {submission} -> submission title: {submission.title} url: {submission.url} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
                     if post_time < last_check:
                         continue
 
                     img_url_to_send = []
                     if hasattr(submission, "url") and getattr(submission, "url").lower().find("gallery") != -1:
-                        self._logger.info(f"{submission.title} -> Found a gallery url, getting the image urls.")
+                        # self._logger.info(f"{submission.title} -> Found a gallery url, getting the image urls.")
                         img_url_to_send.extend(await self._convert_gallery_submissions(submission=submission))
 
                     # Usually submissions with multiple images will be using this `attr`
                     elif hasattr(submission, "media_metadata"):
-                        self._logger.info(f"{submission.title} -> Found a media_metadata attribute.")
+                        # self._logger.info(f"{submission.title} -> Found a media_metadata attribute.")
                         img_url_to_send.extend(await self._get_media_metadata_urls(submission=submission))
 
                     elif hasattr(submission, "url_overridden_by_dest"):
-                        self._logger.info(f"{submission.title} has attribute url_overridden_by_dest, getting the url.")
+                        # self._logger.info(f"{submission.title} has attribute url_overridden_by_dest, getting the url.")
                         if submission.url_overridden_by_dest.startswith(self._url_prefixs):
                             img_url_to_send.append(submission.url_overridden_by_dest)
-
-                    else:
-                        self._logger.info(f"Failed to find a usable attribute, skipping {submission.title}")
-                        continue
 
                     for img_url in img_url_to_send:
                         if img_url in self._url_list:
