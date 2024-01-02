@@ -492,6 +492,10 @@ class Reddit_IS(cog.KumaCog):
         res: list[None | Webhook] = await _get_all_webhooks()
         return [app_commands.Choice(name=webhook["name"], value=webhook["name"]) for webhook in res if webhook is not None and current.lower() in webhook["name"].lower()][:25]
 
+    async def autocomplete_submission_type(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        types: list[str] = ["New", "Top", "Hot"]
+        return [app_commands.Choice(name=entry, value=entry) for entry in types if current.lower() in entry.lower()]
+
     @tasks.loop(minutes=5)
     async def check_loop(self) -> None:
         if self._recent_edit:
@@ -515,18 +519,58 @@ class Reddit_IS(cog.KumaCog):
             self._logger.info(f'Finished Sending {str(count) + " Images" if count > 1 else str(count) + " Image"}')
         else:
             self._logger.info("No new Images to send.")
-    # @check_loop.error
-    # async def check_loop_error(self, error: Any):
-    #     print(error)
-    #     self.check_loop.cancel()
-    #     self.check_loop.start()
+
+    async def process_subreddit_submissions(self, sub: str, order_type: str, count: None | int = None, last_check: None | datetime = None) -> list[dict[asyncpraw.reddit.Submission, str]]:
+        img_url_to_send: list[dict[asyncpraw.reddit.Submission, str]] = []
+        res = None
+
+        if count == None:
+            count = self._submission_limit
+
+        cur_subreddit: Subreddit = await self._reddit.subreddit(display_name=sub, fetch=True)
+        # limit - controls how far back to go (true limit is 100 entries)
+        self._logger.info(f"order_type: {order_type} | count: {count} | sub: {sub}")
+        if order_type.lower() == "new":
+            res = cur_subreddit.new(limit=count)
+        elif order_type.lower() == "hot":
+            res = cur_subreddit.hot(limit=count)
+        elif order_type.lower() == "top":
+            res = await cur_subreddit.top(limit=count)
+
+        if res is None:
+            return img_url_to_send
+
+        # async for submission in cur_subreddit.new(limit=count):
+        async for submission in res:
+            post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
+            if last_check != None and post_time < last_check:
+                continue
+
+            self._logger.info(f'Checking subreddit {sub} {submission} -> submission title: {submission.title} url: {submission.url} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime() if last_check is not None else "None"}')
+            if hasattr(submission, "url") and getattr(submission, "url").lower().find("gallery") != -1:
+                self._logger.info(f"- {submission.title} -> Found a gallery url, getting the image urls.")
+                # img_url_to_send.extend({submission: await self._convert_gallery_submissions(submission=submission)})
+                img_url_to_send.extend([{submission: entry} for entry in await self._convert_gallery_submissions(submission=submission)])
+
+            # Usually submissions with multiple images will be using this `attr`
+            elif hasattr(submission, "media_metadata"):
+                self._logger.info(f"- {submission.title} -> Found a media_metadata attribute.")
+                # img_url_to_send.extend(await self._get_media_metadata_urls(submission=submission))
+                img_url_to_send.extend([{submission: entry} for entry in await self._get_media_metadata_urls(submission=submission)])
+
+            elif hasattr(submission, "url_overridden_by_dest"):
+                self._logger.info(f"- {submission.title} has attribute url_overridden_by_dest, getting the url.")
+                if submission.url_overridden_by_dest.startswith(self._url_prefixs):
+                    img_url_to_send.append({submission: submission.url_overridden_by_dest})
+
+        return img_url_to_send
 
     async def subreddit_media_handler(self, last_check: datetime) -> int:
         """Iterates through the subReddits Submissions and sends media_metadata"""
         count = 0
         img_url: Union[str, None] = None
-        img_url_to_send: list[str] = []
-        temp_urls: list[str] = []
+        # img_url_to_send: list[dict[asyncpraw.reddit.Submission, str]] = []
+        # temp_urls: list[str] = []
 
         if self._sessions.closed:
             self._sessions = aiohttp.ClientSession()
@@ -551,31 +595,56 @@ class Reddit_IS(cog.KumaCog):
                     self._logger.warn(f"Failed to find the subreddit /r/{sub}, skipping entry. Value: {res}")
                     continue
 
-                cur_subreddit: Subreddit = await self._reddit.subreddit(display_name=sub, fetch=True)
-                # limit - controls how far back to go (true limit is 100 entries)
-                self._logger.debug(f"getting submissions for {sub}")
-                async for submission in cur_subreddit.new(limit=self._submission_limit):
-                    post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
-                    self._logger.info(f'Checking subreddit {sub} {submission} -> submission title: {submission.title} url: {submission.url} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
-                    if post_time < last_check:
-                        continue
+                submissions: list[dict[asyncpraw.reddit.Submission, str]] = await self.process_subreddit_submissions(sub=sub, last_check=last_check, order_type="New")
+                # cur_subreddit: Subreddit = await self._reddit.subreddit(display_name=sub, fetch=True)
+                # # limit - controls how far back to go (true limit is 100 entries)
+                # self._logger.debug(f"getting submissions for {sub}")
+                # async for submission in cur_subreddit.new(limit=self._submission_limit):
+                #     post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
+                #     # TODO - Add a secondary info print as subreddits are still missing.
+                #     self._logger.info(f'Checking subreddit {sub} {submission} -> submission title: {submission.title} url: {submission.url} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
+                #     if post_time < last_check:
+                #         continue
 
-                    img_url_to_send = []
-                    if hasattr(submission, "url") and getattr(submission, "url").lower().find("gallery") != -1:
-                        # self._logger.info(f"{submission.title} -> Found a gallery url, getting the image urls.")
-                        img_url_to_send.extend(await self._convert_gallery_submissions(submission=submission))
+                #     img_url_to_send = []
+                #     if hasattr(submission, "url") and getattr(submission, "url").lower().find("gallery") != -1:
+                #         # self._logger.info(f"{submission.title} -> Found a gallery url, getting the image urls.")
+                #         img_url_to_send.extend(await self._convert_gallery_submissions(submission=submission))
 
-                    # Usually submissions with multiple images will be using this `attr`
-                    elif hasattr(submission, "media_metadata"):
-                        # self._logger.info(f"{submission.title} -> Found a media_metadata attribute.")
-                        img_url_to_send.extend(await self._get_media_metadata_urls(submission=submission))
+                #     # Usually submissions with multiple images will be using this `attr`
+                #     elif hasattr(submission, "media_metadata"):
+                #         # self._logger.info(f"{submission.title} -> Found a media_metadata attribute.")
+                #         img_url_to_send.extend(await self._get_media_metadata_urls(submission=submission))
 
-                    elif hasattr(submission, "url_overridden_by_dest"):
-                        # self._logger.info(f"{submission.title} has attribute url_overridden_by_dest, getting the url.")
-                        if submission.url_overridden_by_dest.startswith(self._url_prefixs):
-                            img_url_to_send.append(submission.url_overridden_by_dest)
+                #     elif hasattr(submission, "url_overridden_by_dest"):
+                #         # self._logger.info(f"{submission.title} has attribute url_overridden_by_dest, getting the url.")
+                #         if submission.url_overridden_by_dest.startswith(self._url_prefixs):
+                #             img_url_to_send.append(submission.url_overridden_by_dest)
+                # for img_url in img_url_to_send:
+                #   if img_url in self._url_list:
+                #       continue
 
-                    for img_url in img_url_to_send:
+                #   if img_url.lower().find("gifs") != -1:
+                #       self._logger.info(f"Found a gif URL -> {img_url}")
+                #       continue
+
+                #   self._logger.debug(f"Checking the hash of {img_url}")
+                #   hash_res: bool = await self.hash_process(img_url)
+                #   self._logger.debug(f"Checking Image Edge Array...{img_url}")
+                #   edge_res: bool = await self._partial_edge_comparison(img_url=img_url)
+
+                #   if hash_res or edge_res == True:
+                #       self._logger.debug(f"Duplicate check failed | hash - {hash_res} | edge - {edge_res}")
+                #       continue
+
+                #   else:
+                #       self._url_list.append(img_url)
+                #       count += 1
+                #       await self.webhook_send(url=webhook_url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
+                #       # Soft buffer delay between sends to prevent rate limiting.
+                #       await asyncio.sleep(self._delay_loop)
+                for sub_entry in submissions:
+                    for submission, img_url in sub_entry.items():
                         if img_url in self._url_list:
                             continue
 
@@ -602,6 +671,7 @@ class Reddit_IS(cog.KumaCog):
         self._logger.debug("subreddit_media_handler ending")
         return count
 
+    # TODO - Possibly turn this into a command.
     async def _get_submission_by_id(self, id: str):
         """
         Test function for getting individual submissions. Used for dev.
@@ -712,17 +782,19 @@ class Reddit_IS(cog.KumaCog):
             list(str): Image urls.
         """
         _urls: list[str] = []
-        self._logger.info(f"{submission.title} has attribute media_metadata, getting urls")
-        if hasattr(submission, "media_metadata") and getattr(submission, "media_metadata") == isinstance(submission.media_metadata, dict):
-            for key, img in submission.media_metadata.items():
-                # for key, img in submission.media_metadata.items():
-                # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': LN 105}
-                # This allows us to only get Images.
-                if "e" in img and img["e"] == 'Image':
-                    # example 's': {'y': 2340, 'x': 1080, 'u': 'https://preview.redd.it/0u8xnxknijha1.jpg?width=1080&format=pjpg&auto=webp&v=enabled&s=04e505ade5889f6a5f559dacfad1190446607dc4'}, 'id': '0u8xnxknijha1'}
-                    # img_url = img["s"]["u"]
-                    _urls.append(img["s"]["u"])
-                    continue
+        self._logger.info(f"-- {submission.title} has attribute media_metadata, getting urls")
+        if hasattr(submission, "media_metadata"):
+            res = getattr(submission, "media_metadata")
+            if isinstance(res, dict):
+                for key, img in res.items():
+                    # for key, img in submission.media_metadata.items():
+                    # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': See below..}
+                    # This allows us to only get Images.
+                    if "e" in img and img["e"] == 'Image':
+                        # example 's': {'y': 2340, 'x': 1080, 'u': 'https://preview.redd.it/0u8xnxknijha1.jpg?width=1080&format=pjpg&auto=webp&v=enabled&s=04e505ade5889f6a5f559dacfad1190446607dc4'}, 'id': '0u8xnxknijha1'}
+                        # img_url = img["s"]["u"]
+                        _urls.append(img["s"]["u"])
+                        continue
         return _urls
 
     async def _convert_gallery_submissions(self, submission: asyncpraw.reddit.Submission) -> list[str]:
@@ -765,6 +837,10 @@ class Reddit_IS(cog.KumaCog):
                 setattr(submission, "media_metadata", data)
                 _urls = await self._get_media_metadata_urls(submission=submission)
 
+            # Edge case; some gallery's apparently have a proper "media_metadata" url.
+            elif hasattr(submission, "media_metadata"):
+                _urls = await self._get_media_metadata_urls(submission=submission)
+        self._logger.info(len(_urls))
         return _urls
 
     async def _get_url_req(self, img_url: str, ignore_validation: bool = False) -> ClientResponse | Literal[False]:
@@ -964,6 +1040,23 @@ class Reddit_IS(cog.KumaCog):
             return 400
 
         return check.status
+
+    @commands.hybrid_command(help="Retrevies a subreddits X number of Submissions")
+    @app_commands.describe(sub="The subreddit name.")
+    @app_commands.describe(count="The number of submissios to retrieve, default is 5.")
+    @app_commands.describe(order_type="Either `New, Hot, Best or Top`")
+    @app_commands.autocomplete(order_type=autocomplete_submission_type)
+    async def get_subreddit(self, context: commands.Context, sub: str, order_type: str = "new", count: app_commands.Range[int, 0, 100] = 5):
+        status: int = await self.check_subreddit(subreddit=sub)
+        if status != 200:
+            return await context.send(content=f"Unable to find the subreddit `/r/{sub}`.\n *Status code: {status}*", delete_after=self._message_timeout)
+
+        res: list[dict[asyncpraw.reddit.Submission, str]] = await self.process_subreddit_submissions(sub=sub, order_type=order_type, count=count)
+        self._logger.info(len(res))
+        for entry in res:
+            for submission, url in entry.items():
+                await context.send(content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{url}\n')
+        return await context.send(content=f"Finished sending {len(res)} submissions from **r/{sub}**")
 
     @commands.hybrid_command(help="Add a subreddit to the DB", aliases=["rsadd", "rsa"])
     @app_commands.describe(sub="The sub Reddit name.")
