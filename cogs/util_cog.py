@@ -198,7 +198,7 @@ class Util(cog.KumaCog):
     async def clear(self, interaction: discord.Interaction | commands.Context, channel: Union[discord.VoiceChannel, discord.TextChannel, discord.Thread, None], amount: app_commands.Range[int, 0, 100] = 15, all: bool = False):
         """Cleans up Messages sent by anyone. Limit 100"""
         if isinstance(interaction, discord.Interaction):
-            await interaction.response.defer()
+            await interaction.response.send_message(content="Removing messages...", delete_after=self._message_timeout)
 
         assert isinstance(interaction.channel, (discord.VoiceChannel, discord.TextChannel, discord.Thread))
         channel = channel or interaction.channel

@@ -377,7 +377,7 @@ class Reddit_IS(cog.KumaCog):
         Stops our scrape loop if running and closes any open connections.
         """
         self.json_save()
-        await asyncio.to_thread(self._save_array)
+        await self._save_array()
         await self._reddit.close()
         await self._sessions.close()
         if self.check_loop.is_running():
@@ -514,7 +514,7 @@ class Reddit_IS(cog.KumaCog):
 
         self._last_check = datetime.now(tz=timezone.utc)
         self.json_save()
-        await asyncio.to_thread(self._save_array)
+        await self._save_array()
         if count >= 1:
             self._logger.info(f'Finished Sending {str(count) + " Images" if count > 1 else str(count) + " Image"}')
         else:
@@ -529,7 +529,7 @@ class Reddit_IS(cog.KumaCog):
 
         cur_subreddit: Subreddit = await self._reddit.subreddit(display_name=sub, fetch=True)
         # limit - controls how far back to go (true limit is 100 entries)
-        self._logger.info(f"order_type: {order_type} | count: {count} | sub: {sub}")
+        self._logger.debug(f"order_type: {order_type} | count: {count} | sub: {sub}")
         if order_type.lower() == "new":
             res = cur_subreddit.new(limit=count)
         elif order_type.lower() == "hot":
@@ -643,6 +643,7 @@ class Reddit_IS(cog.KumaCog):
                 #       await self.webhook_send(url=webhook_url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
                 #       # Soft buffer delay between sends to prevent rate limiting.
                 #       await asyncio.sleep(self._delay_loop)
+                self._logger.debug(f"# of possible image submissions {len(submissions)}")
                 for sub_entry in submissions:
                     for submission, img_url in sub_entry.items():
                         if img_url in self._url_list:
@@ -719,27 +720,31 @@ class Reddit_IS(cog.KumaCog):
         # Track our failures and break if we exceed the diff.                    eg. 50-40 (10 points)
         match_req: int = int((len(b_edges) / self.IMAGE_COMP.sample_percent))
         min_match_req: int = int((match_req * self.IMAGE_COMP.match_percent) / 100)
+        # list (tuple(0,1),(2,2)) (X, Y) (0, 0) (500, 500)
         for array in self._pixel_cords_array:  # list[b'\x07\x00\x08\x00\x02\x00\x02\x00', b'\x07\x00\x08\x00\x02\x00\x02\x00']
             match_count: int = 0
             failures: int = 0
             # b'\x07\x00 \x08\x00 \x02\x00 \x02\x00'
             # We skip the first two bytes as that is the struct_pack value count.
+            start_pos: int = 0
             for cords in range(2, len(b_edges), 40):
-                if match_count >= min_match_req:
-                    self._logger.debug(f"Running full edge comparison on {img_url} | {len(b_edges)}")
-                    match: bool = await self._full_edge_comparison(array=array, edges=b_edges)
-                    if match == False:
-                        break
-                    else:
-                        return True
-                elif failures > (match_req - min_match_req):
-                    self._logger.debug(f"{img_url} Match count {match_count}/{min_match_req} | Failure count {failures}/{match_req-min_match_req}")  # \n Looking for {b_edges[cords:cords + 4]} in {array}")
-                    break
-
-                elif array.find(b_edges[cords:cords + 4]) == -1:
+                # \x07\x00 #index resets to (0, len(array)) 1200 points / 4300
+                sample: int = array.find(b_edges[cords:cords + 4], start_pos)
+                if sample == -1:
                     failures += 1
+                    if failures > (match_req - min_match_req):
+                        self._logger.debug(f"{img_url} Match count {match_count}/{min_match_req} | Failure count {failures}/{match_req-min_match_req}")  # \n Looking for {b_edges[cords:cords + 4]} in {array}")
+                        break
                 else:
                     match_count += 1
+                    start_pos = sample + 4
+                    if match_count >= min_match_req:
+                        self._logger.debug(f"--> Running full edge comparison on {img_url} | {len(b_edges)}")
+                        match: bool = await self._full_edge_comparison(array=array, edges=b_edges)
+                        if match == False:
+                            break
+                        else:
+                            return True
 
         self._pixel_cords_array.append(b_edges)
         self._etime: float = (time.time() - stime)
@@ -840,7 +845,7 @@ class Reddit_IS(cog.KumaCog):
             # Edge case; some gallery's apparently have a proper "media_metadata" url.
             elif hasattr(submission, "media_metadata"):
                 _urls = await self._get_media_metadata_urls(submission=submission)
-        self._logger.info(len(_urls))
+        # self._logger.info(len(_urls))
         return _urls
 
     async def _get_url_req(self, img_url: str, ignore_validation: bool = False) -> ClientResponse | Literal[False]:
@@ -912,8 +917,13 @@ class Reddit_IS(cog.KumaCog):
 
         """
         limiter: int = (len(self._subreddits) * self._submission_limit) * 3
+        self._logger.debug(f"The length of our pixel cords array before limiting {len(self._pixel_cords_array)} | limiter: {limiter}")
         while len(self._pixel_cords_array) > limiter:
             self._pixel_cords_array.pop(0)
+
+        self._logger.debug(f"pixel cords array {len(self._pixel_cords_array)}")
+        for entry in self._pixel_cords_array:
+            self._logger.debug(f"length of bytes {len(entry)}")
 
         data: bytes = b"".join(self._pixel_cords_array)
         self._logger.debug(f"Writing our Pixel Array to `reddit_array.bin` || bytes {len(data)}")
@@ -936,18 +946,18 @@ class Reddit_IS(cog.KumaCog):
         self._logger.debug(f"Loading array from file | bytes {len(data)}")
         b_file.close()
         # We unpack our array len from the previous comment resulting in 4 or b"(\x04\x00)"
-        # we *2 to account for 2 bytes per value stored, 2 values go into a single tuple()
+        # we *2 to account for 2 bytes per value stored, 2 values go into a single tuple() or tuple(b"\x04\x00", b"\x04\x02")
         self._pixel_cords_array = []
         total_pos = 0
         while total_pos < len(data):
             # struct.unpack returns a tuple of the unpacked data, we are using the first 4 bytes to store an array count.
             # we multiple by 2 to get true length as we are storing 2 bytes per value.
-            array_len: int = (struct.unpack("<I", data[total_pos:total_pos + 4])[0] * 2)
+            cord_len: int = (struct.unpack("<I", data[total_pos:total_pos + 4])[0] * 2)
+            self._logger.debug(f"cord length {cord_len}")
 
             # We incriment total_pos +4 to pass our array len blob.
-            total_pos += 4
-            self._pixel_cords_array.append(data[total_pos: total_pos + array_len])
-            total_pos += array_len
+            self._pixel_cords_array.append(data[total_pos: total_pos + cord_len + 4])
+            total_pos += cord_len + 4
         self._logger.debug(f"Reading our Array File... | total entries {len(self._pixel_cords_array)}")
 
     async def hash_process(self, img_url: str) -> bool:
@@ -1106,7 +1116,7 @@ class Reddit_IS(cog.KumaCog):
                 sub_entry = f"{emoji} - **/r/**`{name}`"
                 temp_list.append(sub_entry)
 
-        return await context.send(content="**__Current Subreddit List__:**\n" + "\n".join(temp_list))
+        return await context.send(content=f"**__Current Subreddit List__**(total: {len(temp_list)}):\n" + "\n".join(temp_list))
 
     @commands.hybrid_command(help="Info about a subreddit", aliases=["rsinfo", "rsi"])
     @app_commands.describe(sub="The sub Reddit name.")
@@ -1211,7 +1221,7 @@ class Reddit_IS(cog.KumaCog):
             img_one: Image = IMG.open(io.BytesIO(await res_one.read()))
             img_two: Image = IMG.open(io.BytesIO(await res_two.read()))
             self.IMAGE_COMP.compare(source=img_one, comparison=img_two)
-            return await context.send(f"{self.IMAGE_COMP.results}")
+            return await context.send(content=f"**URL One**:{url_one}\n**URL Two**:{url_two}\n**Results:**{self.IMAGE_COMP.results}")
 
 
 async def setup(bot: commands.Bot):
