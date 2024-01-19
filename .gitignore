@@ -8,3 +8,4 @@ local.py
 dump.*
 *.bin
 depreciated_cogs/*
+cogs/dump copy.txt
