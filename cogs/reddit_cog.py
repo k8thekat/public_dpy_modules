@@ -337,6 +337,30 @@ class Reddit_IS(cog.KumaCog):
         # Default value; change in `reddit_cog.ini`
         self._user_name: Union[str, None] = "Reddit Scrapper"
 
+        # Comparison placeholders through Emojis
+        self._reaction_compare_urls: list[str] = []
+
+    @commands.Cog.listener("on_reaction_add")
+    async def on_reaction_compare(self, reaction: discord.Reaction, user: discord.User):
+        """
+        Using the :heavy_check_mark: as a reaction on two images will compare them.
+
+        Args:
+            reaction (discord.Reaction): Discord Reaction object
+            user (discord.User): Discord user object
+        """
+        self._logger.info(self._reaction_compare_urls)
+        if isinstance(reaction.emoji, str):
+            if reaction.emoji == "\u2714\ufe0f":
+                res: list[str] = reaction.message.content.split("\n")
+                self._reaction_compare_urls.append(res[-1])
+                await reaction.message.remove_reaction(emoji="\u2714\ufe0f", member=user)
+
+        if len(self._reaction_compare_urls) >= 2:
+            await self._compare_urls(url_one=self._reaction_compare_urls[0], url_two=self._reaction_compare_urls[1])
+            await reaction.message.channel.send(content=f"{user.mention}\n**URL One**:{self._reaction_compare_urls[0]}\n**URL Two**:{self._reaction_compare_urls[1]}\n**Results:**{self.IMAGE_COMP.results}", delete_after=15)
+            self._reaction_compare_urls = []
+
     async def cog_load(self) -> None:
         """Creates Sqlite Database if not present. 
 
@@ -1051,6 +1075,22 @@ class Reddit_IS(cog.KumaCog):
 
         return check.status
 
+    async def _compare_urls(self, url_one: str, url_two: str):
+        """
+        Takes two Image URLs and turns them into PIL Images for comparison.
+        See `self.IMAGE_COMP`
+
+        Args:
+            url_one (str): image url
+            url_two (str): image url
+        """
+        res_one: ClientResponse | Literal[False] = await self._get_url_req(img_url=url_one)
+        res_two: ClientResponse | Literal[False] = await self._get_url_req(img_url=url_two)
+        if res_one and res_two != False:
+            img_one: Image = IMG.open(io.BytesIO(await res_one.read()))
+            img_two: Image = IMG.open(io.BytesIO(await res_two.read()))
+            self.IMAGE_COMP.compare(source=img_one, comparison=img_two)
+
     @commands.hybrid_command(help="Retrevies a subreddits X number of Submissions")
     @app_commands.describe(sub="The subreddit name.")
     @app_commands.describe(count="The number of submissios to retrieve, default is 5.")
@@ -1215,13 +1255,8 @@ class Reddit_IS(cog.KumaCog):
 
     @commands.hybrid_command(help="Edge comparison of two URLs", aliases=["edge"])
     async def edge_comparison(self, context: commands.Context, url_one: str, url_two: str):
-        res_one: ClientResponse | Literal[False] = await self._get_url_req(img_url=url_one)
-        res_two: ClientResponse | Literal[False] = await self._get_url_req(img_url=url_two)
-        if res_one and res_two != False:
-            img_one: Image = IMG.open(io.BytesIO(await res_one.read()))
-            img_two: Image = IMG.open(io.BytesIO(await res_two.read()))
-            self.IMAGE_COMP.compare(source=img_one, comparison=img_two)
-            return await context.send(content=f"**URL One**:{url_one}\n**URL Two**:{url_two}\n**Results:**{self.IMAGE_COMP.results}")
+        await self._compare_urls(url_one=url_one, url_two=url_two)
+        return await context.send(content=f"**URL One**:{url_one}\n**URL Two**:{url_two}\n**Results:**{self.IMAGE_COMP.results}")
 
 
 async def setup(bot: commands.Bot):
