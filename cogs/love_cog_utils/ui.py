@@ -3,7 +3,7 @@ from typing import Any
 import datetime
 
 from utils.timetable import TimeTable
-from db import LoverEntry
+from cogs.love_cog_utils.db import LoverEntry
 
 from discord.colour import Colour
 from discord.enums import ButtonStyle

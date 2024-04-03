@@ -1,10 +1,10 @@
 import pathlib
-from pathlib import Path
-from dataclasses import dataclass
-import utils.asqlite as asqlite
 import sqlite3
-from typing import Union, Any, Self
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Self, Union
 
+import utils.asqlite as asqlite
 
 script_loc: Path = Path(__file__).parent
 DB_FILENAME = "lovers.sqlite"
@@ -124,7 +124,7 @@ class LoverEntry:
                 return cur.get_cursor().rowcount
 
     # async def update_lover(self, name: str, role: int, position: int, role_switching: bool = False, position_switching: bool = False) -> LoverEntry:
-    async def update_lover(self, args: dict[str, int | bool]) -> LoverEntry:
+    async def update_lover(self, args: dict[str, int | bool]) -> Self:
         SQL = []
         VALUES = []
         for entry in args:
@@ -145,9 +145,9 @@ class LoverEntry:
                 await db.commit()
 
                 res = await cur.fetchone()
-                return LoverEntry(**res)
+                return LoverEntry(**res)  # type:ignore
 
-    async def add_partner(self, partner_id: int, role_switching: bool, position_switching: bool, s_time: int) -> LoverEntry | None | bool:
+    async def add_partner(self, partner_id: int, role_switching: bool, position_switching: bool, s_time: int) -> Self | None | bool:
         """Partners TABLE SCHEMA  
         ----------------------------
 
@@ -195,7 +195,7 @@ class LoverEntry:
 
                     # res = await cur.fetchone()
                     await db.commit()
-                    return partner
+                    return partner  # type:ignore
         else:
             return False
         # return lover

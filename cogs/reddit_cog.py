@@ -1,35 +1,33 @@
-# Reddit Image Scraper cog
 import asyncio
-from datetime import datetime, timezone
-from configparser import ConfigParser
+import hashlib
 import io
+import json
+import os
+import struct
+import sys
+import time
+from configparser import ConfigParser
+from datetime import datetime, timezone
 from pathlib import Path
-from PIL import Image as IMG
-from PIL.Image import Image
+from sqlite3 import Row
+from typing import Literal, TypedDict, Union
+
+import aiohttp
+import asyncpraw
 import discord
 import pytz
-import json
-import hashlib
-import sys
-import os
 import tzlocal
-import time
-import aiohttp
 from aiohttp import ClientResponse
-from typing import TypedDict, Union, Literal
-from typing_extensions import Any
-from fake_useragent import UserAgent
-import asyncpraw
 from asyncpraw.models import Subreddit
-import utils.asqlite as asqlite
-from sqlite3 import Row
-from discord.ext import commands, tasks
 from discord import app_commands
-import struct
+from discord.ext import commands, tasks
+from fake_useragent import UserAgent
+from PIL import Image as IMG
+from PIL.Image import Image
+from typing_extensions import Any
 
-from utils import cog
-from utils import ImageComp
-
+import utils.asqlite as asqlite
+from utils import ImageComp, cog
 
 script_loc: Path = Path(__file__).parent
 DB_FILENAME = "reddit_scrape.sqlite"
@@ -753,6 +751,7 @@ class Reddit_IS(cog.KumaCog):
             start_pos: int = 0
             for cords in range(2, len(b_edges), 40):
                 # \x07\x00 #index resets to (0, len(array)) 1200 points / 4300
+                # TODO - Need to improve the logic here. It is blocking.
                 sample: int = array.find(b_edges[cords:cords + 4], start_pos)
                 if sample == -1:
                     failures += 1
