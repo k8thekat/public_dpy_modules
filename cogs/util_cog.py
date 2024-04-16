@@ -20,33 +20,29 @@
 
 '''
 from __future__ import annotations
+
+import inspect
+import json
+# Python Libs
+import os
+import re
+import time
+import unicodedata
+from datetime import timedelta
+from typing import Union
+
+import aiofiles
+import aiohttp
+import discord
+import mystbin
+import psutil
 # Discord Libs
 from discord import app_commands
 from discord.ext import commands
-import discord
-
-# Python Libs
-import os
-import aiofiles
-
-import psutil
-import re
-import time
-from datetime import timedelta
-import aiohttp
-import json
-import mystbin
-import aiohttp
-import os
-import json
-import time
-import mystbin
-import unicodedata
-import inspect
-from typing import Union
 
 # Local libs
 from utils import cog
+
 # TODO - Write get log function.
 # Possibly pull the entire file, parts of the file (0-50) and or key words/errors from `logger.warn` or `logger.error`
 
@@ -112,7 +108,7 @@ class Util(cog.KumaCog):
             should_upload_to_bin = should_upload_to_bin or len(
                 file_content) > 1100
         if should_upload_to_bin:
-            paste = await self._mb_client.create_multifile_paste(files=files)
+            paste = await self._mb_client.create_paste(files=files)
 
             author = discord.utils.escape_markdown(str(message.author))
             await message.channel.send(f"Hey {message.author.mention}, *Kuma Kuma Bear* moved your codeblock(s) to `Mystbin`\n\n{content}\n\n{paste.url}")
