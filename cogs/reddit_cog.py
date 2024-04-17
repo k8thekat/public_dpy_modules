@@ -7,6 +7,7 @@ import struct
 import sys
 import time
 from configparser import ConfigParser
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlite3 import Row
@@ -53,6 +54,13 @@ class Webhook(TypedDict):
     name: str
     url: str
     id: int
+
+
+@dataclass
+class ImageInfo():
+    width: int = field(default=0)
+    height: int = field(default=0)
+    edge_res: bool = field(default=True)
 
 
 async def _get_subreddit(name: str) -> Row | None:
@@ -128,7 +136,7 @@ async def _get_all_subreddits(webhooks: bool = True) -> list[str | Union[Any, st
     Args:
         webooks(bool): Set to False to not include webhook IDs when getting subreddits. Defaults True.
     Returns:
-        list[Union[Any, dict[str, str]]]: An empty list if no entries in the Subreddit table.  
+        list[Union[Any, dict[str, str]]]: An empty list if no entries in the Subreddit table.
 
         Otherwise a list of dictionaries structured as `[{"subreddit", "webhook url"}]`
     """
@@ -221,7 +229,7 @@ async def _add_webhook(name: str, url: str) -> Row | None:
         url (str): Discord webhook URL
 
     Returns:
-        Row['id','name','url'] | None 
+        Row['id','name','url'] | None
     """
     res: Row | None = await _get_webhook(arg=url)
     if res is not None:
@@ -236,7 +244,7 @@ async def _add_webhook(name: str, url: str) -> Row | None:
                 return res if not None else None
 
 
-async def _del_webook(arg: Union[int, str]) -> int | None:
+async def _del_webhook(arg: Union[int, str]) -> int | None:
     """
     Delete a Row matching the args from the Webhook Table.\n
 
@@ -360,7 +368,7 @@ class Reddit_IS(cog.KumaCog):
             self._reaction_compare_urls = []
 
     async def cog_load(self) -> None:
-        """Creates Sqlite Database if not present. 
+        """Creates Sqlite Database if not present.
 
             Gets settings from`reddit_cog.ini`
 
@@ -475,7 +483,7 @@ class Reddit_IS(cog.KumaCog):
 
     def json_save(self) -> None:
         """
-        I generate an upper limit of the list based upon the subreddits times the submissin search limit; 
+        I generate an upper limit of the list based upon the subreddits times the submissin search limit;
         this allows for configuration changes and not having to scale the limit of the list
         """
         _temp_url_list: list[str] = []
@@ -678,16 +686,17 @@ class Reddit_IS(cog.KumaCog):
                         self._logger.debug(f"Checking the hash of {img_url}")
                         hash_res: bool = await self.hash_process(img_url)
                         self._logger.debug(f"Checking Image Edge Array...{img_url}")
-                        edge_res: bool = await self._partial_edge_comparison(img_url=img_url)
+                        img_info: ImageInfo = await self._partial_edge_comparison(img_url=img_url)
 
-                        if hash_res or edge_res == True:
-                            self._logger.debug(f"Duplicate check failed | hash - {hash_res} | edge - {edge_res}")
+                        if hash_res or img_info.edge_res == True:
+                            self._logger.debug(f"Duplicate check failed | hash - {hash_res} | edge - {img_info.edge_res}")
                             continue
 
                         else:
                             self._url_list.append(img_url)
                             count += 1
-                            await self.webhook_send(url=webhook_url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
+                            formatted_content = f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n[{img_info.width}x{img_info.height}]\n{img_url}\n'
+                            await self.webhook_send(url=webhook_url, content=formatted_content)
                             # Soft buffer delay between sends to prevent rate limiting.
                             await asyncio.sleep(self._delay_loop)
 
@@ -708,7 +717,7 @@ class Reddit_IS(cog.KumaCog):
         # for entry in dir(res):
         #     pprint(f"attr:{entry} -> {getattr(res, entry)}")
 
-    async def _partial_edge_comparison(self, img_url: str) -> bool:
+    async def _partial_edge_comparison(self, img_url: str) -> ImageInfo:
         """
         Uses aiohttp to `GET` the image url, we modify/convert the image via PIL and get the edges as a binary string.\n
         We take a partial of the edges binary string and see if the blobs exists in `_pixel_cords_array`. \n
@@ -719,12 +728,13 @@ class Reddit_IS(cog.KumaCog):
             img_url (str): Web url to Image.
 
         Returns:
-            bool: Returns `True` on any failed methods/checks or the array already exists else returns `False`.
+            ImageInfo: Returns an ImageInfo dataclass to access the image properties and edge results.
         """
+        img_info: ImageInfo = ImageInfo()
         stime: float = time.time()
         res: ClientResponse | Literal[False] = await self._get_url_req(img_url=img_url, ignore_validation=False)
         if res == False:
-            return True
+            return img_info
 
         source: Image = IMG.open(io.BytesIO(await res.read()))
         source = self.IMAGE_COMP._convert(image=source)
@@ -733,7 +743,7 @@ class Reddit_IS(cog.KumaCog):
         edges: list[tuple[int, int]] | None = self.IMAGE_COMP._edge_detect(image=source)
         if edges == None:
             self._logger.error(f"Found no edges for url -> {img_url}")
-            return True
+            return img_info
 
         b_edges: bytes = await self._struct_pack(edges)
         # self._logger.info(f"Packed | {len(edges)}")
@@ -767,11 +777,12 @@ class Reddit_IS(cog.KumaCog):
                         if match == False:
                             break
                         else:
-                            return True
+                            return img_info
 
         self._pixel_cords_array.append(b_edges)
         self._etime: float = (time.time() - stime)
-        return False
+        img_info.edge_res = False
+        return img_info
 
     async def _full_edge_comparison(self, array: bytes, edges: bytes) -> bool:
         """
@@ -933,7 +944,6 @@ class Reddit_IS(cog.KumaCog):
         return var
 
     async def _save_array(self) -> None:
-
         """
         Saves the list of bytes to `reddit_array.bin`\n
         We truncate the list depending on the length of subreddits and submission limits.
@@ -1188,7 +1198,7 @@ class Reddit_IS(cog.KumaCog):
     @commands.hybrid_command(help="Remove a webhook from the database.", aliases=["rswhdel", "rswhd"])
     @app_commands.autocomplete(webhook=autocomplete_webhook)
     async def del_webhook(self, context: commands.Context, webhook: str):
-        res: int | None = await _del_webook(arg=webhook)
+        res: int | None = await _del_webhook(arg=webhook)
         self._recent_edit = True
         await context.send(content=f"Removed {res} {'webhook' if res else ''}", delete_after=self._message_timeout)
 
