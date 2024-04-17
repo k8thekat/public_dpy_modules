@@ -737,6 +737,8 @@ class Reddit_IS(cog.KumaCog):
             return img_info
 
         source: Image = IMG.open(io.BytesIO(await res.read()))
+        img_info.width = source.width
+        img_info.height = source.height
         source = self.IMAGE_COMP._convert(image=source)
         res_image: tuple[Image, Image | None] = self.IMAGE_COMP._image_resize(source=source)
         source = self.IMAGE_COMP._filter(image=res_image[0])
