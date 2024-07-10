@@ -483,7 +483,7 @@ class Reddit_IS(cog.KumaCog):
 
     def json_save(self) -> None:
         """
-        I generate an upper limit of the list based upon the subreddits times the submissin search limit;
+        I generate an upper limit of the list based upon the subreddits times the submission search limit;
         this allows for configuration changes and not having to scale the limit of the list
         """
         _temp_url_list: list[str] = []
@@ -703,7 +703,6 @@ class Reddit_IS(cog.KumaCog):
         self._logger.debug("subreddit_media_handler ending")
         return count
 
-    # TODO - Possibly turn this into a command.
     async def _get_submission_by_id(self, id: str):
         """
         Test function for getting individual submissions. Used for dev.
@@ -1102,9 +1101,9 @@ class Reddit_IS(cog.KumaCog):
             img_two: Image = IMG.open(io.BytesIO(await res_two.read()))
             self.IMAGE_COMP.compare(source=img_one, comparison=img_two)
 
-    @commands.hybrid_command(help="Retrevies a subreddits X number of Submissions")
+    @commands.hybrid_command(help="Retrieves a subreddits X number of Submissions")
     @app_commands.describe(sub="The subreddit name.")
-    @app_commands.describe(count="The number of submissios to retrieve, default is 5.")
+    @app_commands.describe(count="The number of submissions to retrieve, default is 5.")
     @app_commands.describe(order_type="Either `New, Hot, Best or Top`")
     @app_commands.autocomplete(order_type=autocomplete_submission_type)
     async def get_subreddit(self, context: commands.Context, sub: str, order_type: str = "new", count: app_commands.Range[int, 0, 100] = 5):
@@ -1121,6 +1120,7 @@ class Reddit_IS(cog.KumaCog):
 
     @commands.hybrid_command(help="Add a subreddit to the DB", aliases=["rsadd", "rsa"])
     @app_commands.describe(sub="The sub Reddit name.")
+    @app_commands.default_permissions(manage_guild=True)
     async def add_subreddit(self, context: commands.Context, sub: str):
 
         status: int = await self.check_subreddit(subreddit=sub)
@@ -1138,6 +1138,7 @@ class Reddit_IS(cog.KumaCog):
     @commands.hybrid_command(help="Remove a subreddit from the DB", aliases=["rsdel", "rsd"])
     @app_commands.describe(sub="The sub Reddit name.")
     @app_commands.autocomplete(sub=autocomplete_subreddit)
+    @app_commands.default_permissions(manage_guild=True)
     async def del_subreddit(self, context: commands.Context, sub: str):
         res: int | None = await _del_subreddit(name=sub)
         self._recent_edit = True
@@ -1147,6 +1148,7 @@ class Reddit_IS(cog.KumaCog):
     @app_commands.describe(sub="The sub Reddit name.")
     @app_commands.autocomplete(sub=autocomplete_subreddit)
     @app_commands.autocomplete(webhook=autocomplete_webhook)
+    @app_commands.default_permissions(manage_guild=True)
     async def update_subreddit(self, context: commands.Context, sub: str, webhook: str):
         res: Row | None = await _update_subreddit(name=sub, webhook=webhook)
         if res is None:
@@ -1184,6 +1186,7 @@ class Reddit_IS(cog.KumaCog):
             return await context.send(content=f"Unable to find /r/`{sub} in the database.", delete_after=self._message_timeout)
 
     @commands.hybrid_command(help="Add a webhook to the database.", aliases=["rswhadd", "rswha"])
+    @app_commands.default_permissions(manage_webhooks=True)
     async def add_webhook(self, context: commands.Context, webhook_name: str, webhook_url: str):
         data: str = f"Testing webhook {webhook_name}"
         success: bool | None = await self.webhook_send(url=webhook_url, content=data)
@@ -1199,17 +1202,20 @@ class Reddit_IS(cog.KumaCog):
 
     @commands.hybrid_command(help="Remove a webhook from the database.", aliases=["rswhdel", "rswhd"])
     @app_commands.autocomplete(webhook=autocomplete_webhook)
+    @app_commands.default_permissions(manage_webhooks=True)
     async def del_webhook(self, context: commands.Context, webhook: str):
         res: int | None = await _del_webhook(arg=webhook)
         self._recent_edit = True
         await context.send(content=f"Removed {res} {'webhook' if res else ''}", delete_after=self._message_timeout)
 
     @commands.hybrid_command(help="List all webhook in the database.", aliases=["rswhlist", "rswhl"])
+    @app_commands.default_permissions(manage_webhooks=True)
     async def list_webhook(self, context: commands.Context):
         res: list[Webhook | None] = await _get_all_webhooks()
         return await context.send(content="**Webhooks**:\n" + "\n".join([f"**{entry['name']}** ({entry['id']})\n> `{entry['url']}`\n" for entry in res if entry is not None]), delete_after=self._message_timeout)
 
     @commands.hybrid_command(help="Start/Stop the Scrapper loop", aliases=["rsloop"])
+    @app_commands.default_permissions(administrator=True)
     async def scrape_loop(self, context: commands.Context, util: Literal["start", "stop", "restart"]):
         start: list[str] = ["start", "on", "run"]
         end: list[str] = ["stop", "off", "end"]
