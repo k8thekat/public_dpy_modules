@@ -9,3 +9,4 @@ dump.*
 *.bin
 depreciated_cogs/*
 cogs/dump copy.txt
+utils/xy_binfind.tgz

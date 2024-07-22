@@ -1,8 +1,10 @@
+import time
+from typing import Any, Union
+
+from PIL import ImageFilter
+from PIL._util import DeferredError
 from PIL.Image import Image as IMG
 from PIL.Image import Resampling
-from PIL import ImageFilter
-import time
-from typing import Union
 
 
 class Image_Comparison:
@@ -11,7 +13,7 @@ class Image_Comparison:
         Properties:
             _match_percent (int) : This is the percentage base match value, results must be this or higher. Defaults to 90%
             _line_detect (int) : This is the 0-255 value we use to determine if the pixel is a "line". Defaults to 128
-            _sample_percent (int) : This is the % of edge cords to use for comparsion. Defaults to 10%
+            _sample_percent (int) : This is the % of edge cords to use for comparison. Defaults to 10%
             _sample_dimensions (tuple[int, int]) : This is the default resolution to scale all images down to (or up). Defaults to (500, 500)
 
         """
@@ -53,7 +55,7 @@ class Image_Comparison:
     @property
     def sample_percent(self) -> int:
         """
-        This is the % of edge cords to use for comparsion. Defaults to 10%
+        This is the % of edge cords to use for comparison. Defaults to 10%
 
         Returns:
             int: The `_sample_percent` value.
@@ -189,34 +191,42 @@ class Image_Comparison:
 
     def _edge_detect(self, image: IMG) -> Union[None, list[tuple[int, int]]]:
         """
-        Iterates from 0,0 looking for a pixel value above or equl to our `_line_detect` value. 
+        Retrieves all our pixel data of the Image, then iterates from 0,0 looking for a pixel value above or equal to our `_line_detect` value.
 
         When a pixel value high enough has been found it is added to our array.
 
         Args:
             image (IMG): PIL Image
 
+        Raises:
+            BaseException: We ran into an error handling getdata().
+            ValueError: We failed to get any data from the img.
+
         Returns:
             list(tuple(int, int)): List of (X,Y) cords.
         """
         edges: list[tuple[int, int]] = []
-        for y in range(0, image.height):
-            for x in range(0, image.width):
-                pixel: int = image.getpixel((x, y))
-                if pixel >= self._line_detect:
-                    edges.append((x, y))
+
+        pixels: Any | None | DeferredError = image.getdata()
+        if isinstance(pixels, DeferredError):
+            raise BaseException(f"We ran into an error handling the image. | {pixels.ex}")
+        elif pixels is None:
+            raise ValueError(f"We failed to get any data from the image.")
+        for x in range(0, len(pixels)):
+            if pixels[x] >= self._line_detect:
+                edges.append((int(x % image.width), int(x / image.height)))
 
         return edges
 
     def _pixel_comparison(self, image: IMG, cords: tuple[int, int]) -> bool:
         """
-        Uses (X,Y) cords to check a pixel if its above or equl to our `_line_detect` value. 
+        Uses (X,Y) cords to check a pixel if its above or equal to our `_line_detect` value.
 
         If not; calls `_pixel_nearmatch`.
 
         Args:
             image (IMG): PIL Image
-            cords (tuple[int, int]): X,Y cordinates.
+            cords (tuple[int, int]): X,Y coordinates.
 
         Returns:
             bool: True if the pixel value is higher than our `_line_detect` value else False.
@@ -238,7 +248,7 @@ class Image_Comparison:
 
         Args:
             image (IMG): PIL Image
-            cords (tuple[int, int]): X,Y cordinates.
+            cords (tuple[int, int]): X,Y coordinates.
             distance (int, optional): Radius from (X,Y). Defaults to 3.
 
         Returns:

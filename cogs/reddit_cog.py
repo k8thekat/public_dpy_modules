@@ -18,6 +18,7 @@ import asyncpraw
 import discord
 import pytz
 import tzlocal
+import xy_binfind
 from aiohttp import ClientResponse
 from asyncpraw.models import Subreddit
 from discord import app_commands
@@ -25,7 +26,7 @@ from discord.ext import commands, tasks
 from fake_useragent import UserAgent
 from PIL import Image as IMG
 from PIL.Image import Image
-from typing_extensions import Any
+from typing_extensions import Any, Coroutine
 
 import utils.asqlite as asqlite
 from utils import ImageComp, cog
@@ -134,7 +135,7 @@ async def _get_all_subreddits(webhooks: bool = True) -> list[str | Union[Any, st
     Gets all Row entries of the Subreddit Table. Typically including the webhook IDs.
 
     Args:
-        webooks(bool): Set to False to not include webhook IDs when getting subreddits. Defaults True.
+        webhooks(bool): Set to False to not include webhook IDs when getting subreddits. Defaults True.
     Returns:
         list[Union[Any, dict[str, str]]]: An empty list if no entries in the Subreddit table.
 
@@ -292,6 +293,8 @@ async def _get_all_webhooks() -> list[None | Webhook]:
         await db.close()
         return _webhooks
 
+# TODO - Create a JUMP URL to the last string of messages posted.
+
 
 class Reddit_IS(cog.KumaCog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -314,7 +317,7 @@ class Reddit_IS(cog.KumaCog):
         self._json: Path = self._file_dir.joinpath("reddit.json")
         self._url_list: list = []  # []  # Recently sent URLs
         self._hash_list: list = []  # []  # Recently hashed images
-        self._url_prefixs: tuple[str, ...] = ("http://", "https://")
+        self._url_prefixes: tuple[str, ...] = ("http://", "https://")
 
         # Edge Detection comparison.
         self._array_bin: Path = self._file_dir.joinpath("reddit_array.bin")
@@ -336,7 +339,7 @@ class Reddit_IS(cog.KumaCog):
         self._pytz = pytz.timezone(str(self._system_tz))
 
         # Purely used to fill out the user_agent parameter of PRAW
-        self._sysos: str = sys.platform.title()
+        self._sys_os: str = sys.platform.title()
         # Used by URL lib for Hashes.
         self._User_Agent = UserAgent().chrome
 
@@ -526,7 +529,7 @@ class Reddit_IS(cog.KumaCog):
         types: list[str] = ["New", "Top", "Hot"]
         return [app_commands.Choice(name=entry, value=entry) for entry in types if current.lower() in entry.lower()]
 
-    @tasks.loop(minutes=5)
+    @tasks.loop(minutes=5, reconnect=True)
     async def check_loop(self) -> None:
         if self._recent_edit:
             self._subreddits = []
@@ -537,7 +540,12 @@ class Reddit_IS(cog.KumaCog):
             self._logger.warn("No Subreddits found...")
             return
         try:
-            count: int = await self.subreddit_media_handler(last_check=self._last_check)
+            # cur_loop = asyncio.get_event_loop()
+            # cur_loop.run_in_executor
+            # asyncio.run_coroutine_threadsafe(coro=self.subreddit_media_handler(last_check=self._last_check), loop= asyncio.get_event_loop())
+            result: Coroutine[Any, Any, int] = await asyncio.to_thread(self.subreddit_media_handler, self._last_check)
+            count, = await asyncio.gather(result)
+            # count: int = await self.subreddit_media_handler(last_check=self._last_check)
         except Exception as e:
             count = 0
             self._logger.error(f"{type(e)} -> {e}")
@@ -590,7 +598,7 @@ class Reddit_IS(cog.KumaCog):
 
             elif hasattr(submission, "url_overridden_by_dest"):
                 self._logger.info(f"- {submission.title} has attribute url_overridden_by_dest, getting the url.")
-                if submission.url_overridden_by_dest.startswith(self._url_prefixs):
+                if submission.url_overridden_by_dest.startswith(self._url_prefixes):
                     img_url_to_send.append({submission: submission.url_overridden_by_dest})
 
         return img_url_to_send
@@ -599,106 +607,65 @@ class Reddit_IS(cog.KumaCog):
         """Iterates through the subReddits Submissions and sends media_metadata"""
         count = 0
         img_url: Union[str, None] = None
-        # img_url_to_send: list[dict[asyncpraw.reddit.Submission, str]] = []
-        # temp_urls: list[str] = []
 
         if self._sessions.closed:
             self._sessions = aiohttp.ClientSession()
 
-        self._logger.debug(f"subreddit_media_handler starting.. | Delay {self._delay_loop} | # of subreddits {len(self._subreddits)}")
+        self._logger.debug(msg=f"subreddit_media_handler starting.. | Delay {self._delay_loop} | # of subreddits {len(self._subreddits)}")
         # We check self._subreddits in `check_loop`
         for entry in self._subreddits:
             for sub, webhook_url in entry.items():
-                self._logger.debug(f"Looking @ {sub} with {webhook_url}")
+                self._logger.debug(msg=f"Looking @ {sub} with {webhook_url}")
                 if webhook_url == None:
-                    self._logger.warn(f"No Webhook URL for {sub}, skipping...")
+                    self._logger.warn(msg=f"No Webhook URL for {sub}, skipping...")
                     continue
 
                 if self._interrupt_loop == True:
                     self._interrupt_loop = False
-                    self._logger.warn("The Media Handler loop was interrupted.")
+                    self._logger.warn(msg="The Media Handler loop was interrupted.")
                     return count
 
                 res: int = await self.check_subreddit(subreddit=sub)
-                self._logger.debug(f"Check Subreddit | Status Code {res}")
+                self._logger.debug(msg=f"Check Subreddit | Status Code {res}")
                 if res != 200:
-                    self._logger.warn(f"Failed to find the subreddit /r/{sub}, skipping entry. Value: {res}")
+                    self._logger.warn(msg=f"Failed to find the subreddit /r/{sub}, skipping entry. Value: {res}")
                     continue
 
                 submissions: list[dict[asyncpraw.reddit.Submission, str]] = await self.process_subreddit_submissions(sub=sub, last_check=last_check, order_type="New")
-                # cur_subreddit: Subreddit = await self._reddit.subreddit(display_name=sub, fetch=True)
-                # # limit - controls how far back to go (true limit is 100 entries)
-                # self._logger.debug(f"getting submissions for {sub}")
-                # async for submission in cur_subreddit.new(limit=self._submission_limit):
-                #     post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
-                #     # TODO - Add a secondary info print as subreddits are still missing.
-                #     self._logger.info(f'Checking subreddit {sub} {submission} -> submission title: {submission.title} url: {submission.url} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime()}')
-                #     if post_time < last_check:
-                #         continue
-
-                #     img_url_to_send = []
-                #     if hasattr(submission, "url") and getattr(submission, "url").lower().find("gallery") != -1:
-                #         # self._logger.info(f"{submission.title} -> Found a gallery url, getting the image urls.")
-                #         img_url_to_send.extend(await self._convert_gallery_submissions(submission=submission))
-
-                #     # Usually submissions with multiple images will be using this `attr`
-                #     elif hasattr(submission, "media_metadata"):
-                #         # self._logger.info(f"{submission.title} -> Found a media_metadata attribute.")
-                #         img_url_to_send.extend(await self._get_media_metadata_urls(submission=submission))
-
-                #     elif hasattr(submission, "url_overridden_by_dest"):
-                #         # self._logger.info(f"{submission.title} has attribute url_overridden_by_dest, getting the url.")
-                #         if submission.url_overridden_by_dest.startswith(self._url_prefixs):
-                #             img_url_to_send.append(submission.url_overridden_by_dest)
-                # for img_url in img_url_to_send:
-                #   if img_url in self._url_list:
-                #       continue
-
-                #   if img_url.lower().find("gifs") != -1:
-                #       self._logger.info(f"Found a gif URL -> {img_url}")
-                #       continue
-
-                #   self._logger.debug(f"Checking the hash of {img_url}")
-                #   hash_res: bool = await self.hash_process(img_url)
-                #   self._logger.debug(f"Checking Image Edge Array...{img_url}")
-                #   edge_res: bool = await self._partial_edge_comparison(img_url=img_url)
-
-                #   if hash_res or edge_res == True:
-                #       self._logger.debug(f"Duplicate check failed | hash - {hash_res} | edge - {edge_res}")
-                #       continue
-
-                #   else:
-                #       self._url_list.append(img_url)
-                #       count += 1
-                #       await self.webhook_send(url=webhook_url, content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{img_url}\n')
-                #       # Soft buffer delay between sends to prevent rate limiting.
-                #       await asyncio.sleep(self._delay_loop)
-                self._logger.debug(f"# of possible image submissions {len(submissions)}")
+                self._logger.debug(msg=f"# of possible image submissions {len(submissions)}")
                 for sub_entry in submissions:
                     for submission, img_url in sub_entry.items():
                         if img_url in self._url_list:
                             continue
 
                         if img_url.lower().find("gifs") != -1:
-                            self._logger.info(f"Found a gif URL -> {img_url}")
+                            self._logger.info(msg=f"Found a gif URL -> {img_url}")
                             continue
 
-                        self._logger.debug(f"Checking the hash of {img_url}")
-                        hash_res: bool = await self.hash_process(img_url)
-                        self._logger.debug(f"Checking Image Edge Array...{img_url}")
-                        img_info: ImageInfo = await self._partial_edge_comparison(img_url=img_url)
+                        img_res: ClientResponse | Literal[False] = await self._get_url_req(img_url=img_url)
+                        if isinstance(img_res, ClientResponse):
+                            img_data: bytes = await img_res.read()
+                        else:
+                            continue
+
+                        self._logger.debug(msg=f"Checking the hash of {img_url}")
+                        hash_res: bool = await self.hash_process(data=img_data)
+                        self._logger.debug(msg=f"Checking Image Edge Array...{img_url}")
+                        #
+                        img_info: ImageInfo = await self._partial_edge_comparison(img_url=img_url, img_data=img_data)
 
                         if hash_res or img_info.edge_res == True:
-                            self._logger.debug(f"Duplicate check failed | hash - {hash_res} | edge - {img_info.edge_res}")
+                            self._logger.debug(msg=f"Duplicate check failed | hash - {hash_res} | edge - {img_info.edge_res}")
                             continue
 
                         else:
                             self._url_list.append(img_url)
                             count += 1
-                            formatted_content = f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n[{img_info.width}x{img_info.height}]\n{img_url}\n'
+                            # TODO - Use markdown formatting to turn img URL into a shorter clickable link.
+                            formatted_content: str = f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n[{img_info.width}x{img_info.height}]\n'
                             await self.webhook_send(url=webhook_url, content=formatted_content)
                             # Soft buffer delay between sends to prevent rate limiting.
-                            await asyncio.sleep(self._delay_loop)
+                            await asyncio.sleep(delay=self._delay_loop)
 
         self._logger.debug("subreddit_media_handler ending")
         return count
@@ -716,7 +683,7 @@ class Reddit_IS(cog.KumaCog):
         # for entry in dir(res):
         #     pprint(f"attr:{entry} -> {getattr(res, entry)}")
 
-    async def _partial_edge_comparison(self, img_url: str) -> ImageInfo:
+    async def _partial_edge_comparison(self, img_url: str, img_data: bytes) -> ImageInfo:
         """
         Uses aiohttp to `GET` the image url, we modify/convert the image via PIL and get the edges as a binary string.\n
         We take a partial of the edges binary string and see if the blobs exists in `_pixel_cords_array`. \n
@@ -725,17 +692,14 @@ class Reddit_IS(cog.KumaCog):
 
         Args:
             img_url (str): Web url to Image.
+            img_data (bytes): Image data to check.
 
         Returns:
             ImageInfo: Returns an ImageInfo dataclass to access the image properties and edge results.
         """
         img_info: ImageInfo = ImageInfo()
         stime: float = time.time()
-        res: ClientResponse | Literal[False] = await self._get_url_req(img_url=img_url, ignore_validation=False)
-        if res == False:
-            return img_info
-
-        source: Image = IMG.open(io.BytesIO(await res.read()))
+        source: Image = IMG.open(fp=io.BytesIO(initial_bytes=img_data))
         img_info.width = source.width
         img_info.height = source.height
         source = self.IMAGE_COMP._convert(image=source)
@@ -743,42 +707,26 @@ class Reddit_IS(cog.KumaCog):
         source = self.IMAGE_COMP._filter(image=res_image[0])
         edges: list[tuple[int, int]] | None = self.IMAGE_COMP._edge_detect(image=source)
         if edges == None:
-            self._logger.error(f"Found no edges for url -> {img_url}")
+            self._logger.error(msg=f"Found no edges for url -> {img_url}")
             return img_info
 
-        b_edges: bytes = await self._struct_pack(edges)
-        # self._logger.info(f"Packed | {len(edges)}")
+        b_edges: bytes = xy_binfind.struct_pack(edges=edges)
         # We set our max match req to do a full comparison via len of edges. eg. 500 * 10% (50 points)
         # We also set our min match req before we "abort"             eg. (50 * 90%) / 100 (40 points)
         # Track our failures and break if we exceed the diff.                    eg. 50-40 (10 points)
         match_req: int = int((len(b_edges) / self.IMAGE_COMP.sample_percent))
         min_match_req: int = int((match_req * self.IMAGE_COMP.match_percent) / 100)
-        # list (tuple(0,1),(2,2)) (X, Y) (0, 0) (500, 500)
         for array in self._pixel_cords_array:  # list[b'\x07\x00\x08\x00\x02\x00\x02\x00', b'\x07\x00\x08\x00\x02\x00\x02\x00']
-            match_count: int = 0
-            failures: int = 0
-            # b'\x07\x00 \x08\x00 \x02\x00 \x02\x00'
-            # We skip the first two bytes as that is the struct_pack value count.
-            start_pos: int = 0
-            for cords in range(2, len(b_edges), 40):
-                # \x07\x00 #index resets to (0, len(array)) 1200 points / 4300
-                # TODO - Need to improve the logic here. It is blocking.
-                sample: int = array.find(b_edges[cords:cords + 4], start_pos)
-                if sample == -1:
-                    failures += 1
-                    if failures > (match_req - min_match_req):
-                        self._logger.debug(f"{img_url} Match count {match_count}/{min_match_req} | Failure count {failures}/{match_req-min_match_req}")  # \n Looking for {b_edges[cords:cords + 4]} in {array}")
-                        break
-                else:
-                    match_count += 1
-                    start_pos = sample + 4
-                    if match_count >= min_match_req:
-                        self._logger.debug(f"--> Running full edge comparison on {img_url} | {len(b_edges)}")
-                        match: bool = await self._full_edge_comparison(array=array, edges=b_edges)
-                        if match == False:
-                            break
-                        else:
-                            return img_info
+            sample: int = xy_binfind.find(haystack=array, needles=b_edges, skip=40, failcount=(match_req - min_match_req))
+            if sample == -1:
+                self._logger.debug(msg=f"{img_url} Match count {sample}/{min_match_req} | Failure")  # count {failures}/{match_req-min_match_req}")  # \n Looking for {b_edges[cords:cords + 4]} in {array}")
+                break
+            self._logger.debug(msg=f"--> Running full edge comparison on {img_url} | {len(b_edges)}")
+            match: int = await self._full_edge_comparison(array=array, edges=b_edges)
+            if match == False:
+                break
+            else:
+                return img_info
 
         self._pixel_cords_array.append(b_edges)
         self._etime: float = (time.time() - stime)
@@ -796,19 +744,22 @@ class Reddit_IS(cog.KumaCog):
         Returns:
             bool: Returns `False` if the binary blob is not in the array else `True` if the binary blob is in the array.
         """
-        failures: int = 0
-        match_count: int = 0
+        # failures: int = 0
+        # match_count: int = 0
         match_req: int = int((len(edges) / self.IMAGE_COMP.match_percent) / 100)
         min_match_req: int = len(edges) - match_req
-        for pos in range(2, len(edges), 4):
-            if match_count >= min_match_req:
-                return True
-            elif failures > min_match_req:
-                return False
-            elif array.find(edges[pos:pos + 4]) == -1:
-                failures += 1
-            else:
-                match_count += 1
+        matched = xy_binfind.find(haystack=array, needles=edges, failcount=min_match_req)
+        # for pos in range(2, len(edges), 4):
+        #    if match_count >= min_match_req:
+        #        return True
+        #    elif failures > min_match_req:
+        #        return False
+        #    elif array.find(edges[pos:pos + 4]) == -1:
+        #        failures += 1
+        #    else:
+        #        match_count += 1
+        if matched != -1:
+            return True
         return False
 
     async def _get_media_metadata_urls(self, submission: asyncpraw.reddit.Submission) -> list[str]:
@@ -848,24 +799,6 @@ class Reddit_IS(cog.KumaCog):
         Returns:
             list[str]: Returns a list of IMG urls it finds inside the `Gallery`.
         """
-        # req: ClientResponse | Literal[False] = await self._get_url_req(img_url=img_url, ignore_validation=True)
-        # if req == False:
-        #     return []
-
-        # res: bytes = await req.content.read()
-        # data: str = res.decode("utf-8")
-        # data = data.split("<script id=\"data\">window.___r = ")[1]
-        # data = data.split("</script>")[0]
-
-        # jdata = json.loads(data)
-
-        # models = jdata["posts"]["models"]
-        # model = models[list(models.keys())[0]]
-        # images = model["media"]["mediaMetadata"]
-        # urls: list[str] = []
-        # for entry in images:
-        #     urls.append(images[entry]["s"]["u"])
-        # self._logger.debug(f"Processed Gallery url {img_url}, found {len(urls)} urls.")
         _urls: list[str] = []
         if hasattr(submission, "url") and getattr(submission, "url").lower().find("gallery") != -1:
             res: dict = getattr(submission, "__dict__")
@@ -989,29 +922,26 @@ class Reddit_IS(cog.KumaCog):
             cord_len: int = (struct.unpack("<I", data[total_pos:total_pos + 4])[0] * 2)
             self._logger.debug(f"cord length {cord_len}")
 
-            # We incriment total_pos +4 to pass our array len blob.
+            # We increment total_pos +4 to pass our array len blob.
             self._pixel_cords_array.append(data[total_pos: total_pos + cord_len + 4])
             total_pos += cord_len + 4
         self._logger.debug(f"Reading our Array File... | total entries {len(self._pixel_cords_array)}")
 
-    async def hash_process(self, img_url: str) -> bool:
+    async def hash_process(self, data: bytes) -> bool:
         """
-        Checks the sha256 of the supplied `img_url` against our `_hash_list`.
+        Checks the sha256 of the supplied image data against our `_hash_list`.
 
         Args:
-            img_url (str): Web URL for the image.
+            data (bytes): The image data.
 
         Returns:
             bool: Returns `False` if the sha256 results DO NOT exist in `_hash_list`.\n
             Otherwise returns `True` if the sha256 results already exist in our `_hash_list` or it failed to hash the `img_url` parameter.
         """
-        res: ClientResponse | Literal[False] = await self._get_url_req(img_url=img_url)
-        my_hash = None
 
-        if isinstance(res, ClientResponse):
-            my_hash = hashlib.sha256(await res.read()).hexdigest()
+        my_hash: str = hashlib.sha256(string=data).hexdigest()
 
-        if my_hash != None and my_hash not in self._hash_list:
+        if my_hash not in self._hash_list:
             self._hash_list.append(my_hash)
             return False
 
@@ -1022,7 +952,7 @@ class Reddit_IS(cog.KumaCog):
         """
         Sends content to the Discord Webhook url provided. \n
         Implements a dynamic delay based upon the status code when sending a webhook.\n
-            - If status code is `429` the delay between posts will be incrimented by `.1` seconds. 
+            - If status code is `429` the delay between posts will be incremented by `.1` seconds. 
             - After 10 successful sends it will remove `.1` seconds from the delay.
 
         Args:
@@ -1069,7 +999,12 @@ class Reddit_IS(cog.KumaCog):
             self._sessions = aiohttp.ClientSession()
 
         self._logger.debug(f"Checking subreddit {subreddit}")
-        temp_url: str = f"https://www.reddit.com/r/{subreddit}/"
+        _url: str = "https://www.reddit.com/r/"
+        if subreddit.startswith(_url):
+            temp_url = subreddit
+        else:
+            temp_url: str = _url + subreddit
+
         try:
             # We are having issues with aiohttp.ClientResponse when using `.head()`; we are going to forcibly time it out after 5 seconds.
             async with asyncio.timeout(delay=5):
@@ -1119,21 +1054,21 @@ class Reddit_IS(cog.KumaCog):
         return await context.send(content=f"Finished sending {len(res)} submissions from **r/{sub}**")
 
     @commands.hybrid_command(help="Add a subreddit to the DB", aliases=["rsadd", "rsa"])
-    @app_commands.describe(sub="The sub Reddit name.")
+    @app_commands.describe(sub="The subreddit name or full url https://www.reddit.com/r/subreddit_here")
     @app_commands.default_permissions(manage_guild=True)
     async def add_subreddit(self, context: commands.Context, sub: str):
 
         status: int = await self.check_subreddit(subreddit=sub)
         if status != 200:
-            return await context.send(content=f"Unable to find the subreddit `/r/{sub}`.\n *Status code: {status}*", delete_after=self._message_timeout)
+            return await context.send(content=f"Unable to find the subreddit `{sub if sub.startswith('https://www.reddit.com/r/') else f'/r/{sub}'}`.\n *Status code: {status}*", delete_after=self._message_timeout)
 
         res: Row | None = await _add_subreddit(name=sub)
 
         if res is not None:
             self._recent_edit = True
-            return await context.send(content=f"Added `/r/{sub}` to our database.", delete_after=self._message_timeout)
+            return await context.send(content=f"Added `{sub if sub.startswith('https://www.reddit.com/r/') else f'/r/{sub}'}` to our database.", delete_after=self._message_timeout)
         else:
-            return await context.send(content=f"Unable to add `/r/{sub}` to the database.", delete_after=self._message_timeout)
+            return await context.send(content=f"Unable to add `{sub if sub.startswith('https://www.reddit.com/r/') else f'/r/{sub}'}` to the database.", delete_after=self._message_timeout)
 
     @commands.hybrid_command(help="Remove a subreddit from the DB", aliases=["rsdel", "rsd"])
     @app_commands.describe(sub="The sub Reddit name.")

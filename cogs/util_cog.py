@@ -167,7 +167,7 @@ class Util(cog.KumaCog):
         cpu_usage = psutil.cpu_percent()
 
         embed.add_field(
-            name="Process", value=f"{memory_usage:.2f} MiB\n{cpu_usage:.2f}% CPU")
+            name="Process", value=f"{memory_usage:.2f} MBs \n{cpu_usage:.2f}% CPU")
         embed.add_field(
             name=f"{self._bot.user.name} info:",
             value=f"**Uptime:**\n{self._uptime}")
