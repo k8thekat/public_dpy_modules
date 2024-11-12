@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import os
 import struct
 import sys
@@ -11,10 +12,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlite3 import Row
-from typing import Literal, TypedDict, Union
+from typing import Literal, Self, TypedDict, Union
 
 import aiohttp
 import asyncpraw
+import asyncprawcore as PRAWcore
 import discord
 import pytz
 import tzlocal
@@ -40,8 +42,18 @@ CREATE TABLE IF NOT EXISTS subreddit (
     id INTEGER PRIMARY KEY NOT NULL,
     name TEXT COLLATE NOCASE NOT NULL UNIQUE,
     webhook_id INTEGER,
+    channel_id INTEGER,
     FOREIGN KEY (webhook_id) references webhook(id)
+    FOREIGN KEY (channel_id) references channel(id)
 )"""
+
+CHANNEL_SETUP_SQL = """
+CREATE TABLE IF NOT EXISTS channel (
+    id INTEGER PRIMARY KEY NOT NULL,
+    guild_id INTEGER,
+    channel_id INTEGER,
+    UNIQUE(guild_id, channel_id)
+)STRICT"""
 
 WEBHOOK_SETUP_SQL = """
 CREATE TABLE IF NOT EXISTS webhook (
@@ -51,256 +63,392 @@ CREATE TABLE IF NOT EXISTS webhook (
 )"""
 
 
-class Webhook(TypedDict):
+class DBWebhook(TypedDict):
     name: str
     url: str
     id: int
 
 
+class DBChannel(TypedDict):
+    id: int
+    guild_id: int
+    channel_id: int
+
+
 @dataclass
-class ImageInfo():
+class ImageInfo:
     width: int = field(default=0)
     height: int = field(default=0)
     edge_res: bool = field(default=True)
 
 
-async def _get_subreddit(name: str) -> Row | None:
-    """
-    Get a Row from the Subreddit Table.
+@dataclass
+class DBSubreddit:
+    id: int
+    name: str
+    channel_id: int | None = None
+    webhook_id: int | None = None
 
-    Args:
-        name (str): Name of Subreddit
+    def __lt__(self, other: "DBSubreddit") -> bool:
+        return self.name.lower() < other.name.lower()
 
-    Returns:
-        Row['id', 'name', 'webhook_id'] | None
-    """
-    async with asqlite.connect(DB_PATH) as db:
-        async with db.cursor() as cur:
-            await cur.execute("""SELECT id, name, webhook_id FROM subreddit where name = ?""", name)
-            res: Row | None = await cur.fetchone()
-            await cur.close()
-            return res if not None else None
+    async def _get_channel(self):
+        async with asqlite.connect(database=DB_PATH) as db:
+            await db.fetchone("""SELECT * FROM channel WHERE channel_id = ?""", self.channel_id)
+
+    async def update_subreddit(self, channel_id: int) -> Self:
+        """
+        Update the subreddit Channel ID
+        """
+        async with asqlite.connect(database=DB_PATH) as conn:
+            await conn.fetchone("""UPDATE subreddit SET channel_id = ? WHERE id = ?  RETURNING *""", channel_id, self.id)
+            self.channel_id = channel_id
+            return self
+
+    async def del_subreddit(self) -> int | None:
+        """
+        Delete the subreddit from the table.
+        """
+        async with asqlite.connect(database=DB_PATH) as conn:
+            await conn.execute("""DELETE FROM subreddit WHERE id = ?""", self.id)
 
 
-async def _add_subreddit(name: str) -> Row | None:
-    """
-    Add a Row to the Subreddit Table.
+class Reddit_Database:
+    _pool: asqlite.Pool | None
+    _logger: logging.Logger = logging.getLogger()
 
-    Args:
-        name (str): Name of Subreddit
+    def __init__(self, pool: asqlite.Pool | None = None) -> None:
+        self._pool = pool
 
-    Returns:
-        Row['id','name','webhook_id'] | None
-    """
-    res = await _get_subreddit(name=name)
-    if res is not None:
-        return None
-    else:
+    @property
+    def pool(self) -> asqlite.Pool:
+        if self._pool is None:
+            self._logger.error(msg="Database Pool has not been initialized")
+            raise ValueError("Database Pool has not been initialized")
+        return self._pool
+
+    async def _fetchone(self, SQL: str, parameters: tuple[Any, ...] | dict[str, Any] | None = None) -> Row | None:
+        """
+        Query for a single Row.
+
+        Args:
+            SQL (str): The SQL query statement.
+
+        Returns:
+            Row | None: A Row.
+        """
+        if self._pool is None:
+            self._pool = await asqlite.create_pool(database=DB_PATH)
+
+        async with self.pool.acquire() as conn:
+            if parameters is None:
+                return await conn.fetchone(SQL)
+            else:
+                return await conn.fetchone(SQL, parameters)
+
+    async def _fetchall(self, SQL: str, parameters: tuple[Any, ...] | dict[str, Any] | None = None) -> list[Row] | None:
+        """
+        Query for a list of Rows.
+
+        Args:
+            SQL (str): The SQL query statement.
+
+        Returns:
+            list[Row]: A list of Rows.
+        """
+
+        if self._pool is None:
+            self._pool = await asqlite.create_pool(database=DB_PATH)
+
+        async with self.pool.acquire() as conn:
+            if parameters is None:
+                return await conn.fetchall(SQL)
+            else:
+                return await conn.fetchall(SQL, parameters)
+
+    async def _execute(self, SQL: str, parameters: tuple[Any, ...] | dict[str, Any] | None = None) -> Row | None:
+        """
+        Execute a SQL statement.
+
+        Args:
+            SQL (str): The SQL statement.
+        """
+        if self._pool is None:
+            self._pool = await asqlite.create_pool(database=DB_PATH)
+
+        async with self.pool.acquire() as conn:
+            if parameters is None:
+                res: asqlite.Cursor = await conn.execute(SQL)
+            else:
+                res = await conn.execute(SQL, parameters)
+            return await res.fetchone()
+
+    async def get_subreddit(self, name: str) -> DBSubreddit | None:
+        """
+        Get a Row from the Subreddit Table.
+
+        Args:
+            name (str): Name of Subreddit
+
+        Returns:
+            Subreddit | None
+        """
+        res: Row | None = await self._fetchone("""SELECT id, name, channel_id FROM subreddit WHERE name = ?""", (name,))
+        return DBSubreddit(**res) if res is not None else None
+
+    async def _add_subreddit(self, name: str) -> DBSubreddit | None:
+        """
+        Add a Row to the Subreddit Table.
+
+        Args:
+            name (str): Name of Subreddit
+
+        Returns:
+            DBSubreddit | None : On success returns a DBSubreddit dataclass.
+        """
+        _exists: DBSubreddit | None = await self._get_subreddit(name=name)
+        if _exists is not None:
+            return None
+        else:
+            res: Row | None = await self._fetchone(
+                """INSERT INTO subreddit(name) VALUES(?) ON CONFLICT(name) DO NOTHING RETURNING *""", (name,)
+            )
+            return DBSubreddit(**res) if res is not None else None
+
+    # TODO - To be deprecated
+    async def _get_subreddit(self, name: str) -> DBSubreddit | None:
+        """
+        Get a Row from the Subreddit Table.
+
+        Args:
+            name (str): Name of Subreddit
+
+        Returns:
+            Row['id', 'name', 'webhook_id'] | None
+        """
+
+        res: Row | None = await self._execute("""SELECT id, name, webhook_id FROM subreddit where name = ?""", (name,))
+        return DBSubreddit(**res) if res is not None else None
+
+    # TODO - To be depreciated
+    async def _update_subreddit(self, name: str, webhook: Union[int, str]) -> DBSubreddit | None:
+        """
+        Update a Subreddit Row `webhook_id` value.
+
+        Args:
+            name (str): Subreddit name
+            webhook (int, str): Webhook name, url, ID or None.
+
+        Returns:
+            Row['id', 'name', 'url'] | None
+        """
+        # Check if the subreddit exists
+        res: DBSubreddit | None = await self._get_subreddit(name=name)
+        if res is None:
+            return None
+        else:
+            # Check if the webhook exists
+            if type(webhook) is str and webhook.lower() == "none":
+                webhook_id = None
+            else:
+                temp = await self._get_webhook(webhook)
+                if temp is None:
+                    return None
+                else:
+                    webhook_id = res.id
+
+        temp = await self._execute("""UPDATE subreddit SET webhook_id = ? WHERE name = ?  RETURNING *""", (webhook_id, name))
+
+        return DBSubreddit(**temp) if temp is not None else None
+
+    # TODO - To be depreciated
+    async def _del_subreddit(self, name: str) -> int | None:
+        """
+        Delete a Row from the Subreddit Table
+
+        Args:
+            name (str): Name of Subreddit
+
+        Returns:
+            int | None: Row count
+        """
+        res: DBSubreddit | None = await self._get_subreddit(name=name)
+        if res is None:
+            return None
+        else:
+            temp = await self._fetchone("""DELETE FROM subreddit WHERE name = ?""", (name,))
+            return True if temp is not None else False
+
+    # TODO - to be deprecated
+    async def _get_all_subreddits(self, webhooks: bool = True) -> list[str | Union[Any, str, dict[str, str | None]]]:
+        """
+        Gets all Row entries of the Subreddit Table. Typically including the webhook IDs.
+
+        Args:
+            webhooks(bool): Set to False to not include webhook IDs when getting subreddits. Defaults True.
+        Returns:
+            list[Union[Any, dict[str, str]]]: An empty list if no entries in the Subreddit table.
+
+            Otherwise a list of dictionaries structured as `[{"subreddit", "webhook url"}]`
+        """
+        _subreddits: list[dict[str, Union[str, None]]] = []
         async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
-                await cur.execute("""INSERT INTO subreddit(name) VALUES(?) ON CONFLICT(name) DO NOTHING RETURNING *""", name)
-                await db.commit()
+                await cur.execute("""SELECT name, webhook_id FROM subreddit""")
+                res = await cur.fetchall()
+                if res is None or len(res) == 0:
+                    return []
+
+                if webhooks is False:
+                    _subs: list[str] = [entry["name"] for entry in res]
+                    return _subs
+                else:
+                    for entry in res:
+                        res_webhook = await self._get_webhook(arg=entry["webhook_id"])
+                        if res_webhook is not None:
+                            res_webhook = res_webhook["url"]
+                        _subreddits.append({entry["name"]: res_webhook})
+
+            return _subreddits
+
+    async def get_all_subreddits(self) -> list["DBSubreddit"] | None:
+        """
+        Gets all Row entries of the Subreddit Table. Typically including the webhook IDs.
+
+        Args:
+            webhooks(bool): Set to False to not include webhook IDs when getting subreddits. Defaults True.
+        Returns:
+            list[Union[Any, dict[str, str]]]: An empty list if no entries in the Subreddit table.
+
+            Otherwise a list of dictionaries structured as `[{"subreddit", "webhook url"}]`
+        """
+
+        res: list[Row] | None = await self._fetchall("""SELECT * FROM subreddit""")
+        if res is None:
+            return None
+        data: list[DBSubreddit] = [DBSubreddit(**entry) for entry in res]
+        return data.sort()
+
+    async def get_channels(
+        self,
+    ) -> list[DBChannel] | None:
+        res: list[Row] | None = await self._fetchall("""SELECT * FROM channel""")
+        return [DBChannel(**entry) for entry in res] if res is not None else None
+
+    # TODO - To be depreciated
+    async def _get_all_webhooks(self) -> list[None | DBWebhook]:
+        """
+        Gets all Webhook Table Rows.
+
+        Returns:
+            list[Any] | list[dict[str, str | int]]: Structure `[{"name": str , "url": str , "id": int}]`
+        """
+        _webhooks: list[None | DBWebhook] = []
+        async with asqlite.connect(DB_PATH) as db:
+            async with db.cursor() as cur:
+                await cur.execute("""SELECT name, id, url FROM webhook""")
+                res: list[Row] = await cur.fetchall()
+                if res is None or len(res) == 0:
+                    return []
+                for entry in res:
+                    webhook: DBWebhook = {"name": entry["name"], "url": entry["url"], "id": entry["id"]}
+                    _webhooks.append(webhook)
+                    # _webhooks.append({"name": entry["name"], "url": entry["url"], "id": entry["id"]})
+            await db.close()
+            return _webhooks
+
+    # TODO - To be depreciated
+    async def _get_webhook(self, arg: Union[str, int, None]) -> Row | None:
+        """
+        Lookup a Row in the Webhook Table
+
+        Args:
+            arg (Union[str, int, None]): Supports webhook name, id or url queries.
+
+        Returns:
+            Row["name", "id", "url"] | None
+        """
+        async with asqlite.connect(DB_PATH) as db:
+            async with db.cursor() as cur:
+                if arg is None:
+                    return None
+                elif type(arg) is int:
+                    await cur.execute("""SELECT name, id, url FROM webhook where id = ?""", arg)
+                elif type(arg) is str and arg.startswith("http"):
+                    await cur.execute("""SELECT name, id, url FROM webhook where url = ?""", arg)
+                else:
+                    await cur.execute("""SELECT name, id, url FROM webhook where name = ?""", arg)
                 res: Row | None = await cur.fetchone()
                 await cur.close()
                 return res if not None else None
 
+    # TODO - To be depreciated
+    async def _add_webhook(self, name: str, url: str) -> Row | None:
+        """
+        Add a Row to the Webhook Table.
 
-async def _del_subreddit(name: str) -> int | None:
-    """
-    Delete a Row from the Subreddit Table
+        Args:
+            name (str): A string to represent the Webhook URL in the table.
+            url (str): Discord webhook URL
 
-    Args:
-        name (str): Name of Subreddit
-
-    Returns:
-        int | None: Row count
-    """
-    res: Row | None = await _get_subreddit(name=name)
-    if res is None:
-        return None
-    else:
-        async with asqlite.connect(DB_PATH) as db:
-            async with db.cursor() as cur:
-                await cur.execute("""DELETE FROM subreddit WHERE name = ?""", name)
-                res = await cur.fetchone()
-                await db.commit()
-                count: int = cur.get_cursor().rowcount
-                await cur.close()
-                return count
-                # return res if not None else None
-
-
-async def _get_all_subreddits(webhooks: bool = True) -> list[str | Union[Any, str, dict[str, str | None]]]:
-    """
-    Gets all Row entries of the Subreddit Table. Typically including the webhook IDs.
-
-    Args:
-        webhooks(bool): Set to False to not include webhook IDs when getting subreddits. Defaults True.
-    Returns:
-        list[Union[Any, dict[str, str]]]: An empty list if no entries in the Subreddit table.
-
-        Otherwise a list of dictionaries structured as `[{"subreddit", "webhook url"}]`
-    """
-    _subreddits: list[dict[str, Union[str, None]]] = []
-    async with asqlite.connect(DB_PATH) as db:
-        async with db.cursor() as cur:
-            await cur.execute("""SELECT name, webhook_id FROM subreddit""")
-            res = await cur.fetchall()
-            if res is None or len(res) == 0:
-                return []
-
-            if webhooks == False:
-                _subs: list[str] = [entry["name"] for entry in res]
-                return _subs
-            else:
-                for entry in res:
-                    res_webhook = await _get_webhook(arg=entry["webhook_id"])
-                    if res_webhook is not None:
-                        res_webhook = res_webhook["url"]
-                    _subreddits.append({entry["name"]: res_webhook})
-
-        return _subreddits
-
-
-async def _update_subreddit(name: str, webhook: Union[int, str]) -> Row | None:
-    """
-    Update a Subreddit Row `webhook_id` value.
-
-    Args:
-        name (str): Subreddit name
-        webhook (int, str): Webhook name, url, ID or None.
-
-    Returns:
-        Row['id', 'name', 'url'] | None
-    """
-    # Check if the subreddit exists
-    res: Row | None = await _get_subreddit(name=name)
-    if res is None:
-        return None
-    else:
-        # Check if the webhook exists
-        if type(webhook) == str and webhook.lower() == "none":
-            webhook_id = None
+        Returns:
+            Row['id','name','url'] | None
+        """
+        res: Row | None = await self._get_webhook(arg=url)
+        if res is not None:
+            return None
         else:
-            res = await _get_webhook(webhook)
-            if res is None:
-                return None
-            else:
-                webhook_id = res["ID"]
+            async with asqlite.connect(DB_PATH) as db:
+                async with db.cursor() as cur:
+                    await cur.execute(
+                        """INSERT INTO webhook(name, url) VALUES(?, ?) ON CONFLICT(url) DO NOTHING RETURNING *""", name, url
+                    )
+                    await db.commit()
+                    res = await cur.fetchone()
+                    await cur.close()
+                    return res if not None else None
 
-    async with asqlite.connect(DB_PATH) as db:
-        async with db.cursor() as cur:
-            await cur.execute("""UPDATE subreddit SET webhook_id = ? WHERE name = ?  RETURNING *""", webhook_id, name)
-            await db.commit()
-            res = await cur.fetchone()
-            return res if not None else None
+    # TODO - To be depreciated
+    async def _del_webhook(self, arg: Union[int, str]) -> int | None:
+        """
+        Delete a Row matching the args from the Webhook Table.\n
 
+        Converts string numbers into `ints` if they are digits.
 
-async def _get_webhook(arg: Union[str, int, None]) -> Row | None:
-    """
-    Lookup a Row in the Webhook Table
+        Args:
+            arg (Union[int, str]): Supports Webhook ID, Name or URL.
 
-    Args:
-        arg (Union[str, int, None]): Supports webhook name, id or url queries.
+        Returns:
+            int | None: Row Count
+        """
+        if isinstance(arg, str) and arg.isdigit():
+            arg = int(arg)
+        res = await self._get_webhook(arg=arg)
+        if res is None:
+            return None
+        else:
+            async with asqlite.connect(DB_PATH) as db:
+                async with db.cursor() as cur:
+                    await cur.execute(
+                        """UPDATE subreddit SET webhook_id = ? WHERE webhook_id = ?  RETURNING *""", None, res["id"]
+                    )
+                    await cur.execute("""DELETE FROM webhook WHERE id = ?""", res["id"])
+                    await db.commit()
+                    await db.close()
+                    return cur.get_cursor().rowcount
 
-    Returns:
-        Row["name", "id", "url"] | None
-    """
-    async with asqlite.connect(DB_PATH) as db:
-        async with db.cursor() as cur:
-            if arg is None:
-                return None
-            elif type(arg) == int:
-                await cur.execute("""SELECT name, id, url FROM webhook where id = ?""", arg)
-            elif type(arg) == str and arg.startswith("http"):
-                await cur.execute("""SELECT name, id, url FROM webhook where url = ?""", arg)
-            else:
-                await cur.execute("""SELECT name, id, url FROM webhook where name = ?""", arg)
-            res: Row | None = await cur.fetchone()
-            await cur.close()
-            return res if not None else None
-
-
-async def _add_webhook(name: str, url: str) -> Row | None:
-    """
-    Add a Row to the Webhook Table.
-
-    Args:
-        name (str): A string to represent the Webhook URL in the table.
-        url (str): Discord webhook URL
-
-    Returns:
-        Row['id','name','url'] | None
-    """
-    res: Row | None = await _get_webhook(arg=url)
-    if res is not None:
-        return None
-    else:
-        async with asqlite.connect(DB_PATH) as db:
-            async with db.cursor() as cur:
-                await cur.execute("""INSERT INTO webhook(name, url) VALUES(?, ?) ON CONFLICT(url) DO NOTHING RETURNING *""", name, url)
-                await db.commit()
-                res = await cur.fetchone()
-                await cur.close()
-                return res if not None else None
-
-
-async def _del_webhook(arg: Union[int, str]) -> int | None:
-    """
-    Delete a Row matching the args from the Webhook Table.\n
-
-    Converts string numbers into `ints` if they are digits.
-
-    Args:
-        arg (Union[int, str]): Supports Webhook ID, Name or URL.
-
-    Returns:
-        int | None: Row Count
-    """
-    if isinstance(arg, str) and arg.isdigit():
-        arg = int(arg)
-    res = await _get_webhook(arg=arg)
-    if res is None:
-        return None
-    else:
-        async with asqlite.connect(DB_PATH) as db:
-            async with db.cursor() as cur:
-                await cur.execute("""UPDATE subreddit SET webhook_id = ? WHERE webhook_id = ?  RETURNING *""", None, res["id"])
-                await cur.execute("""DELETE FROM webhook WHERE id = ?""", res["id"])
-                await db.commit()
-                await db.close()
-                return cur.get_cursor().rowcount
-
-
-async def _get_all_webhooks() -> list[None | Webhook]:
-    """
-    Gets all Webhook Table Rows.
-
-    Returns:
-        list[Any] | list[dict[str, str | int]]: Structure `[{"name": str , "url": str , "id": int}]`
-    """
-    _webhooks: list[None | Webhook] = []
-    async with asqlite.connect(DB_PATH) as db:
-        async with db.cursor() as cur:
-            await cur.execute("""SELECT name, id, url FROM webhook""")
-            res: list[Row] = await cur.fetchall()
-            if res is None or len(res) == 0:
-                return []
-            for entry in res:
-                webhook: Webhook = {"name": entry["name"], "url": entry["url"], "id": entry["id"]}
-                _webhooks.append(webhook)
-                # _webhooks.append({"name": entry["name"], "url": entry["url"], "id": entry["id"]})
-        await db.close()
-        return _webhooks
 
 # TODO - Create a JUMP URL to the last string of messages posted.
-
-
+# TODO - Image comparison is failing (or not looking it up in our array)
+# TODO - Double check error handling for Tracebacks/etc on commands.
+# todo - be able to set the last_checked time in the past for testing check loops.
 class Reddit_IS(cog.KumaCog):
+    db: Reddit_Database = Reddit_Database()
+
     def __init__(self, bot: commands.Bot) -> None:
         super().__init__(bot=bot)
         self._name: str = os.path.basename(__file__).title()
-        self._logger.info(f'**SUCCESS** Initializing {self._name}')
+        self._logger.info(f"**SUCCESS** Initializing {self._name}")
         self._file_dir: Path = Path(__file__).parent
         self._message_timeout = 120
 
@@ -367,33 +515,36 @@ class Reddit_IS(cog.KumaCog):
 
         if len(self._reaction_compare_urls) >= 2:
             await self._compare_urls(url_one=self._reaction_compare_urls[0], url_two=self._reaction_compare_urls[1])
-            await reaction.message.channel.send(content=f"{user.mention}\n**URL One**:{self._reaction_compare_urls[0]}\n**URL Two**:{self._reaction_compare_urls[1]}\n**Results:**{self.IMAGE_COMP.results}", delete_after=15)
+            await reaction.message.channel.send(
+                content=f"{user.mention}\n**URL One**:{self._reaction_compare_urls[0]}\n**URL Two**:{self._reaction_compare_urls[1]}\n**Results:**{self.IMAGE_COMP.results}",
+                delete_after=15,
+            )
             self._reaction_compare_urls = []
 
     async def cog_load(self) -> None:
         """Creates Sqlite Database if not present.
 
-            Gets settings from`reddit_cog.ini`
+        Gets settings from`reddit_cog.ini`
 
-            Creates`reddit.json`if not present and Gets URL and Hash lists.
+        Creates`reddit.json`if not present and Gets URL and Hash lists.
 
-            Creates our _subreddit list.
+        Creates our _subreddit list.
         """
         # self._logger.setLevel("DEBUG")
         # Setup our DB tables
-        async with asqlite.connect(DB_PATH) as db:
-            await db.execute(SUBREDDIT_SETUP_SQL)
-            await db.execute(WEBHOOK_SETUP_SQL)
-        # Grab our PRAW settings
+        await self.db._execute(SUBREDDIT_SETUP_SQL)
+        await self.db._execute(WEBHOOK_SETUP_SQL)
 
+        # Grab our PRAW settings
         await self._ini_load()
+
         # Grab our hash/url DB
         try:
             self._last_check = self.json_load()
-        except:
+        except Exception:
             self._last_check: datetime = datetime.now(tz=timezone.utc)
 
-        self._subreddits = await _get_all_subreddits()
+        self._subreddits = await self.db._get_all_subreddits()
         # Load our array data.
         await self._read_array()
         # If for some reason our session is closed on cog load.
@@ -440,7 +591,7 @@ class Reddit_IS(cog.KumaCog):
                 client_secret=_reddit_secret,
                 password=_reddit_password,
                 user_agent=f"by /u/{_reddit_username})",
-                username=_reddit_username
+                username=_reddit_username,
             )
         else:
             raise ValueError("Failed to load .ini")
@@ -464,21 +615,20 @@ class Reddit_IS(cog.KumaCog):
             with open(self._json, "r") as jfile:
                 data = json.load(jfile)
                 # self._logger.info('Loaded our settings...')
-
-        if 'last_check' in data:
-            if data['last_check'] == 'None':
+        # todo - make a way to change this value.
+        if "last_check" in data:
+            if data["last_check"] == "None":
                 last_check = datetime.now(tz=timezone.utc)
             else:
-                last_check = datetime.fromtimestamp(
-                    data['last_check'], tz=timezone.utc)
+                last_check = datetime.fromtimestamp(data["last_check"], tz=timezone.utc)
             # self._logger.info('Last Check... Done.')
 
-        if 'url_list' in data:
-            self._url_list = list(data['url_list'])
+        if "url_list" in data:
+            self._url_list = list(data["url_list"])
             # self._logger.info('URL List... Done.')
 
-        if 'hash_list' in data:
-            self._hash_list = list(data['hash_list'])
+        if "hash_list" in data:
+            self._hash_list = list(data["hash_list"])
             # self._logger.info('Hash List... Done.')
 
         jfile.close()
@@ -498,45 +648,51 @@ class Reddit_IS(cog.KumaCog):
         if len(self._url_list) > limiter:
             # 'Trimming down url list...'
             _temp_url_list = self._url_list
-            _temp_url_list = _temp_url_list[len(self._url_list) - limiter:]
+            _temp_url_list = _temp_url_list[len(self._url_list) - limiter :]
             self._url_list = _temp_url_list
 
         if len(self._hash_list) > limiter:
             # 'Trimming down hash list...
             _temp_hash_list = self._hash_list
-            _temp_hash_list = _temp_hash_list[len(self._hash_list) - limiter:]
+            _temp_hash_list = _temp_hash_list[len(self._hash_list) - limiter :]
             self._hash_list = _temp_hash_list
 
-        data = {
-            "last_check": self._last_check.timestamp(),
-            "url_list": self._url_list,
-            "hash_list": self._hash_list
-        }
+        data = {"last_check": self._last_check.timestamp(), "url_list": self._url_list, "hash_list": self._hash_list}
         with open(self._json, "w") as jfile:
             json.dump(data, jfile)
             # 'Saving our settings...'
             jfile.close()
 
     async def autocomplete_subreddit(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-        res: list[str | Any | dict[str, str | None]] = await _get_all_subreddits(webhooks=False)
-        return [app_commands.Choice(name=subreddit, value=subreddit) for subreddit in res if type(subreddit) == str and current.lower() in subreddit.lower()][:25]
+        res: list[str | Any | dict[str, str | None]] = await self.db._get_all_subreddits(webhooks=False)
+        return [
+            app_commands.Choice(name=subreddit, value=subreddit)
+            for subreddit in res
+            if type(subreddit) is str and current.lower() in subreddit.lower()
+        ][:25]
 
     async def autocomplete_webhook(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-        res: list[None | Webhook] = await _get_all_webhooks()
-        return [app_commands.Choice(name=webhook["name"], value=webhook["name"]) for webhook in res if webhook is not None and current.lower() in webhook["name"].lower()][:25]
+        res: list[None | DBWebhook] = await self.db._get_all_webhooks()
+        return [
+            app_commands.Choice(name=webhook["name"], value=webhook["name"])
+            for webhook in res
+            if webhook is not None and current.lower() in webhook["name"].lower()
+        ][:25]
 
-    async def autocomplete_submission_type(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    async def autocomplete_submission_type(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
         types: list[str] = ["New", "Top", "Hot"]
         return [app_commands.Choice(name=entry, value=entry) for entry in types if current.lower() in entry.lower()]
 
-    @tasks.loop(minutes=5, reconnect=True)
+    @tasks.loop(minutes=15, reconnect=True)
     async def check_loop(self) -> None:
         if self._recent_edit:
             self._subreddits = []
-            self._subreddits = await _get_all_subreddits()
+            self._subreddits = await self.db._get_all_subreddits()
             self._recent_edit = False
 
-        if self._subreddits == None:
+        if self._subreddits is None:
             self._logger.warn("No Subreddits found...")
             return
         try:
@@ -544,7 +700,7 @@ class Reddit_IS(cog.KumaCog):
             # cur_loop.run_in_executor
             # asyncio.run_coroutine_threadsafe(coro=self.subreddit_media_handler(last_check=self._last_check), loop= asyncio.get_event_loop())
             result: Coroutine[Any, Any, int] = await asyncio.to_thread(self.subreddit_media_handler, self._last_check)
-            count, = await asyncio.gather(result)
+            (count,) = await asyncio.gather(result)
             # count: int = await self.subreddit_media_handler(last_check=self._last_check)
         except Exception as e:
             count = 0
@@ -554,15 +710,17 @@ class Reddit_IS(cog.KumaCog):
         self.json_save()
         await self._save_array()
         if count >= 1:
-            self._logger.info(f'Finished Sending {str(count) + " Images" if count > 1 else str(count) + " Image"}')
+            self._logger.info(f"Finished Sending {str(count) + ' Images' if count > 1 else str(count) + ' Image'}")
         else:
             self._logger.info("No new Images to send.")
 
-    async def process_subreddit_submissions(self, sub: str, order_type: str, count: None | int = None, last_check: None | datetime = None) -> list[dict[asyncpraw.reddit.Submission, str]]:
+    async def process_subreddit_submissions(
+        self, sub: str, order_type: str, count: None | int = None, last_check: None | datetime = None
+    ) -> list[dict[asyncpraw.reddit.Submission, str]]:
         img_url_to_send: list[dict[asyncpraw.reddit.Submission, str]] = []
         res = None
 
-        if count == None:
+        if count is None:
             count = self._submission_limit
 
         cur_subreddit: Subreddit = await self._reddit.subreddit(display_name=sub, fetch=True)
@@ -578,29 +736,33 @@ class Reddit_IS(cog.KumaCog):
         if res is None:
             return img_url_to_send
 
-        # async for submission in cur_subreddit.new(limit=count):
         async for submission in res:
             post_time: datetime = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
-            if last_check != None and post_time < last_check:
+            self._logger.info(
+                f"Checking subreddit {sub} {submission} -> submission title: {submission.title} url: {submission.url} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime() if last_check is not None else 'None'}"
+            )
+            if last_check is not None and post_time < last_check:
                 continue
 
-            self._logger.info(f'Checking subreddit {sub} {submission} -> submission title: {submission.title} url: {submission.url} submission post_time: {post_time.astimezone(self._pytz).ctime()} last_check: {last_check.astimezone(self._pytz).ctime() if last_check is not None else "None"}')
             if hasattr(submission, "url") and getattr(submission, "url").lower().find("gallery") != -1:
                 self._logger.info(f"- {submission.title} -> Found a gallery url, getting the image urls.")
                 # img_url_to_send.extend({submission: await self._convert_gallery_submissions(submission=submission)})
-                img_url_to_send.extend([{submission: entry} for entry in await self._convert_gallery_submissions(submission=submission)])
+                img_url_to_send.extend([
+                    {submission: entry} for entry in await self._convert_gallery_submissions(submission=submission)
+                ])
 
             # Usually submissions with multiple images will be using this `attr`
             elif hasattr(submission, "media_metadata"):
                 self._logger.info(f"- {submission.title} -> Found a media_metadata attribute.")
                 # img_url_to_send.extend(await self._get_media_metadata_urls(submission=submission))
-                img_url_to_send.extend([{submission: entry} for entry in await self._get_media_metadata_urls(submission=submission)])
+                img_url_to_send.extend([
+                    {submission: entry} for entry in await self._get_media_metadata_urls(submission=submission)
+                ])
 
             elif hasattr(submission, "url_overridden_by_dest"):
                 self._logger.info(f"- {submission.title} has attribute url_overridden_by_dest, getting the url.")
                 if submission.url_overridden_by_dest.startswith(self._url_prefixes):
                     img_url_to_send.append({submission: submission.url_overridden_by_dest})
-
         return img_url_to_send
 
     async def subreddit_media_handler(self, last_check: datetime) -> int:
@@ -611,27 +773,40 @@ class Reddit_IS(cog.KumaCog):
         if self._sessions.closed:
             self._sessions = aiohttp.ClientSession()
 
-        self._logger.debug(msg=f"subreddit_media_handler starting.. | Delay {self._delay_loop} | # of subreddits {len(self._subreddits)}")
+        self._logger.debug(
+            msg=f"subreddit_media_handler starting.. | Delay {self._delay_loop} | # of subreddits {len(self._subreddits)}"
+        )
         # We check self._subreddits in `check_loop`
+        index = 0
         for entry in self._subreddits:
             for sub, webhook_url in entry.items():
                 self._logger.debug(msg=f"Looking @ {sub} with {webhook_url}")
-                if webhook_url == None:
-                    self._logger.warn(msg=f"No Webhook URL for {sub}, skipping...")
+                if webhook_url is None:
+                    # This logic here breaks the rest of the code from handling any other subreddits.
+                    self._logger.warning(msg=f"No Webhook URL for {sub}, skipping...")
                     continue
 
-                if self._interrupt_loop == True:
+                if self._interrupt_loop is True:
                     self._interrupt_loop = False
-                    self._logger.warn(msg="The Media Handler loop was interrupted.")
+                    self._logger.warning(msg="The Media Handler loop was interrupted.")
                     return count
 
                 res: int = await self.check_subreddit(subreddit=sub)
                 self._logger.debug(msg=f"Check Subreddit | Status Code {res}")
                 if res != 200:
-                    self._logger.warn(msg=f"Failed to find the subreddit /r/{sub}, skipping entry. Value: {res}")
+                    self._logger.warning(msg=f"Failed to find the subreddit /r/{sub}, skipping entry. Value: {res}")
                     continue
 
-                submissions: list[dict[asyncpraw.reddit.Submission, str]] = await self.process_subreddit_submissions(sub=sub, last_check=last_check, order_type="New")
+                try:
+                    submissions: list[dict[asyncpraw.reddit.Submission, str]] = await self.process_subreddit_submissions(
+                        sub=sub, last_check=last_check, order_type="New"
+                    )
+                except PRAWcore.exceptions.NotFound:
+                    self._logger.warning(msg=f"WARNING - {sub} No longer accessible, removing from Database!")
+                    await self.db._del_subreddit(name=sub)
+                    self._subreddits.pop(index)
+                index += 1
+
                 self._logger.debug(msg=f"# of possible image submissions {len(submissions)}")
                 for sub_entry in submissions:
                     for submission, img_url in sub_entry.items():
@@ -654,15 +829,20 @@ class Reddit_IS(cog.KumaCog):
                         #
                         img_info: ImageInfo = await self._partial_edge_comparison(img_url=img_url, img_data=img_data)
 
-                        if hash_res or img_info.edge_res == True:
-                            self._logger.debug(msg=f"Duplicate check failed | hash - {hash_res} | edge - {img_info.edge_res}")
+                        # by default img_info.edge_res is True
+                        if hash_res or img_info.edge_res is True:
+                            self._logger.debug(
+                                msg=f"Duplicate check failed | hash - {hash_res} | edge - {img_info.edge_res}"
+                            )
                             continue
 
                         else:
                             self._url_list.append(img_url)
                             count += 1
                             # TODO - Use markdown formatting to turn img URL into a shorter clickable link.
-                            formatted_content: str = f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n[{img_info.width}x{img_info.height}]\n'
+                            # TODO - Add Timestamp to posts
+                            # self._logger.info(f"{webhook_url}")
+                            formatted_content: str = f"**r/{sub}** ->  __[{submission.title}](https://www.reddit.com{submission.permalink})__\n[{img_info.width}x{img_info.height}]\n{img_url}\n"
                             await self.webhook_send(url=webhook_url, content=formatted_content)
                             # Soft buffer delay between sends to prevent rate limiting.
                             await asyncio.sleep(delay=self._delay_loop)
@@ -677,7 +857,7 @@ class Reddit_IS(cog.KumaCog):
         Args:
             id (str): _description_
         """
-        res = await self._reddit.submission(id=id)
+        res = await self._reddit.submission(id=id)  # noqa: F841
         # print(type(res), dir(res))
         # pprint(res.__dict__["crosspost_parent_list"][0]["media_metadata"])
         # for entry in dir(res):
@@ -706,7 +886,7 @@ class Reddit_IS(cog.KumaCog):
         res_image: tuple[Image, Image | None] = self.IMAGE_COMP._image_resize(source=source)
         source = self.IMAGE_COMP._filter(image=res_image[0])
         edges: list[tuple[int, int]] | None = self.IMAGE_COMP._edge_detect(image=source)
-        if edges == None:
+        if edges is None:
             self._logger.error(msg=f"Found no edges for url -> {img_url}")
             return img_info
 
@@ -716,20 +896,24 @@ class Reddit_IS(cog.KumaCog):
         # Track our failures and break if we exceed the diff.                    eg. 50-40 (10 points)
         match_req: int = int((len(b_edges) / self.IMAGE_COMP.sample_percent))
         min_match_req: int = int((match_req * self.IMAGE_COMP.match_percent) / 100)
-        for array in self._pixel_cords_array:  # list[b'\x07\x00\x08\x00\x02\x00\x02\x00', b'\x07\x00\x08\x00\x02\x00\x02\x00']
+        for (
+            array
+        ) in self._pixel_cords_array:  # list[b'\x07\x00\x08\x00\x02\x00\x02\x00', b'\x07\x00\x08\x00\x02\x00\x02\x00']
             sample: int = xy_binfind.find(haystack=array, needles=b_edges, skip=40, failcount=(match_req - min_match_req))
             if sample == -1:
-                self._logger.debug(msg=f"{img_url} Match count {sample}/{min_match_req} | Failure")  # count {failures}/{match_req-min_match_req}")  # \n Looking for {b_edges[cords:cords + 4]} in {array}")
+                self._logger.debug(
+                    msg=f"{img_url} Match count {sample}/{min_match_req} | Failure"
+                )  # count {failures}/{match_req-min_match_req}")  # \n Looking for {b_edges[cords:cords + 4]} in {array}")
                 break
             self._logger.debug(msg=f"--> Running full edge comparison on {img_url} | {len(b_edges)}")
             match: int = await self._full_edge_comparison(array=array, edges=b_edges)
-            if match == False:
+            if match is False:
                 break
             else:
                 return img_info
 
         self._pixel_cords_array.append(b_edges)
-        self._etime: float = (time.time() - stime)
+        self._etime: float = time.time() - stime
         img_info.edge_res = False
         return img_info
 
@@ -746,9 +930,17 @@ class Reddit_IS(cog.KumaCog):
         """
         # failures: int = 0
         # match_count: int = 0
-        match_req: int = int((len(edges) / self.IMAGE_COMP.match_percent) / 100)
+        match_req: int = int((len(edges) * self.IMAGE_COMP.match_percent) / 100)
         min_match_req: int = len(edges) - match_req
         matched = xy_binfind.find(haystack=array, needles=edges, failcount=min_match_req)
+        self._logger.debug(
+            "Full Edge Comparison | Image Match Percent: %s | Image Edges #: %s | Edge Match Req #: %s | Min Match Req #: %s | Matched: %s",
+            self.IMAGE_COMP.match_percent,
+            len(edges),
+            match_req,
+            min_match_req,
+            matched,
+        )
         # for pos in range(2, len(edges), 4):
         #    if match_count >= min_match_req:
         #        return True
@@ -758,7 +950,9 @@ class Reddit_IS(cog.KumaCog):
         #        failures += 1
         #    else:
         #        match_count += 1
-        if matched != -1:
+        if matched == 0:
+            return False
+        if matched is not -1:
             return True
         return False
 
@@ -781,7 +975,7 @@ class Reddit_IS(cog.KumaCog):
                     # for key, img in submission.media_metadata.items():
                     # example {'status': 'valid', 'e': 'Image', 'm': 'image/jpg', 'p': [lists of random resolution images], 's': See below..}
                     # This allows us to only get Images.
-                    if "e" in img and img["e"] == 'Image':
+                    if "e" in img and img["e"] == "Image":
                         # example 's': {'y': 2340, 'x': 1080, 'u': 'https://preview.redd.it/0u8xnxknijha1.jpg?width=1080&format=pjpg&auto=webp&v=enabled&s=04e505ade5889f6a5f559dacfad1190446607dc4'}, 'id': '0u8xnxknijha1'}
                         # img_url = img["s"]["u"]
                         _urls.append(img["s"]["u"])
@@ -834,7 +1028,7 @@ class Reddit_IS(cog.KumaCog):
             return False
 
         # Ignore all further validation as we just want the web request.
-        if ignore_validation == True:
+        if ignore_validation is True:
             return req
 
         # if 'image' in req_open.headers.get_content_type():
@@ -846,7 +1040,7 @@ class Reddit_IS(cog.KumaCog):
             return req
 
         else:  # Failed to find a 'image'
-            self._logger.warn(f'URL: {img_url} is not an image -> {req.headers}')
+            self._logger.warn(f"URL: {img_url} is not an image -> {req.headers}")
             return False
 
     async def _struct_pack(self, array: list[tuple[int, int]]) -> bytes:
@@ -884,7 +1078,9 @@ class Reddit_IS(cog.KumaCog):
 
         """
         limiter: int = (len(self._subreddits) * self._submission_limit) * 3
-        self._logger.debug(f"The length of our pixel cords array before limiting {len(self._pixel_cords_array)} | limiter: {limiter}")
+        self._logger.debug(
+            f"The length of our pixel cords array before limiting {len(self._pixel_cords_array)} | limiter: {limiter}"
+        )
         while len(self._pixel_cords_array) > limiter:
             self._pixel_cords_array.pop(0)
 
@@ -919,11 +1115,11 @@ class Reddit_IS(cog.KumaCog):
         while total_pos < len(data):
             # struct.unpack returns a tuple of the unpacked data, we are using the first 4 bytes to store an array count.
             # we multiple by 2 to get true length as we are storing 2 bytes per value.
-            cord_len: int = (struct.unpack("<I", data[total_pos:total_pos + 4])[0] * 2)
+            cord_len: int = struct.unpack("<I", data[total_pos : total_pos + 4])[0] * 2
             self._logger.debug(f"cord length {cord_len}")
 
             # We increment total_pos +4 to pass our array len blob.
-            self._pixel_cords_array.append(data[total_pos: total_pos + cord_len + 4])
+            self._pixel_cords_array.append(data[total_pos : total_pos + cord_len + 4])
             total_pos += cord_len + 4
         self._logger.debug(f"Reading our Array File... | total entries {len(self._pixel_cords_array)}")
 
@@ -948,11 +1144,12 @@ class Reddit_IS(cog.KumaCog):
         else:
             return True
 
+    # TODO - See about defining a webhook JSON structure prior and passing in the keys to prevent the URL mishap.
     async def webhook_send(self, url: str, content: str) -> None:
         """
         Sends content to the Discord Webhook url provided. \n
         Implements a dynamic delay based upon the status code when sending a webhook.\n
-            - If status code is `429` the delay between posts will be incremented by `.1` seconds. 
+            - If status code is `429` the delay between posts will be incremented by `.1` seconds.
             - After 10 successful sends it will remove `.1` seconds from the delay.
 
         Args:
@@ -963,22 +1160,25 @@ class Reddit_IS(cog.KumaCog):
         """
         # None: Returns `False` due to status code not in range `200 <= result.status < 300` else returns `None`
         # Could check channels for NSFW tags and prevent NSFW subreddits from making it to those channels/etc.
-        data = {"content": content, "username": self._user_name}
-        result: ClientResponse = await self._sessions.post(url, json=data)
+        data: dict[str, Any] = {"content": content, "username": self._user_name}
+
+        result: ClientResponse = await self._sessions.post(url=url, json=data)
         if 200 <= result.status < 300:
             return
 
         else:
             # Attempting to dynamically adjust the delay in sending messages.
             if result.status == 429:
-                self._delay_loop += .1
+                self._delay_loop += 0.1
 
             self._loop_iterations += 1
             if self._loop_iterations > 10:
-                self._delay_loop -= .1
+                self._delay_loop -= 0.1
                 self._loop_iterations = 0
 
-            self._logger.warn(f"Webhook not sent with {result.status} - delay {self._delay_loop}s, response:\n{result.json()}")
+            self._logger.warn(
+                f"Webhook not sent with {result.status} - delay {self._delay_loop}s, response:\n{await result.json()}"
+            )
             return
 
     async def check_subreddit(self, subreddit: str) -> int:
@@ -986,7 +1186,7 @@ class Reddit_IS(cog.KumaCog):
         Attempts a `HEAD` request of the passed in subreddit.
 
         Args:
-            subreddit(str): The subreddit to check. Do not include the `/r/`. eg `NoStupidQuestions` 
+            subreddit(str): The subreddit to check. Do not include the `/r/`. eg `NoStupidQuestions`
         Returns:
             int: Returns status code
         Except:
@@ -1007,15 +1207,15 @@ class Reddit_IS(cog.KumaCog):
 
         try:
             # We are having issues with aiohttp.ClientResponse when using `.head()`; we are going to forcibly time it out after 5 seconds.
-            async with asyncio.timeout(delay=5):
+            async with asyncio.timeout(delay=10):
                 check: ClientResponse = await self._sessions.head(url=temp_url, allow_redirects=True)
 
         except TimeoutError:
-            self._logger.error(f"Timed out checking {subreddit} | Returning status code 400")
+            self._logger.error(f"Timed out checking {_url + subreddit} | Returning status code 400")
             return 400
 
         except Exception as e:
-            self._logger.error(f"Failed to check {subreddit} | Response returned {e}")
+            self._logger.error(f"Failed to check {_url + subreddit} | Response returned {e}")
             return 400
 
         return check.status
@@ -1031,7 +1231,7 @@ class Reddit_IS(cog.KumaCog):
         """
         res_one: ClientResponse | Literal[False] = await self._get_url_req(img_url=url_one)
         res_two: ClientResponse | Literal[False] = await self._get_url_req(img_url=url_two)
-        if res_one and res_two != False:
+        if res_one and res_two is not False:
             img_one: Image = IMG.open(io.BytesIO(await res_one.read()))
             img_two: Image = IMG.open(io.BytesIO(await res_two.read()))
             self.IMAGE_COMP.compare(source=img_one, comparison=img_two)
@@ -1041,41 +1241,57 @@ class Reddit_IS(cog.KumaCog):
     @app_commands.describe(count="The number of submissions to retrieve, default is 5.")
     @app_commands.describe(order_type="Either `New, Hot, Best or Top`")
     @app_commands.autocomplete(order_type=autocomplete_submission_type)
-    async def get_subreddit(self, context: commands.Context, sub: str, order_type: str = "new", count: app_commands.Range[int, 0, 100] = 5):
+    async def get_subreddit(
+        self, context: commands.Context, sub: str, order_type: str = "new", count: app_commands.Range[int, 0, 100] = 5
+    ):
+        # TODO - The len count appears to be off by 1.
         status: int = await self.check_subreddit(subreddit=sub)
         if status != 200:
-            return await context.send(content=f"Unable to find the subreddit `/r/{sub}`.\n *Status code: {status}*", delete_after=self._message_timeout)
+            return await context.send(
+                content=f"Unable to find the subreddit `/r/{sub}`.\n *Status code: {status}*",
+                delete_after=self._message_timeout,
+            )
 
-        res: list[dict[asyncpraw.reddit.Submission, str]] = await self.process_subreddit_submissions(sub=sub, order_type=order_type, count=count)
+        res: list[dict[asyncpraw.reddit.Submission, str]] = await self.process_subreddit_submissions(
+            sub=sub, order_type=order_type, count=count
+        )
         self._logger.info(len(res))
         for entry in res:
             for submission, url in entry.items():
-                await context.send(content=f'**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{url}\n')
+                await context.send(content=f"**r/{sub}** ->  __[{submission.title}]({submission.url})__\n{url}\n")
         return await context.send(content=f"Finished sending {len(res)} submissions from **r/{sub}**")
 
+    # TODO - Need to validate this command is working.
     @commands.hybrid_command(help="Add a subreddit to the DB", aliases=["rsadd", "rsa"])
     @app_commands.describe(sub="The subreddit name or full url https://www.reddit.com/r/subreddit_here")
     @app_commands.default_permissions(manage_guild=True)
-    async def add_subreddit(self, context: commands.Context, sub: str):
-
+    async def add_subreddit(self, context: commands.Context, sub: str) -> discord.Message:
+        # await context.defer()
         status: int = await self.check_subreddit(subreddit=sub)
         if status != 200:
-            return await context.send(content=f"Unable to find the subreddit `{sub if sub.startswith('https://www.reddit.com/r/') else f'/r/{sub}'}`.\n *Status code: {status}*", delete_after=self._message_timeout)
-
-        res: Row | None = await _add_subreddit(name=sub)
-
-        if res is not None:
+            return await context.send(
+                content=f"Unable to find the subreddit `{sub if sub.startswith('https://www.reddit.com/r/') else f'/r/{sub}'}`.\n *Status code: {status}*",
+                delete_after=self._message_timeout,
+            )
+        res: DBSubreddit | None = await self.db._add_subreddit(name=sub)
+        if isinstance(res, DBSubreddit):
             self._recent_edit = True
-            return await context.send(content=f"Added `{sub if sub.startswith('https://www.reddit.com/r/') else f'/r/{sub}'}` to our database.", delete_after=self._message_timeout)
+            return await context.send(
+                content=f"Added `{sub if sub.startswith('https://www.reddit.com/r/') else f'/r/{sub}'}` to our database.",
+                delete_after=self._message_timeout,
+            )
         else:
-            return await context.send(content=f"Unable to add `{sub if sub.startswith('https://www.reddit.com/r/') else f'/r/{sub}'}` to the database.", delete_after=self._message_timeout)
+            return await context.send(
+                content=f"Unable to add `{sub if sub.startswith('https://www.reddit.com/r/') else f'/r/{sub}'}` to the database.",
+                delete_after=self._message_timeout,
+            )
 
     @commands.hybrid_command(help="Remove a subreddit from the DB", aliases=["rsdel", "rsd"])
     @app_commands.describe(sub="The sub Reddit name.")
     @app_commands.autocomplete(sub=autocomplete_subreddit)
     @app_commands.default_permissions(manage_guild=True)
     async def del_subreddit(self, context: commands.Context, sub: str):
-        res: int | None = await _del_subreddit(name=sub)
+        res: int | None = await self.db._del_subreddit(name=sub)
         self._recent_edit = True
         await context.send(content=f"Removed {res} {'subreddit' if res else ''}", delete_after=self._message_timeout)
 
@@ -1085,7 +1301,7 @@ class Reddit_IS(cog.KumaCog):
     @app_commands.autocomplete(webhook=autocomplete_webhook)
     @app_commands.default_permissions(manage_guild=True)
     async def update_subreddit(self, context: commands.Context, sub: str, webhook: str):
-        res: Row | None = await _update_subreddit(name=sub, webhook=webhook)
+        res: DBSubreddit | None = await self.db._update_subreddit(name=sub, webhook=webhook)
         if res is None:
             return await context.send(content=f"Unable to update `/r/{sub}`.", delete_after=self._message_timeout)
         else:
@@ -1094,7 +1310,7 @@ class Reddit_IS(cog.KumaCog):
 
     @commands.hybrid_command(help="List of subreddits", aliases=["rslist", "rsl"])
     async def list_subreddit(self, context: commands.Context):
-        res: list[Any | dict[str, str]] = await _get_all_subreddits()
+        res: list[Any | dict[str, str]] = await self.db._get_all_subreddits()
         temp_list = []
         for entry in res:
             for name, webhook in entry.items():
@@ -1104,50 +1320,70 @@ class Reddit_IS(cog.KumaCog):
                 sub_entry = f"{emoji} - **/r/**`{name}`"
                 temp_list.append(sub_entry)
 
-        return await context.send(content=f"**__Current Subreddit List__**(total: {len(temp_list)}):\n" + "\n".join(temp_list))
+        return await context.send(
+            content=f"**__Current Subreddit List__**(total: {len(temp_list)}):\n" + "\n".join(temp_list)
+        )
 
     @commands.hybrid_command(help="Info about a subreddit", aliases=["rsinfo", "rsi"])
     @app_commands.describe(sub="The sub Reddit name.")
     @app_commands.autocomplete(sub=autocomplete_subreddit)
     async def info_subreddit(self, context: commands.Context, sub: str):
-        res: Row | None = await _get_subreddit(name=sub)
+        res: DBSubreddit | None = await self.db._get_subreddit(name=sub)
         if res is not None:
-            wh_res: Row | None = await _get_webhook(arg=res["webhook_id"])
+            wh_res: Row | None = await self.db._get_webhook(arg=res.webhook_id)
             if wh_res is not None:
-                return await context.send(content=f"**Info on Subreddit /r/`{sub}`**\n> __Webhook Name__: {wh_res['name']}\n> __Webhook ID__: {wh_res['id']}\n> {wh_res['url']}", delete_after=self._message_timeout)
+                return await context.send(
+                    content=f"**Info on Subreddit /r/`{sub}`**\n> __Webhook Name__: {wh_res['name']}\n> __Webhook ID__: {wh_res['id']}\n> {wh_res['url']}",
+                    delete_after=self._message_timeout,
+                )
             else:
-                return await context.send(content=f"**Info onSubreddit /r/`{sub}`**\n`No webhook assosciated with this subreddit`", delete_after=self._message_timeout)
+                return await context.send(
+                    content=f"**Info onSubreddit /r/`{sub}`**\n`No webhook associated with this subreddit`",
+                    delete_after=self._message_timeout,
+                )
         else:
-            return await context.send(content=f"Unable to find /r/`{sub} in the database.", delete_after=self._message_timeout)
+            return await context.send(
+                content=f"Unable to find /r/`{sub} in the database.", delete_after=self._message_timeout
+            )
 
     @commands.hybrid_command(help="Add a webhook to the database.", aliases=["rswhadd", "rswha"])
     @app_commands.default_permissions(manage_webhooks=True)
     async def add_webhook(self, context: commands.Context, webhook_name: str, webhook_url: str):
         data: str = f"Testing webhook {webhook_name}"
         success: bool | None = await self.webhook_send(url=webhook_url, content=data)
-        if success == False:
+        if success is False:
             return await context.send(content=f"Failed to send a message to `{webhook_name}` via url. \n{webhook_url}")
 
-        res: Row | None = await _add_webhook(name=webhook_name, url=webhook_url)
+        res: Row | None = await self.db._add_webhook(name=webhook_name, url=webhook_url)
         if res is not None:
             self._recent_edit = True
-            return await context.send(content=f"Added **{webhook_name}** to the database. \n> `{webhook_url}`", delete_after=self._message_timeout)
+            return await context.send(
+                content=f"Added **{webhook_name}** to the database. \n> `{webhook_url}`", delete_after=self._message_timeout
+            )
         else:
-            return await context.send(content=f"Unable to add {webhook_url} to the database.", delete_after=self._message_timeout)
+            return await context.send(
+                content=f"Unable to add {webhook_url} to the database.", delete_after=self._message_timeout
+            )
 
     @commands.hybrid_command(help="Remove a webhook from the database.", aliases=["rswhdel", "rswhd"])
     @app_commands.autocomplete(webhook=autocomplete_webhook)
     @app_commands.default_permissions(manage_webhooks=True)
     async def del_webhook(self, context: commands.Context, webhook: str):
-        res: int | None = await _del_webhook(arg=webhook)
+        res: int | None = await self.db._del_webhook(arg=webhook)
         self._recent_edit = True
         await context.send(content=f"Removed {res} {'webhook' if res else ''}", delete_after=self._message_timeout)
 
     @commands.hybrid_command(help="List all webhook in the database.", aliases=["rswhlist", "rswhl"])
     @app_commands.default_permissions(manage_webhooks=True)
     async def list_webhook(self, context: commands.Context):
-        res: list[Webhook | None] = await _get_all_webhooks()
-        return await context.send(content="**Webhooks**:\n" + "\n".join([f"**{entry['name']}** ({entry['id']})\n> `{entry['url']}`\n" for entry in res if entry is not None]), delete_after=self._message_timeout)
+        res: list[DBWebhook | None] = await self.db._get_all_webhooks()
+        return await context.send(
+            content="**Webhooks**:\n"
+            + "\n".join([
+                f"**{entry['name']}** ({entry['id']})\n> `{entry['url']}`\n" for entry in res if entry is not None
+            ]),
+            delete_after=self._message_timeout,
+        )
 
     @commands.hybrid_command(help="Start/Stop the Scrapper loop", aliases=["rsloop"])
     @app_commands.default_permissions(administrator=True)
@@ -1181,34 +1417,40 @@ class Reddit_IS(cog.KumaCog):
             status = "restarting."
 
         else:
-            return await context.send(content=f"You must use these words {','.join(start)} | {','.join(end)}", delete_after=self._message_timeout)
+            return await context.send(
+                content=f"You must use these words {','.join(start)} | {','.join(end)}", delete_after=self._message_timeout
+            )
         return await context.send(content=f"The Scrapper loop is {status}", delete_after=self._message_timeout)
 
     @commands.hybrid_command(help="Sha256 comparison of two URLs", aliases=["sha256", "hash"])
     async def hash_comparison(self, context: commands.Context, url_one: str, url_two: str | None):
         failed: bool = False
         res: ClientResponse | Literal[False] = await self._get_url_req(img_url=url_one)
-        if res == False:
+        if res is False:
             failed = True
 
         elif url_two is not None:
             res_two: ClientResponse | Literal[False] = await self._get_url_req(img_url=url_two)
-            if res_two == False:
+            if res_two is False:
                 failed = True
             elif res == res_two:
-                return await context.send(content=f"The Images match!", delete_after=self._message_timeout)
+                return await context.send(content="The Images match!", delete_after=self._message_timeout)
             elif res != res_two:
-                return await context.send(content=f"The Images do not match.\n `{res}` \n `{res_two}`", delete_after=self._message_timeout)
+                return await context.send(
+                    content=f"The Images do not match.\n `{res}` \n `{res_two}`", delete_after=self._message_timeout
+                )
         else:
             return await context.send(content=f"Hash: `{res}`", delete_after=self._message_timeout)
 
         if failed:
-            return await context.send(content=f"Unable to hash the URLs provided.", delete_after=self._message_timeout)
+            return await context.send(content="Unable to hash the URLs provided.", delete_after=self._message_timeout)
 
     @commands.hybrid_command(help="Edge comparison of two URLs", aliases=["edge"])
     async def edge_comparison(self, context: commands.Context, url_one: str, url_two: str):
         await self._compare_urls(url_one=url_one, url_two=url_two)
-        return await context.send(content=f"**URL One**:{url_one}\n**URL Two**:{url_two}\n**Results:**{self.IMAGE_COMP.results}")
+        return await context.send(
+            content=f"**URL One**:{url_one}\n**URL Two**:{url_two}\n**Results:**{self.IMAGE_COMP.results}"
+        )
 
 
 async def setup(bot: commands.Bot):

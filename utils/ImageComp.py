@@ -161,7 +161,14 @@ class Image_Comparison:
         """
         return image.filter(filter=filter)
 
-    def _image_resize(self, source: IMG, comparison: IMG | None = None, sampling=Resampling.BICUBIC, scale_percent: int = 50, image_size: Union[None, tuple[int, int]] = (500, 500)) -> tuple[IMG, IMG | None]:
+    def _image_resize(
+        self,
+        source: IMG,
+        comparison: IMG | None = None,
+        sampling=Resampling.BICUBIC,
+        scale_percent: int = 50,
+        image_size: Union[None, tuple[int, int]] = (500, 500),
+    ) -> tuple[IMG, IMG | None]:
         """
         Resizes the source image and resizes the comparison image to the same resolution as the source.\n
         `**THIS MUST BE BEFORE  _filter or it will saturate the white.**`
@@ -179,7 +186,10 @@ class Image_Comparison:
             tuple[IMG, IMG | None]: Resized PIL Images
         """
         if image_size is None:
-            dimensions: tuple[int, int] = (int(source.height * (scale_percent / 100)), int(source.width * (scale_percent / 100)))
+            dimensions: tuple[int, int] = (
+                int(source.height * (scale_percent / 100)),
+                int(source.width * (scale_percent / 100)),
+            )
         else:
             dimensions = image_size
 
@@ -211,7 +221,7 @@ class Image_Comparison:
         if isinstance(pixels, DeferredError):
             raise BaseException(f"We ran into an error handling the image. | {pixels.ex}")
         elif pixels is None:
-            raise ValueError(f"We failed to get any data from the image.")
+            raise ValueError("We failed to get any data from the image.")
         for x in range(0, len(pixels)):
             if pixels[x] >= self._line_detect:
                 edges.append((int(x % image.width), int(x / image.height)))
@@ -320,5 +330,5 @@ class Image_Comparison:
         else:
             match = False
 
-        self._etime: float = (time.time() - stime)
+        self._etime: float = time.time() - stime
         return match

@@ -23,9 +23,10 @@ from __future__ import annotations
 
 import inspect
 import json
-# Python Libs
 import os
 import re
+# Python Libs
+import sys
 import time
 import unicodedata
 from datetime import timedelta
@@ -157,32 +158,29 @@ class Util(cog.KumaCog):
         """Tells you information about the bot itself."""
         await ctx.defer()
         assert self._bot.user
-        information = await self._bot.application_info()
-        embed = discord.Embed()
+        information: discord.AppInfo = await self._bot.application_info()
+        embed = discord.Embed(title=f"{self._bot.user.name}")
         # embed.add_field(name="Latest updates:", value=get_latest_commits(limit=5), inline=False)
-
-        embed.set_author(
-            name=f"Made by {information.owner.name}", icon_url=information.owner.display_avatar.url,)
+        embed.set_author(name=f"Made by {information.owner.name}", icon_url=information.owner.display_avatar.url)
         memory_usage = psutil.Process().memory_full_info().uss / 1024**2
-        cpu_usage = psutil.cpu_percent()
+        embed.add_field(name="Memory Usage:", value=f"{memory_usage:.2f}", inline=False)
+        cpu_usage: float = psutil.cpu_percent()
+        embed.add_field(name="CPU Usage:", value=f"{cpu_usage:.2f}%", inline=False)
 
-        embed.add_field(
-            name="Process", value=f"{memory_usage:.2f} MBs \n{cpu_usage:.2f}% CPU")
-        embed.add_field(
-            name=f"{self._bot.user.name} info:",
-            value=f"**Uptime:**\n{self._uptime}")
+        embed.add_field(name="Uptime:", value=f"{self._uptime}", inline=False)
         try:
             embed.add_field(
-                name="Lines",
+                name="Code Base:",
                 value=f"Lines: {await self.count_lines('./', '.py'):,}"
                 f"\nFunctions: {await self.count_others('./', '.py', 'def '):,}"
                 f"\nClasses: {await self.count_others('./', '.py', 'class '):,}",
+                inline=False
             )
         except (FileNotFoundError, UnicodeDecodeError):
             pass
 
         embed.set_footer(
-            text=f"Made with discord.py v{discord.__version__}",
+            text=f"Discord.py v{discord.__version__} | Python v{sys.version}",
             icon_url="https://i.imgur.com/5BFecvA.png",
         )
         embed.timestamp = discord.utils.utcnow()
