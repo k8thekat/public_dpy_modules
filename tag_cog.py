@@ -4,17 +4,16 @@ from __future__ import annotations
 This module uses the following third party libs installed via pip: asqlite (https://github.com/Rapptz/asqlite)
 """
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
-import utils.asqlite as asqlite
 import discord
 from discord.ext import commands
-from pathlib import Path
-import os
 
-from utils.embed_paginator import BasePaginatorView
-
+import utils.asqlite as asqlite
 from utils import cog
+from utils.embed_paginator import BasePaginatorView
 
 ALLOWED_MENTIONS = discord.AllowedMentions.none()
 
@@ -56,8 +55,14 @@ class TagEntry:
         async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
                 # TODO upsert?
-                await cur.execute("""INSERT INTO tags (name, owner_id, guild_id, content) VALUES (?, ?, ?, ?)
-                ON CONFLICT(name, guild_id) DO NOTHING RETURNING *""", name, owner_id, guild_id, content)
+                await cur.execute(
+                    """INSERT INTO tags (name, owner_id, guild_id, content) VALUES (?, ?, ?, ?)
+                ON CONFLICT(name, guild_id) DO NOTHING RETURNING *""",
+                    name,
+                    owner_id,
+                    guild_id,
+                    content,
+                )
 
                 res = await cur.fetchone()
                 await db.commit()
@@ -75,7 +80,12 @@ class TagEntry:
     async def update(self, *, new_content: str) -> TagEntry:
         async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
-                await cur.execute("UPDATE tags SET content = ? WHERE name = ? AND guild_id = ? RETURNING *", new_content, self.name, self.guild_id)
+                await cur.execute(
+                    "UPDATE tags SET content = ? WHERE name = ? AND guild_id = ? RETURNING *",
+                    new_content,
+                    self.name,
+                    self.guild_id,
+                )
                 await db.commit()
 
                 res = await cur.fetchone()
@@ -87,7 +97,7 @@ class TagsCog(cog.KumaCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot=bot)
         self._name: str = os.path.basename(__file__).title()
-        self._logger.info(f'**SUCCESS** Initializing {self._name}')
+        self.logger.info(f"**SUCCESS** Initializing {self._name}")
 
     async def cog_load(self) -> None:
         async with asqlite.connect(DB_PATH) as db:
@@ -218,9 +228,9 @@ class TagsCog(cog.KumaCog):
 
                 # IMPLEMENTATION WITHOUT PAGINATION:
                 if results:
-                    out = "\n".join(res['name'] for res in results[:20])
+                    out = "\n".join(res["name"] for res in results[:20])
                     if (num_results := len(results)) > 20:
-                        out += f"\n{num_results-20:,} other results."
+                        out += f"\n{num_results - 20:,} other results."
                     embed = discord.Embed(color=discord.Color.blue(), description=out, title=query)
                     await ctx.send(embed=embed)
                 else:
@@ -242,7 +252,9 @@ class TagsCog(cog.KumaCog):
 
         async with asqlite.connect(DB_PATH) as db:
             async with db.cursor() as cur:
-                await cur.execute("SELECT name FROM tags WHERE owner_id = ? and guild_id = ? ORDER BY name ASC", member.id, ctx.guild.id)
+                await cur.execute(
+                    "SELECT name FROM tags WHERE owner_id = ? and guild_id = ? ORDER BY name ASC", member.id, ctx.guild.id
+                )
 
                 results = await cur.fetchall()
                 # results = list(enumerate(results, 1))
@@ -262,9 +274,9 @@ class TagsCog(cog.KumaCog):
 
                 # IMPLEMENTATION WITHOUT PAGINATION:
                 if results:
-                    out = "\n".join(res['name'] for res in results[:20])
+                    out = "\n".join(res["name"] for res in results[:20])
                     if (num_results := len(results)) > 20:
-                        out += f"\n{num_results-20:,} other results."
+                        out += f"\n{num_results - 20:,} other results."
                     embed = discord.Embed(color=discord.Color.blue(), description=out, title=f"{member}'s Tags")
                     await ctx.send(embed=embed)
                 else:

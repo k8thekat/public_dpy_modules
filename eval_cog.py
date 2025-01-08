@@ -1,37 +1,38 @@
-'''
-   Copyright (C) 2021-2022 Katelynn Cadwallader.
+"""
+Copyright (C) 2021-2022 Katelynn Cadwallader.
 
-   This file is part of Kuma Kuma Bear, a Discord Bot.
+This file is part of Kuma Kuma Bear, a Discord Bot.
 
-   Kuma Kuma Bear is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 3, or (at your option)
-   any later version.
+Kuma Kuma Bear is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 3, or (at your option)
+any later version.
 
-   Kuma Kuma Bear is distributed in the hope that it will be useful, but WITHOUT
-   ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
-   or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
-   License for more details.
+Kuma Kuma Bear is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public
+License for more details.
 
-   You should have received a copy of the GNU General Public License
-   along with Kuma Kuma Bear; see the file COPYING.  If not, write to the Free
-   Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
-   02110-1301, USA. 
+You should have received a copy of the GNU General Public License
+along with Kuma Kuma Bear; see the file COPYING.  If not, write to the Free
+Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
+02110-1301, USA.
 
-'''
-import discord
-from discord.ext import commands
+"""
 
-import os
-from typing import Annotated
 import io
+import os
 import sys
-import aiohttp
+import time
+from io import StringIO
 from textwrap import indent
 from traceback import format_exc as geterr
-from io import StringIO
+from typing import Annotated
+
+import aiohttp
+import discord
 import import_expression
-import time
+from discord.ext import commands
 
 from utils import cog
 from utils.converter import CodeBlockConverter
@@ -43,22 +44,27 @@ class Eval(cog.KumaCog):
     def __init__(self, bot: commands.Bot):
         super().__init__(bot=bot)
         self._name: str = os.path.basename(__file__).title()
-        self._logger.info(f'**SUCCESS** Initializing {self._name}')
+        self.logger.info(f"**SUCCESS** Initializing {self._name}")
+
     # def CharConvertor(self, char: Union[discord.Emoji, str]) -> Union[discord.Emoji, str]:
     #     if isinstance(char, str):
     #         return char.encode("unicode_escape").decode("ASCII")
     #     else:
     #         return char
 
-    @commands.command(invoke_without_command=True, name="eval", aliases=['```py', '```', 'py', 'python', 'run', 'exec', 'execute'], description="Evaluates the given code")
+    @commands.command(
+        invoke_without_command=True,
+        name="eval",
+        aliases=["```py", "```", "py", "python", "run", "exec", "execute"],
+        description="Evaluates the given code",
+    )
     @commands.is_owner()
     async def eval(self, context: commands.Context, *, code: Annotated[str, CodeBlockConverter]):
-        self._logger.info(
-            f'{context.author.name} used {context.command}...')
+        self.logger.info(f"{context.author.name} used {context.command}...")
         await context.channel.typing()
         env = {
             "context": context,
-            "kuma": self._bot,
+            "kuma": self.bot,
             "message": context.message,
             "author": context.author,
             "guild": context.guild,
@@ -68,16 +74,22 @@ class Eval(cog.KumaCog):
             "os": os,
             "io": io,
             "sys": sys,
-            "aiohttp": aiohttp
+            "aiohttp": aiohttp,
         }
 
         function = "async def func():\n" + indent(code, "    ")
         function = function.splitlines()
         x = function[-1].removeprefix("    ")
-        if not x.startswith("print") and not x.startswith("return") and not x.startswith(" ") and not x.startswith("yield") and not x.startswith("import"):
+        if (
+            not x.startswith("print")
+            and not x.startswith("return")
+            and not x.startswith(" ")
+            and not x.startswith("yield")
+            and not x.startswith("import")
+        ):
             function.pop(function.index(function[-1]))
             function.append(f"    return {x}")
-        function = '\n'.join(function)
+        function = "\n".join(function)
         await self._handle_eval(env, context, function)
 
     async def _handle_eval(self, env, context: commands.Context, function, as_generator=False):
@@ -99,8 +111,7 @@ class Eval(cog.KumaCog):
 
                 err = geterr()
                 try:
-                    err = err.split(
-                        "return compile(source, filename, mode, flags,")[1]
+                    err = err.split("return compile(source, filename, mode, flags,")[1]
                 except:
                     try:
                         err = err.split("res = await func()")[1]
@@ -141,4 +152,4 @@ class RedirectedStdout:
     def __str__(self):
         if self._string_io:
             return self._string_io.getvalue()
-        return ''
+        return ""
