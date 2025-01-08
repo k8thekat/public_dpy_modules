@@ -1,0 +1,3 @@
+[submodule "private"]
+	path = private
+	url = https://github.com/k8thekat/private_dpy_modules
