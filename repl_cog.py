@@ -23,37 +23,39 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 import asyncio
 import inspect
 import io
-import logging
-import os
 import traceback
 from contextlib import redirect_stdout
+from typing import Any
 
 import discord
 from discord.ext import commands
 
-from utils import cog
+from kuma_kuma import Kuma_Kuma
+from utils.cog import KumaCog as Cog  # need to replace with your own Cog class
+from utils.context import KumaContext as Context
 
 
-class Repl(cog.KumaCog):
-    def __init__(self, bot: commands.Bot):
+class Repl(Cog):
+    repo_url: str = "https://github.com/k8thekat/public_dpy_modules"
+
+    def __init__(self, bot: Kuma_Kuma) -> None:
         super().__init__(bot=bot)
-        self._name: str = os.path.basename(__file__).title()
-        self.logger.info(f"**SUCCESS** Initializing {self._name}")
 
     async def cog_load(self) -> None:
         self._sessions: set[int] = set()
 
-    @commands.Cog.listener("on_message")
-    async def on_message_listener(self, message: discord.Message):
+    @commands.Cog.listener(name="on_message")
+    async def on_message_listener(self, message: discord.Message) -> None:
         # This is for our `REPL` sessions.
         if message.channel.id in self._sessions:
             return
 
     @commands.command(hidden=True)
     @commands.is_owner()
-    async def repl(self, ctx: commands.Context):
+    # todo - figure out why the repl session is failing to handle `await` type code.
+    async def repl(self, ctx: Context) -> None:
         """Launches an interactive REPL session."""
-        variables = {
+        variables: dict[str, Any] = {
             "ctx": ctx,
             "bot": self.bot,
             "message": ctx.message,
@@ -64,13 +66,16 @@ class Repl(cog.KumaCog):
         }
 
         if ctx.channel.id in self._sessions:
-            await ctx.send("Already running a REPL session in this channel. Exit it with `quit`.")
+            await ctx.send(content="Already running a `REPL` session in this channel. Exit it with `quit`.")
             return
 
         self._sessions.add(ctx.channel.id)
-        await ctx.send("Enter code to execute or evaluate. `exit()` or `quit` to exit.")
+        c_vars = "\n- ".join(variables)
+        await ctx.send(
+            content=f"""Enter code to execute or evaluate. `exit()` or `quit` to exit. {self.emoji_table.to_inline_emoji(emoji="kuma_wow")}\n__Current Set Variables__\n- {c_vars}"""
+        )
 
-        def check(message: discord.Message):
+        def check(message: discord.Message) -> bool:
             return (
                 message.author.id == ctx.author.id
                 and message.channel.id == ctx.channel.id
@@ -81,14 +86,14 @@ class Repl(cog.KumaCog):
             try:
                 response = await self.bot.wait_for("message", check=check, timeout=10.0 * 60.0)
             except asyncio.TimeoutError:
-                await ctx.send("Exiting REPL session.")
+                await ctx.send(content=f"Exiting `REPL` session.{self.emoji_table.to_inline_emoji(emoji='kuma_shock')}")
                 self._sessions.remove(ctx.channel.id)
                 break
 
             cleaned = self.cleanup_code(response.content)
 
             if cleaned in ("quit", "exit", "exit()"):
-                await ctx.send("Exiting.")
+                await ctx.send(content=f"Exiting. {self.emoji_table.to_inline_emoji('kuma_shrug')}")
                 self._sessions.remove(ctx.channel.id)
                 return
 
@@ -110,7 +115,7 @@ class Repl(cog.KumaCog):
                 try:
                     code = compile(cleaned, "<repl session>", "exec")
                 except SyntaxError as e:
-                    await ctx.send(self.get_syntax_error(e))
+                    await ctx.send(content=self.get_syntax_error(e))
                     continue
 
             variables["message"] = response
@@ -137,19 +142,25 @@ class Repl(cog.KumaCog):
             try:
                 if fmt is not None:
                     if len(fmt) > 2000:
-                        await ctx.send("Content too big to be printed.")
+                        await ctx.send(
+                            content="Content is over 2,000 lines to be printed in it's entirety, sending the last 2,000 lines."
+                        )
+                        await ctx.send(content=fmt[-2000:])
                     else:
-                        await ctx.send(fmt)
+                        await ctx.send(content=fmt)
             except discord.Forbidden:
                 pass
             except discord.HTTPException as e:
-                await ctx.send(f"Unexpected error: `{e}`")
+                await ctx.send(content=f"Unexpected error: `{e}`")
 
     def cleanup_code(self, content: str) -> str:
         """Automatically removes code blocks from the code."""
         # remove ```py\n```
         if content.startswith("```") and content.endswith("```"):
-            return "\n".join(content.split("\n")[1:-1])
+            temp: str = "\n".join(content.split(sep="\n")[1:-1])
+            # temp = f"async def _repl():\n{temp}\n"
+            print(temp)
+            return temp
 
         # remove `foo`
         return content.strip("` \n")
@@ -160,5 +171,5 @@ class Repl(cog.KumaCog):
         return f"```py\n{e.text}{'^':>{e.offset}}\n{e.__class__.__name__}: {e}```"
 
 
-async def setup(bot: commands.Bot):
-    await bot.add_cog(Repl(bot))
+async def setup(bot: Kuma_Kuma) -> None:
+    await bot.add_cog(Repl(bot=bot))
