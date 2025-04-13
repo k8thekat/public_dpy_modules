@@ -26,6 +26,7 @@ import inspect
 import io
 import json
 import os
+import platform
 import re
 import unicodedata
 from pathlib import Path
@@ -53,7 +54,7 @@ if TYPE_CHECKING:
 BOT_NAME = "Kuma Kuma"
 
 
-def get_latest_commits(max_count: int = 5) -> str:
+def get_latest_commits(url: str, repo: Repo, branch: str, max_count: int = 5) -> str:
     """
     Retrieves a Github Repo's lastest commits.
 
@@ -68,13 +69,15 @@ def get_latest_commits(max_count: int = 5) -> str:
         A elongated string of github commit information seperated by new lines.
     """
     reply = ""
-    url = "https://github.com/k8thekat/Kuma_Kuma"
-    repo: Repo = Repo(Path(__file__).parent.as_posix())
-    commits = repo.iter_commits(max_count=max_count)
+    # url = "https://github.com/k8thekat/Kuma_Kuma"
+    # repo: Repo = Repo(Path(__file__).parent.as_posix())
+    # todo figure out which commits this is grabbing and which direction as they don't like up.
+    commits = repo.iter_commits(branch, max_count=max_count)
     for i in commits:
         assert i.author.name
-        commit_link = f"[{i.hexsha[:6]}]({url + f'/commit/{i.hexsha[:6]}'})"
-        reply += f"({commit_link}) - by **{i.author.name}** | *{i.authored_datetime.strftime('%d/%m/%Y')}* | Lines: `{i.stats.total['lines']}`\n"
+        commit_link = f"[{i.hexsha[:4]}]({url + f'/commit/{i.hexsha}'})"
+        i.authored_datetime.strftime("%Y/%-m/%-d")
+        reply += f"({commit_link}) **{i.author.name}** | *{discord.utils.format_dt(i.authored_datetime, 'd')}* | (+`{i.stats.total['insertions']}` -`{i.stats.total['deletions']}`)\n"
     return reply
 
 
@@ -99,11 +102,7 @@ async def count_others(path: str, filetype: str = ".py", file_contains: str = "d
             if i.path.endswith(filetype):
                 if skip_venv and re.search(pattern=r"(\\|/)?venv(\\|/)", string=i.path):
                     continue
-                line_count += len([
-                    line
-                    for line in (await (await aiofiles.open(file=i.path)).read()).split(sep="\n")
-                    if file_contains in line
-                ])
+                line_count += len([line for line in (await (await aiofiles.open(file=i.path)).read()).split(sep="\n") if file_contains in line])
         elif i.is_dir():
             line_count += await count_others(path=i.path, filetype=filetype, file_contains=file_contains)
     return line_count
@@ -120,12 +119,8 @@ class ToFileButton(discord.ui.Button):
             return await interaction.response.send_message(content="Message does not contain any stickers", ephemeral=True)
 
         # We need the full sticker object if possible (specifically a discord.GuildSticker)
-        sticker: Union[
-            discord.Sticker, discord.StandardSticker, discord.GuildSticker
-        ] = await self.view.sticker_msg.stickers[0].fetch()
-        return await interaction.response.send_message(
-            content="Here is the sticker as a file.", file=await sticker.to_file(), ephemeral=True
-        )
+        sticker: Union[discord.Sticker, discord.StandardSticker, discord.GuildSticker] = await self.view.sticker_msg.stickers[0].fetch()
+        return await interaction.response.send_message(content="Here is the sticker as a file.", file=await sticker.to_file(), ephemeral=True)
 
 
 class CopyStickerButton(discord.ui.Button):
@@ -140,9 +135,7 @@ class CopyStickerButton(discord.ui.Button):
             return await interaction.response.send_message(content="Message does not contain any stickers", ephemeral=True)
 
         # We need the full sticker object if possible (specifically a discord.GuildSticker)
-        sticker: Union[
-            discord.Sticker, discord.StandardSticker, discord.GuildSticker
-        ] = await self.view.sticker_msg.stickers[0].fetch()
+        sticker: Union[discord.Sticker, discord.StandardSticker, discord.GuildSticker] = await self.view.sticker_msg.stickers[0].fetch()
         s_emoji: str = "" if not isinstance(sticker, discord.GuildSticker) else sticker.emoji
 
         to_guild: Union[discord.Guild, None] = self.view.bot.get_guild(int(self.view.guild.values[0]))
@@ -160,9 +153,7 @@ class CopyStickerButton(discord.ui.Button):
                 )
             except discord.errors.HTTPException as e:
                 self.view.bot.logger.exception(msg="Exception occurred in the CopySticker.callback():\n%s", exc_info=e)
-                return await interaction.response.send_message(
-                    content="We encountered an error processing your command.", ephemeral=True
-                )
+                return await interaction.response.send_message(content="We encountered an error processing your command.", ephemeral=True)
         return await super().callback(interaction=interaction)
 
 
@@ -178,9 +169,7 @@ class StickerYoinkView(discord.ui.View):
         self.bot: Kuma_Kuma = bot
         self.sticker_msg: discord.Message = sticker_msg
         self.sticker = CopyStickerButton()
-        options: list[discord.SelectOption] = [
-            discord.SelectOption(label=entry.name, value=str(object=entry.id)) for entry in self.bot.guilds
-        ]
+        options: list[discord.SelectOption] = [discord.SelectOption(label=entry.name, value=str(object=entry.id)) for entry in self.bot.guilds]
 
         self.guild: discord.ui.Select = discord.ui.Select(placeholder="Which Guild...?", options=options)
         self.add_item(item=self.guild)  # our guild select.
@@ -238,9 +227,7 @@ class GithubIssueSubmissionModal(discord.ui.Modal):
         res: ClientResponse = await self.bot.session.post(url=url, data=json.dumps(data), headers=headers)
         if res.status == 201:
             resp: GitHubIssueSubmissionResponse = await res.json()
-            return await interaction.response.send_message(
-                embed=GithubIssueSubmissionEmbed(gh_response=resp, user=interaction.user)
-            )
+            return await interaction.response.send_message(embed=GithubIssueSubmissionEmbed(gh_response=resp, user=interaction.user))
         else:
             return await interaction.response.send_message(
                 content=f"We failed to create an issue. | {res.status} -> ['Code'](https://docs.github.com/en/rest/issues/issues?apiVersion=2022-11-28#create-an-issue)"
@@ -262,9 +249,7 @@ class GithubIssueSubmissionView(discord.ui.View):
     submission_type: GithubIssueSubmissionSelect
     interaction_user: Union[discord.Member, discord.User]
 
-    def __init__(
-        self, bot: Kuma_Kuma, cog: Utility, issue_msg: discord.Message, interaction_user: Union[discord.User, discord.Member]
-    ) -> None:
+    def __init__(self, bot: Kuma_Kuma, cog: Utility, issue_msg: discord.Message, interaction_user: Union[discord.User, discord.Member]) -> None:
         self.cog = cog
         self.bot = bot
         self.issue_msg = issue_msg
@@ -438,9 +423,26 @@ class Utility(Cog):
             )
         except (FileNotFoundError, UnicodeDecodeError):
             pass
-
-        embed.add_field(name="__Latest Commits__", value=get_latest_commits(max_count=5), inline=False)
-        import platform
+        embed.add_field(
+            name="__Latest Kuma Kuma Commits__:",
+            value=get_latest_commits(
+                url="https://github.com/k8thekat/Kuma_Kuma",
+                repo=Repo(Path(__file__).parent.parent),
+                branch="main",
+                max_count=5,
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="__Latest Extension Commits__:",
+            value=get_latest_commits(
+                url="https://github.com/k8thekat/public_dpy_modules",
+                repo=Repo(Path(__file__).parent),
+                branch="main",
+                max_count=5,
+            ),
+            inline=False,
+        )
 
         embed.set_footer(
             text=f"Made with discord.py v{discord.__version__}, Running {platform.python_implementation()} v{platform.python_version()}",
@@ -459,6 +461,8 @@ class Utility(Cog):
         """Shows you information about a number of characters.
         Only up to 25 characters at a time.
         """
+        if characters.startswith("<") and characters.endswith(">"):
+            return await context.send(content=f"Char: {characters} | `{characters}`")
 
         def to_string(c: str) -> str:
             digit: str = f"{ord(c):x}"
@@ -467,18 +471,16 @@ class Utility(Cog):
 
         msg: str = "\n".join(map(to_string, characters))
         if len(msg) > 2000:
-            return await context.reply(
-                content=f"Output too long to display. {self.emoji_table.to_inline_emoji(self.emoji_table.kuma_head_clench)}",
-                delete_after=self.message_timeout,
+            await context.reply(
+                content=f"Output too long to display.. {self.emoji_table.to_inline_emoji(self.emoji_table.kuma_head_clench)}", delete_after=self.message_timeout
             )
+            return await context.send(content=f"{msg[:1995]} ....")
         await context.send(content=msg, delete_after=self.message_timeout)
 
     @commands.command(name="ping")
     async def ping(self, context: Context) -> discord.Message:
         """Pong..."""
-        return await context.send(
-            content=f"Pong `{round(number=self.bot.latency * 1000)}ms`", ephemeral=True, delete_after=self.message_timeout
-        )
+        return await context.send(content=f"Pong `{round(number=self.bot.latency * 1000)}ms`", ephemeral=True, delete_after=self.message_timeout)
 
     @commands.command(name="get_webhooks", help="Displays a channels webhooks by `Name` and `ID`", aliases=["getwh", "gwh"])
     @commands.guild_only()
@@ -488,17 +490,11 @@ class Utility(Cog):
         context: Context,
         channel: Union[discord.VoiceChannel, discord.TextChannel, discord.StageChannel, discord.ForumChannel, None],
     ) -> discord.Message:
-        assert isinstance(
-            context.channel, (discord.VoiceChannel, discord.TextChannel, discord.StageChannel, discord.ForumChannel)
-        )
+        assert isinstance(context.channel, (discord.VoiceChannel, discord.TextChannel, discord.StageChannel, discord.ForumChannel))
 
         channel = channel or context.channel
-        channel_webhooks: str = "\n".join([
-            f"**{webhook.name}** | ID: `{webhook.id}`" for webhook in await channel.webhooks()
-        ])
-        return await context.reply(
-            content=f"> {channel.mention} Webhooks \n{channel_webhooks}", delete_after=self.message_timeout
-        )
+        channel_webhooks: str = "\n".join([f"**{webhook.name}** | ID: `{webhook.id}`" for webhook in await channel.webhooks()])
+        return await context.reply(content=f"> {channel.mention} Webhooks \n{channel_webhooks}", delete_after=self.message_timeout)
 
     @commands.command(name="link", help="Access to useful URLs via lookup parameters")
     async def url_linking(self, context: Context, var: str = "") -> discord.Message:
@@ -509,12 +505,9 @@ class Utility(Cog):
             if var in key or var in self.lookup[key]["aliases"]:
                 return await context.reply(
                     suppress_embeds=True,
-                    content=f"Is this right *Kuma*? {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_peak)}:\n- "
-                    + "\n- ".join(list(self.lookup[key]["urls"])),
+                    content=f"Is this right *Kuma*? {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_peak)}:\n- " + "\n- ".join(list(self.lookup[key]["urls"])),
                 )
-        return await context.reply(
-            content=f"I was unable to understand your request.. {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_head_clench)}"
-        )
+        return await context.reply(content=f"I was unable to understand your request.. {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_head_clench)}")
 
     @commands.command(name="source")
     async def source(self, context: Context, *, command: Union[str, None]) -> Union[discord.Message, None]:
@@ -568,9 +561,7 @@ class Utility(Cog):
 
     @app_commands.checks.has_permissions(manage_emojis_and_stickers=True)
     async def yoink(self, interaction: discord.Interaction, message: discord.Message) -> None:
-        await interaction.response.send_message(
-            view=StickerYoinkView(bot=self.bot, sticker_msg=message), delete_after=self.message_timeout
-        )
+        await interaction.response.send_message(view=StickerYoinkView(bot=self.bot, sticker_msg=message), delete_after=self.message_timeout)
 
     async def create_github_issue(self, interaction: discord.Interaction, message: discord.Message) -> None:
         """Create a github issue via a Discord Message"""
