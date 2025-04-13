@@ -69,9 +69,7 @@ class Moderator(Cog):
 
     repo_url: str = "https://github.com/k8thekat/public_dpy_modules"
     guild_settings = list[dict[int, ModeratorSettings]]  # key will be the guild ID -> guild settings
-    CODEBLOCK_PATTERN: re.Pattern[str] = re.compile(
-        pattern=r"`{3}(?P<LANG>\w+)?\n?(?P<CODE>(?:(?!`{3}).)+)\n?`{3}", flags=re.DOTALL | re.MULTILINE
-    )
+    CODEBLOCK_PATTERN: re.Pattern[str] = re.compile(pattern=r"`{3}(?P<LANG>\w+)?\n?(?P<CODE>(?:(?!`{3}).)+)\n?`{3}", flags=re.DOTALL | re.MULTILINE)
 
     def __init__(self, bot: Kuma_Kuma) -> None:
         super().__init__(bot=bot)
@@ -101,9 +99,7 @@ class Moderator(Cog):
         """
         try:
             async with self.bot.pool.acquire() as conn:
-                res: ModeratorSettings | None = await conn.fetchone(
-                    """SELECT * FROM moderator WHERE serverid = ?""", guild.id
-                )  # type: ignore - I know the dataset because of above.
+                res: ModeratorSettings | None = await conn.fetchone("""SELECT * FROM moderator WHERE serverid = ?""", guild.id)  # type: ignore - I know the dataset because of above.
                 if res is None:
                     await self.set_mod_settings(guild=guild)
                 else:
@@ -142,9 +138,7 @@ class Moderator(Cog):
         """
         try:
             async with self.bot.pool.acquire() as conn:
-                data: ModeratorSettings | None = await conn.fetchone(
-                    """INSERT INTO moderator(serverid, use_mystbin) VALUES(?, ?) RETURNING *""", guild.id, use_mystbin
-                )  # type: ignore
+                data: ModeratorSettings | None = await conn.fetchone("""INSERT INTO moderator(serverid, use_mystbin) VALUES(?, ?) RETURNING *""", guild.id, use_mystbin)  # type: ignore
                 if data is None:
                     self.logger.error("We encountered an error inserting a row into the database. | GuildID: %s", guild.id)
 
@@ -168,9 +162,7 @@ class Moderator(Cog):
         if message.guild is not None:
             res: ModeratorSettings | None = await self.get_mod_settings(guild=message.guild)
             # So if our message is over 1k char length and the guild settings is True.
-            if (res is not None and res["use_mystbin"] is True) and (
-                message.channel.type is not discord.ChannelType.news and len(message.content) > 1000
-            ):
+            if (res is not None and res["use_mystbin"] is True) and (message.channel.type is not discord.ChannelType.news and len(message.content) > 1000):
                 await self._auto_on_mystbin(message=message)
 
     async def _auto_on_mystbin(self, message: Message) -> None:
@@ -226,13 +218,9 @@ class Moderator(Cog):
                 self.logger.info("Loaded %sextension: %s", "module " if extension.ispkg else "", extension.name)
         except Exception as e:
             self.logger.error("We encountered an error executing %s", context.command, exc_info=e)
-            await context.send(
-                content=f"__We encountered an Error__ - \n{e}", ephemeral=True, delete_after=self.message_timeout
-            )
+            await context.send(content=f"__We encountered an Error__ - \n{e}", ephemeral=True, delete_after=self.message_timeout)
 
-        await context.send(
-            content="**SUCCESS** Reloading All extensions ", ephemeral=True, delete_after=self.message_timeout
-        )
+        await context.send(content="**SUCCESS** Reloading All extensions ", ephemeral=True, delete_after=self.message_timeout)
 
     @commands.command(name="sync", help=f"Sync the {BOT_NAME} commands to the guild.")
     @commands.is_owner()
@@ -263,9 +251,7 @@ class Moderator(Cog):
         if local == True:
             # Local command tree sync
             self.bot.tree.copy_global_to(guild=context.guild)
-            self.bot.logger.info(
-                "%s Commands Sync'd Locally: %s", self.bot.user.name, await self.bot.tree.sync(guild=context.guild)
-            )
+            self.bot.logger.info("%s Commands Sync'd Locally: %s", self.bot.user.name, await self.bot.tree.sync(guild=context.guild))
             return await context.send(
                 content=f"Successfully Sync'd `{self.bot.user.name}s` Commands to {context.guild}...",
                 ephemeral=True,
@@ -281,13 +267,9 @@ class Moderator(Cog):
             res: list[Row] = await conn.fetchall("""SELECT prefix FROM prefix WHERE serverid = ?""", context.guild.id)
             if len(res) > 0:
                 prefixes = "\n".join([entry["prefix"] for entry in res])
-                return await context.send(
-                    content=f"**Current Prefixes:** \n{prefixes}", delete_after=self.message_timeout, ephemeral=True
-                )
+                return await context.send(content=f"**Current Prefixes:** \n{prefixes}", delete_after=self.message_timeout, ephemeral=True)
             else:
-                return await context.send(
-                    content="It appears you do not have any prefix's set", delete_after=self.message_timeout, ephemeral=True
-                )
+                return await context.send(content="It appears you do not have any prefix's set", delete_after=self.message_timeout, ephemeral=True)
 
     @prefix.command(name="add", help=f"Add a prefix to {BOT_NAME}", aliases=["prea", "pa"])
     @commands.is_owner()
@@ -317,16 +299,12 @@ class Moderator(Cog):
         assert context.guild is not None
         async with self.bot.pool.acquire() as conn:
             await conn.execute("""DELETE FROM prefix WHERE serverid = ?""", context.guild.id)
-            return await context.send(
-                content=f"Removed all prefix's for {context.guild.name}", delete_after=self.message_timeout, ephemeral=True
-            )
+            return await context.send(content=f"Removed all prefix's for {context.guild.name}", delete_after=self.message_timeout, ephemeral=True)
 
     @commands.command(name="trusted", help=f"Add/Remove and list {BOT_NAME} Owner IDs.")
     @commands.is_owner()
     @commands.guild_only()
-    @app_commands.choices(
-        option=[Choice(name="add", value="add"), Choice(name="remove", value="remove"), Choice(name="list", value="list")]
-    )
+    @app_commands.choices(option=[Choice(name="add", value="add"), Choice(name="remove", value="remove"), Choice(name="list", value="list")])
     async def trust(self, context: Context, option: Choice, member: Union[Member, User, int, None]) -> Message | None:
         assert context.guild
         if isinstance(member, int):
@@ -347,9 +325,7 @@ class Moderator(Cog):
                         delete_after=self.message_timeout,
                     )
             else:
-                return await context.send(
-                    content="You are already an owner", ephemeral=True, delete_after=self.message_timeout
-                )
+                return await context.send(content="You are already an owner", ephemeral=True, delete_after=self.message_timeout)
 
         elif option == "remove":
             async with self.bot.pool.acquire() as conn:
@@ -366,16 +342,12 @@ class Moderator(Cog):
                 res: list[Row] = await conn.fetchall("""SELECT ownderid FROM owners""")
                 owners: list[Member] = [await context.guild.fetch_member(entry["id"]) for entry in res]
                 f_owners: str = "\n".join([entry.display_name for entry in owners])
-                return await context.send(
-                    content=f"**Current Owners:** \n{f_owners}", ephemeral=True, delete_after=self.message_timeout
-                )
+                return await context.send(content=f"**Current Owners:** \n{f_owners}", ephemeral=True, delete_after=self.message_timeout)
 
-    @commands.command(name="clear", help="Removes Member and Bot messages from a channel.")
+    @commands.command(name="clear", help="Removes all messges and or just bot messages.")
     @app_commands.default_permissions(manage_messages=True)
     @commands.guild_only()
-    @app_commands.describe(
-        bot_only=f"Default's to True, removes ALL messages from selected Channel that were sent by {BOT_NAME}."
-    )
+    @app_commands.describe(bot_only=f"Default's to True, removes ALL messages from selected Channel that were sent by {BOT_NAME}.")
     async def clear(
         self,
         context: Context,
@@ -392,9 +364,7 @@ class Moderator(Cog):
             try:
                 til_message = await context.channel.fetch_message(amount)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                await context.reply(
-                    content="We were unable to find the Discord Message ID provided.", delete_after=self.message_timeout
-                )
+                await context.reply(content="We were unable to find the Discord Message ID provided.", delete_after=self.message_timeout)
                 pass
 
         if bot_only:
@@ -436,13 +406,9 @@ class Moderator(Cog):
             if res is not None:
                 emoji: discord.Emoji | None = res.get_emoji(self.emoji_table.kuma_wow)
                 if emoji is not None:
-                    return await context.send(
-                        embed=ModeratorSettingsEmbed(footer_icon_url=emoji.url, content=settings, context=context)
-                    )
+                    return await context.send(embed=ModeratorSettingsEmbed(footer_icon_url=emoji.url, content=settings, context=context))
                 else:
-                    return await context.send(
-                        embed=ModeratorSettingsEmbed(content=settings, context=context), delete_after=self.message_timeout
-                    )
+                    return await context.send(embed=ModeratorSettingsEmbed(content=settings, context=context), delete_after=self.message_timeout)
 
         return await context.send(
             content=self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_crying),
