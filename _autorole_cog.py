@@ -30,9 +30,35 @@ from discord import Embed, app_commands
 from discord.ext import commands
 
 from utils.cog import KumaCog
-from utils.ui.view import ReactionRoleView
 
 interaction = discord.Interaction
+
+
+class RoleButton(discord.ui.Button):
+    """This is for the Reaction Role View"""
+
+    def __init__(
+        self,
+        *,
+        style: discord.ButtonStyle = discord.ButtonStyle.green,
+        label: str | None = None,
+        custom_id: str | None = None,
+        emoji: Union[str, discord.Emoji, discord.PartialEmoji, None],
+    ) -> None:
+        super().__init__(style=style, label=label, custom_id=custom_id, emoji=emoji)
+
+
+class ReactionRoleView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        timeout: Union[float, None] = 180,
+        custom_id: str,
+        button_label: str,
+        button_emoji: Union[str, discord.Emoji, discord.PartialEmoji, None],
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.add_item(item=RoleButton(custom_id=custom_id, label=button_label, emoji=button_emoji))
 
 
 class AutoRole(KumaCog):

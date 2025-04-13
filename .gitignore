@@ -10,3 +10,4 @@ dump.*
 depreciated_cogs/*
 cogs/dump copy.txt
 utils/xy_binfind.tgz
+universalis_data/data/*
