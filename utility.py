@@ -472,7 +472,8 @@ class Utility(Cog):
         msg: str = "\n".join(map(to_string, characters))
         if len(msg) > 2000:
             await context.reply(
-                content=f"Output too long to display.. {self.emoji_table.to_inline_emoji(self.emoji_table.kuma_head_clench)}", delete_after=self.message_timeout
+                content=f"Output too long to display.. {self.emoji_table.to_inline_emoji(self.emoji_table.kuma_head_clench)}",
+                delete_after=self.message_timeout,
             )
             return await context.send(content=f"{msg[:1995]} ....")
         await context.send(content=msg, delete_after=self.message_timeout)
@@ -505,9 +506,12 @@ class Utility(Cog):
             if var in key or var in self.lookup[key]["aliases"]:
                 return await context.reply(
                     suppress_embeds=True,
-                    content=f"Is this right *Kuma*? {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_peak)}:\n- " + "\n- ".join(list(self.lookup[key]["urls"])),
+                    content=f"Is this right *Kuma*? {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_peak)}:\n- "
+                    + "\n- ".join(list(self.lookup[key]["urls"])),
                 )
-        return await context.reply(content=f"I was unable to understand your request.. {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_head_clench)}")
+        return await context.reply(
+            content=f"I was unable to understand your request.. {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_head_clench)}"
+        )
 
     @commands.command(name="source")
     async def source(self, context: Context, *, command: Union[str, None]) -> Union[discord.Message, None]:

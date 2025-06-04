@@ -76,16 +76,12 @@ class Repl(Cog):
         )
 
         def check(message: discord.Message) -> bool:
-            return (
-                message.author.id == ctx.author.id
-                and message.channel.id == ctx.channel.id
-                and message.content.startswith("`")
-            )
+            return message.author.id == ctx.author.id and message.channel.id == ctx.channel.id and message.content.startswith("`")
 
         while True:
             try:
                 response = await self.bot.wait_for("message", check=check, timeout=10.0 * 60.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await ctx.send(content=f"Exiting `REPL` session.{self.emoji_table.to_inline_emoji(emoji='kuma_shock')}")
                 self._sessions.remove(ctx.channel.id)
                 break
@@ -142,9 +138,7 @@ class Repl(Cog):
             try:
                 if fmt is not None:
                     if len(fmt) > 2000:
-                        await ctx.send(
-                            content="Content is over 2,000 lines to be printed in it's entirety, sending the last 2,000 lines."
-                        )
+                        await ctx.send(content="Content is over 2,000 lines to be printed in it's entirety, sending the last 2,000 lines.")
                         await ctx.send(content=fmt[-2000:])
                     else:
                         await ctx.send(content=fmt)

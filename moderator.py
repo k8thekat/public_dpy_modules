@@ -1,6 +1,7 @@
 import re
 import sqlite3
 from datetime import datetime, timezone
+from pkgutil import ModuleInfo
 from sqlite3 import Row
 from typing import TYPE_CHECKING, TypedDict, Union
 
@@ -138,7 +139,9 @@ class Moderator(Cog):
         """
         try:
             async with self.bot.pool.acquire() as conn:
-                data: ModeratorSettings | None = await conn.fetchone("""INSERT INTO moderator(serverid, use_mystbin) VALUES(?, ?) RETURNING *""", guild.id, use_mystbin)  # type: ignore
+                data: ModeratorSettings | None = await conn.fetchone(
+                    """INSERT INTO moderator(serverid, use_mystbin) VALUES(?, ?) RETURNING *""", guild.id, use_mystbin
+                )  # type: ignore
                 if data is None:
                     self.logger.error("We encountered an error inserting a row into the database. | GuildID: %s", guild.id)
 
@@ -162,8 +165,42 @@ class Moderator(Cog):
         if message.guild is not None:
             res: ModeratorSettings | None = await self.get_mod_settings(guild=message.guild)
             # So if our message is over 1k char length and the guild settings is True.
-            if (res is not None and res["use_mystbin"] is True) and (message.channel.type is not discord.ChannelType.news and len(message.content) > 1000):
+            if (res is not None and res["use_mystbin"] is True) and (
+                message.channel.type is not discord.ChannelType.news and len(message.content) > 1000
+            ):
                 await self._auto_on_mystbin(message=message)
+
+    @commands.Cog.listener(name="on_thread_update")
+    async def mod_on_thread_update(self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel) -> None:
+        # Updates Title of Threads with the respective prefix to the name depending on what was done to them.
+        if (
+            isinstance(before, discord.Thread)
+            and isinstance(after, discord.Thread)
+            and before.permissions_for(before.guild.me).manage_threads is True
+        ):
+            if before.locked == False and after.locked == True:
+                if before.name.lower().startswith("[locked] -"):
+                    return
+                self.logger.info(
+                    "Updating Locked Thread's name. | Guild ID: %s | Thread Name: %s | Thread ID: %s | Thread Name After: %s",
+                    before.guild.id,
+                    before.name,
+                    before.id,
+                    after.name,
+                )
+                await after.edit(name=f"[LOCKED] - {after.name}")
+            elif before.archived == False and after.archived == True:
+                if before.name.lower().startswith("[closed] - "):
+                    return
+                res: discord.Thread = await after.edit(archived=False)
+                await res.edit(name=f"[CLOSED] - {after.name}", archived=True)
+                self.logger.info(
+                    "Updating Locked Thread's name. | Guild ID: %s | Thread Name: %s | Thread ID: %s | Thread Name After: %s",
+                    before.guild.id,
+                    before.name,
+                    before.id,
+                    res.name,
+                )
 
     async def _auto_on_mystbin(self, message: Message) -> None:
         """
@@ -213,9 +250,12 @@ class Moderator(Cog):
         await context.typing(ephemeral=True)
 
         try:
-            for extension in EXTENSIONS:
-                await self.bot.reload_extension(name=extension.name)
-                self.logger.info("Loaded %sextension: %s", "module " if extension.ispkg else "", extension.name)
+            # temp = [k for k, v in self.bot.extensions.items()]
+            EXT: list[ModuleInfo] = EXTENSIONS
+            for extension in EXT:
+                if isinstance(extension, ModuleInfo):
+                    await self.bot.reload_extension(name=extension.name)
+                    self.logger.info("Loaded %sextension: %s", "module " if extension.ispkg else "", extension.name)
         except Exception as e:
             self.logger.error("We encountered an error executing %s", context.command, exc_info=e)
             await context.send(content=f"__We encountered an Error__ - \n{e}", ephemeral=True, delete_after=self.message_timeout)
@@ -237,13 +277,13 @@ class Moderator(Cog):
                 self.bot.tree.clear_commands(guild=None)
             # Local command tree reset
             self.bot.logger.info(
-                "%s Commands Reset and Sync'd -- Make sure to clear your Client Cache. | %s by %s",
+                "%s Commands reset and sync'd -- Make sure to clear your client cache(*ctrl+F5*). | %s by %s",
                 self.bot.user.name,
                 await self.bot.tree.sync(guild=(context.guild if local is True else None)),
                 self.bot.user.name,
             )
             return await context.send(
-                content=f"**WARNING** Resetting `{self.bot.user.name}s` Commands... {self.emoji_table.to_inline_emoji(emoji='kuma_bleh')}",
+                content=f"**WARNING** Resetting `{self.bot.user.name}s` commands... {self.emoji_table.to_inline_emoji(emoji='kuma_bleh')}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
@@ -253,7 +293,7 @@ class Moderator(Cog):
             self.bot.tree.copy_global_to(guild=context.guild)
             self.bot.logger.info("%s Commands Sync'd Locally: %s", self.bot.user.name, await self.bot.tree.sync(guild=context.guild))
             return await context.send(
-                content=f"Successfully Sync'd `{self.bot.user.name}s` Commands to {context.guild}...",
+                content=f"Successfully sync'd `{self.bot.user.name}s` commands to {context.guild}...",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
@@ -414,6 +454,17 @@ class Moderator(Cog):
             content=self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_crying),
             delete_after=self.message_timeout,
         )
+
+    @commands.command(name="who_is", help="See information about the Discord ID.")
+    @app_commands.default_permissions(moderate_members=True)
+    @commands.guild_only()
+    async def who_is(self, context: Context, discord_id: int) -> Message:
+        res: User | None = self.bot.get_user(discord_id)
+        if res is not None:
+            embed = discord.Embed(color=res.color, title=res.global_name, description=f"**{res.id}**")
+            return await context.send(embed=embed)
+        else:
+            return await context.send(content=f"Unable to find the Discord ID: {discord_id}")
 
 
 async def setup(bot: Kuma_Kuma) -> None:

@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, Union
+from typing import TYPE_CHECKING, Self, TypedDict, Union
 
 import discord
 from discord.ext import commands
-from typing_extensions import Self
 
-from utils.cog import KumaCog as Cog  # need to replace with your own Cog class
+from utils.cog import KumaCog as Cog
 
 from .universalis_data._enums import DataCenterEnum, LocalizationEnum, WorldEnum
 from .universalis_data.modules import FFXIVItem, FFXIVResource, FFXIVUser, GarlandAPIWrapper, UniversalisAPIWrapper
@@ -19,14 +18,14 @@ if TYPE_CHECKING:
     from kuma_kuma import Kuma_Kuma
     from utils.context import KumaContext as Context
 
-    from .universalis_data._types import UniversalisAPI_CurrentTyped
+    from .universalis_data._types import FFXIVUserDBTyped, FFXIVWatchListDBTyped, UniversalisAPI_CurrentTyped
     # from universalis_data.modules import ModulesDataTableAlias
 
     # F = TypeVar("F", bound=ModulesDataTableAlias)
     # X = TypeVar("X", bound=APIResponseAliases)
 
-UNIVERSALIS_SETUP_SQL = """
-CREATE TABLE IF NOT EXISTS universalis (
+FFXIVUSER_SETUP_SQL = """
+CREATE TABLE IF NOT EXISTS ffxivuser (
     id INTEGER PRIMARY KEY NOT NULL,
     discord_id INTEGER  NOT NULL,
     guild_id INTEGER DEFAULT 0,
@@ -42,33 +41,9 @@ CREATE TABLE IF NOT EXISTS watchlist (
     price_min INT DEFAULT 0,
     price_max INTEGER DEFAULT 999999999,
     last_check INTEGER NOT NULL,
-    FOREIGN KEY (universalis_id) REFERENCES universalis(id)
+    FOREIGN KEY (universalis_id) REFERENCES ffxivuser(id)
     UNIQUE (universalis_id, item_id)
     )"""
-
-
-class UniversalisDBTyped(TypedDict):
-    """
-    Our universalis DB structure.
-    """
-
-    id: int
-    discord_id: int
-    guild_id: int
-    home_world: int
-    loc: str
-
-
-class FFWatchListDBTyped(TypedDict):
-    """
-    Our watchlist DB structure.
-    """
-
-    universalis_id: int
-    item_id: str
-    price_min: int
-    price_max: int
-    last_check: float
 
 
 class UniversalisMarketboardButton(discord.ui.Button):
@@ -129,7 +104,7 @@ class UniversalisMarketEmbed(discord.Embed):
         description: str = f"*{item.description}*"
         super().__init__(color=color, title=title, description=description, timestamp=discord.utils.utcnow())
         # Our Author Icon Setup.
-        self.icons.append(cog.resources.get_universalis_icon())
+        self.icons.append(cog.ffxiv_resources.get_universalis_icon())
         self.set_author(name="Universalis Marketboard Lookup", icon_url="attachment://uni-icon.png")
         self.add_field(
             name="Marketboard Information:",
@@ -150,7 +125,7 @@ class UniversalisMarketEmbed(discord.Embed):
         self.icons.append(item.get_icon())
         self.set_thumbnail(url="attachment://item-icon.png")
 
-        self.icons.append(self.cog.resources.item_banner)
+        self.icons.append(self.cog.ffxiv_resources.item_banner)
         self.set_image(url="attachment://ffxiv-banner.png")
         print("FOOTER ICON", self.item.patch.name)
         self.set_footer(text=f"Universalis Marketboard integration made by {info.owner.name}", icon_url=f"attachment://{self.item.patch.name}.png")
@@ -221,7 +196,8 @@ class GarlandToolsItemView(discord.ui.View):
         super().__init__()
 
         self.add_item(item=self.more_info)
-        self.add_item(item=self.mb_button)
+        # Marketboard Button.
+        # self.add_item(item=self.mb_button)
 
     async def more_info_embed(self) -> discord.Message:
         """
@@ -276,7 +252,7 @@ class GarlandToolsItemInfoEmbed(discord.Embed):
 
         super().__init__(color=color, title=title, description=description, timestamp=discord.utils.utcnow())
         # Our Author Icon Setup.
-        self.icons.append(cog.resources.get_garlandtools_icon())
+        self.icons.append(cog.ffxiv_resources.get_garlandtools_icon())
         self.set_author(name="Garland Data Lookup", icon_url="attachment://gt-icon.png")
         # Item Links to various websites.
         self.add_field(name="**__Links__**:", value=item.get_hyper_links(), inline=False)
@@ -316,8 +292,8 @@ class GarlandToolsItemInfoEmbed(discord.Embed):
 
         # Our item information.
         stats: list[str] = []
-        stats.append(f"- *Sell:* {self.item.sell_price} {self.cog.resources.to_inline_emoji(emoji='gil')}")
-        stats.append(f"- *Buy:* {self.item.price} {self.cog.resources.to_inline_emoji(emoji='gil')}")
+        stats.append(f"- *Sell:* {self.item.sell_price} {self.cog.ffxiv_resources.to_inline_emoji(emoji='gil')}")
+        stats.append(f"- *Buy:* {self.item.price} {self.cog.ffxiv_resources.to_inline_emoji(emoji='gil')}")
         stats.append(f"- *Stack Size:* {self.item.stackSize}")
         self.add_field(name="**__Stats__**:", value="\n".join(stats), inline=False)
 
@@ -361,7 +337,7 @@ class GarlandToolsItemInfoEmbed(discord.Embed):
             A updated Embed with market information related to the item.
         """
 
-        uni_user: FFXIVUser | None = await self.cog.add_or_get_universalis_user(user=interaction.user, guild=interaction.guild)
+        uni_user: FFXIVUser | None = await self.cog.add_or_get_ffxiv_user(user=interaction.user, guild=interaction.guild)
         if uni_user is None:
             self.cog.logger.warning(
                 "Failed to find the Universalis User: %s | Guild: %s -- Defaulting to %s", interaction.user, interaction.guild, DataCenterEnum.Crystal
@@ -454,23 +430,26 @@ class FFXIV(Cog):
     FFXIV Unversalis Cog for Discord.
     """
 
-    ffxiv_resources = FFXIVResource
+    ffxiv_resources: FFXIVResource
     garland_api: GarlandAPIWrapper
+    universalis_api: UniversalisAPIWrapper
 
     def __init__(self, bot: Kuma_Kuma) -> None:
         self.universalis_api = UniversalisAPIWrapper(bot=bot)
         # My GarlandTools API Wrapper to handle return types.
         self.garland_api = GarlandAPIWrapper(cache_location=Path(__file__).parent.joinpath("universalis_data/garland_tools"))
+
+        self.ffxiv_resources = FFXIVResource(bot=bot, garland_api=self.garland_api)
         super().__init__(bot=bot)
 
     async def cog_load(self) -> None:
         async with self.bot.pool.acquire() as conn:
-            await conn.execute(UNIVERSALIS_SETUP_SQL)
+            await conn.execute(FFXIVUSER_SETUP_SQL)
             await conn.execute(WATCH_LIST_SETUP_SQL)
 
         # self.bot.loop.call_later(5, self.get_items())
 
-    async def add_or_get_universalis_user(
+    async def add_or_get_ffxiv_user(
         self,
         user: discord.User | discord.Member,
         home_world: WorldEnum = WorldEnum.Balmung,
@@ -480,8 +459,8 @@ class FFXIV(Cog):
         print("ADD OR GET DATA", user, home_world, guild, localization)
         async with self.bot.pool.acquire() as conn:
             # Try to find our user first..
-            res: UniversalisDBTyped | None = await conn.fetchone(
-                """SELECT * FROM universalis WHERE discord_id = ? and guild_id = ?""",
+            res: FFXIVUserDBTyped | None = await conn.fetchone(
+                """SELECT * FROM ffxivuser WHERE discord_id = ? and guild_id = ?""",
                 user.id,
                 (guild.id if guild is not None else 0),
             )  # type: ignore - I know the dataset because of above.
@@ -497,8 +476,8 @@ class FFXIV(Cog):
                 home_world.value,
                 localization,
             )
-            res: UniversalisDBTyped | None = await conn.fetchone(
-                """INSERT INTO universalis(discord_id, guild_id, home_world, loc) VALUES(?, ?, ?, ?) RETURNING *""",
+            res: FFXIVUserDBTyped | None = await conn.fetchone(
+                """INSERT INTO ffxivuser(discord_id, guild_id, home_world, loc) VALUES(?, ?, ?, ?) RETURNING *""",
                 user.id,
                 (guild.id if guild is not None else 0),
                 home_world.value,
@@ -516,10 +495,10 @@ class FFXIV(Cog):
 
             return FFXIVUser(data=res, db_pool=self.bot.pool) if res is not None else res
 
-    async def update_universalis_user(self, user: FFXIVUser) -> FFXIVUser | None:
+    async def update_ffxiv_user(self, user: FFXIVUser) -> FFXIVUser | None:
         async with self.bot.pool.acquire() as conn:
             res: FFXIVUser | None = await conn.fetchone(
-                """UPDATE universalis SET home_world = ? AND loc = ? WHERE discord_id = ? AND guild_id = ? RETURNING *""",
+                """UPDATE ffxivuser SET home_world = ? AND loc = ? WHERE discord_id = ? AND guild_id = ? RETURNING *""",
                 user.home_world,
                 user.loc,
                 user.id,
@@ -530,7 +509,7 @@ class FFXIV(Cog):
     @commands.command(help="", aliases=["fxtest"])
     @commands.is_owner()
     async def ffxiv_test_func(self, context: Context, item_id: str) -> None:
-        universalis_user: FFXIVUser | None = await self.add_or_get_universalis_user(user=context.author, guild=context.guild)
+        universalis_user: FFXIVUser | None = await self.add_or_get_ffxiv_user(user=context.author, guild=context.guild)
         print("UNIVERSALIS USER", universalis_user.guild_id, universalis_user.discord_id)
         # icon: ClientResponse = await self.bot.session.get(url="https://www.garlandtools.org/files/icons/item/25102.png")
         # if icon.status == 200:
@@ -544,7 +523,7 @@ class FFXIV(Cog):
 
     @commands.command(help="", aliases=["isearch", "xlitem"])
     async def ffxiv_item_lookup(self, context: Context, *, item: str) -> discord.Message:
-        universalis_user: FFXIVUser | None = await self.add_or_get_universalis_user(user=context.author, guild=context.guild)
+        universalis_user: FFXIVUser | None = await self.add_or_get_ffxiv_user(user=context.author, guild=context.guild)
         if universalis_user is None:
             return await context.send(content="Failed to Find User...")
 
@@ -567,7 +546,7 @@ class FFXIV(Cog):
     async def ffxiv_price_check(self, context: Context, *, item: str) -> discord.Message:
         item_list: list[FFXIVItem] | list[str] = [item] if item.isnumeric() else self.convert_item_name_to_ids(item_name=item)
 
-        user_dc: FFXIVUser | None = await self.add_or_get_universalis_user(user=context.author, guild=context.guild)
+        user_dc: FFXIVUser | None = await self.add_or_get_ffxiv_user(user=context.author, guild=context.guild)
         data_center: DataCenterEnum = DataCenterEnum.Crystal if user_dc is None else DataCenterEnum(value=user_dc.datacenter_id)
         if data_center.value == 0:
             try:
