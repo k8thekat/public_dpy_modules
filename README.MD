@@ -23,3 +23,6 @@ ___
 - Support for `prefixes` where you can add/set and clear prefixes on a per Discord Guild basis.
 - Support for `sync` command to sync commands to a specific Guild or Globally.
     - Also supports resetting a command tree for an entire Guild.
+
+
+## Testing...
