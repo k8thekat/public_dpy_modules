@@ -716,47 +716,6 @@ class FFXIV(Cog):
             delete_after=self.message_timeout,
         )
 
-    # @commands.command(help="Lookup an FFXIV Item.", aliases=["xivsearch", "isearch"])
-    # async def item_lookup(self, context: FFXIVContext, query: str, *, limit: int = 1) -> None:
-    #     await context.typing()
-    #     item: Item | list[Item] = self.moogle.get_item(item=query, limit_results=limit)
-    #     information: discord.AppInfo = await self.bot.application_info()
-    #     if isinstance(item, Item):
-    #         await item.get_garlandtools_data()  # Get the garland tools data
-    #         data: Object | None = await item.get_icon()
-
-    #         item_icon: discord.File = (
-    #             discord.File(io.BytesIO(data.data), filename="item-icon.png")
-    #             if isinstance(data, Object)
-    #             else Resources().get_moogle_icon(filename="item-icon.png")
-    #         )
-
-    #         if isinstance(item.garlandtools_data, dict):
-    #             patch_icon: discord.File = Resources().get_patch_icon(patch_id=item.garlandtools_data.get("item").get("patch"))
-    #         else:
-    #             patch_icon = Resources().get_patch_icon(patch_id=1)
-
-    #         # gets universalis data
-    #         await item.get_current_marketboard()
-    #         item_embed = ItemEmbed(info=information, item=item)
-    #         await context.send(embed=item_embed, files=[item_icon, patch_icon])
-
-    #     # TODO: How do we handle multiple items with different icons if our results has 3 item possibilities.
-    #     else:
-    #         await context.send(content=str(item[limit - 1]))
-
-    #     # TODO - Validate the Selection View works and albe to select an Option, etc..
-    #     # if we have multiple items; let's prompt a View with a select to find the specific item they are after.
-    #     if len(items) > 1:
-    #         return await context.send(
-    #             view=GarlandToolsItemSelectionView(item_list=items, interaction_user=context.author, localization=universalis_user.loc, cog=self)
-    #         )
-
-    #     msg: discord.Message = await context.send(content=f"Looking up your Item: {item}", ephemeral=True)
-    #     embed = GarlandToolsItemInfoEmbed(info=information, item=items[0], cog=self)
-    #     view = GarlandToolsItemView(cog=self, item_embed=embed, interaction_user=context.author, orig_message=msg)
-    #     return await msg.edit(content=None, embed=embed, view=view, attachments=embed.get_attachments())
-
 
 async def setup(bot: Kuma_Kuma) -> None:  # noqa: D103
     await bot.add_cog(FFXIV(bot=bot))
