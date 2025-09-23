@@ -1,5 +1,4 @@
-"""
-Copyright (C) 2021-2022 Katelynn Cadwallader.
+"""Copyright (C) 2021-2022 Katelynn Cadwallader.
 
 This file is part of Kuma Kuma Bear, a Discord Bot.
 
@@ -34,8 +33,7 @@ import discord
 import import_expression
 from discord.ext import commands
 
-from utils import cog
-from utils.converter import CodeBlockConverter
+from utils import CodeBlockConverter, cog
 
 Dependencies = None
 

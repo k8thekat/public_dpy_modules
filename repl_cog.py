@@ -1,5 +1,4 @@
-"""
-Copyright (C) 2021-2022 Katelynn Cadwallader.
+"""Copyright (C) 2021-2022 Katelynn Cadwallader.
 
 This file is part of Kuma Kuma Bear, a Discord Bot.
 
@@ -31,8 +30,10 @@ import discord
 from discord.ext import commands
 
 from kuma_kuma import Kuma_Kuma
-from utils.cog import KumaCog as Cog  # need to replace with your own Cog class
-from utils.context import KumaContext as Context
+from utils import (
+    KumaCog as Cog,  # need to replace with your own Cog class
+    KumaContext as Context,
+)
 
 
 class Repl(Cog):
@@ -52,7 +53,7 @@ class Repl(Cog):
 
     @commands.command(hidden=True)
     @commands.is_owner()
-    # todo - figure out why the repl session is failing to handle `await` type code.
+    # TODO - figure out why the repl session is failing to handle `await` type code.
     async def repl(self, ctx: Context) -> None:
         """Launches an interactive REPL session."""
         variables: dict[str, Any] = {
@@ -72,7 +73,7 @@ class Repl(Cog):
         self._sessions.add(ctx.channel.id)
         c_vars = "\n- ".join(variables)
         await ctx.send(
-            content=f"""Enter code to execute or evaluate. `exit()` or `quit` to exit. {self.emoji_table.to_inline_emoji(emoji="kuma_wow")}\n__Current Set Variables__\n- {c_vars}"""
+            content=f"""Enter code to execute or evaluate. `exit()` or `quit` to exit. {self.emoji_table.to_inline_emoji(emoji="kuma_wow")}\n__Current Set Variables__\n- {c_vars}""",
         )
 
         def check(message: discord.Message) -> bool:

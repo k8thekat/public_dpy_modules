@@ -18,72 +18,63 @@ if TYPE_CHECKING:
     from kuma_kuma import Kuma_Kuma
     from utils.context import KumaContext as Context
 
-    from .universalis_data._types import FFXIVUserDBTyped, FFXIVWatchListDBTyped, UniversalisAPI_CurrentTyped
+    # from .universalis_data._types import FFXIVUserDBTyped, FFXIVWatchListDBTyped, UniversalisAPI_CurrentTyped
     # from universalis_data.modules import ModulesDataTableAlias
 
     # F = TypeVar("F", bound=ModulesDataTableAlias)
     # X = TypeVar("X", bound=APIResponseAliases)
 
-FFXIVUSER_SETUP_SQL = """
-CREATE TABLE IF NOT EXISTS ffxivuser (
-    id INTEGER PRIMARY KEY NOT NULL,
-    discord_id INTEGER  NOT NULL,
-    guild_id INTEGER DEFAULT 0,
-    home_world INTEGER NOT NULL,
-    loc TEXT NOT NULL,
-    UNIQUE (guild_id, discord_id)
-    )"""
-
-WATCH_LIST_SETUP_SQL = """
-CREATE TABLE IF NOT EXISTS watchlist (
-    universalis_id INTEGER NOT NULL,
-    item_id TEXT NOT NULL,
-    price_min INT DEFAULT 0,
-    price_max INTEGER DEFAULT 999999999,
-    last_check INTEGER NOT NULL,
-    FOREIGN KEY (universalis_id) REFERENCES ffxivuser(id)
-    UNIQUE (universalis_id, item_id)
-    )"""
-
 
 class UniversalisMarketboardButton(discord.ui.Button):
     view: GarlandToolsItemView
 
-    def __init__(self, *, style: discord.ButtonStyle = discord.ButtonStyle.secondary, label: str = "Market Board", emoji: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+        label: str = "Market Board",
+        emoji: str | None = None,
+    ) -> None:
         super().__init__(style=style, label=label, emoji=emoji)
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        # todo - May need to edit the message early and remove all attachments before dispatching the new View + Embed.
+        # TODO - May need to edit the message early and remove all attachments before dispatching the new View + Embed.
         await self.view.get_marketboard(interaction=interaction)
         await interaction.response.defer()
 
 
 class UniversalisHistoryButton(discord.ui.Button):
     def __init__(
-        self, *, style: discord.ButtonStyle = discord.ButtonStyle.secondary, label: str = "Sale History...", emoji: str | None = None
+        self,
+        *,
+        style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+        label: str = "Sale History...",
+        emoji: str | None = None,
     ) -> None:
         super().__init__(style=style, label=label, emoji=emoji)
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        # todo - Edit the MarketBoard Embed to Show History Data too? Or generate a new Embed IDK yet.
+        # TODO - Edit the MarketBoard Embed to Show History Data too? Or generate a new Embed IDK yet.
         await interaction.response.send_message("Getting Sales History...")
 
 
 class UniversalisWatchListButton(discord.ui.Button):
-    def __init__(self, *, style: discord.ButtonStyle = discord.ButtonStyle.red, label: str = "Add to Watch List", emoji: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        style: discord.ButtonStyle = discord.ButtonStyle.red,
+        label: str = "Add to Watch List",
+        emoji: str | None = None,
+    ) -> None:
         super().__init__(style=style, label=label, emoji=emoji)
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        # todo - This should prompt a modal for min/max price thresholds to monitor.
+        # TODO - This should prompt a modal for min/max price thresholds to monitor.
         await interaction.response.send_message("Added Item to your Watchlist!")
-        pass
 
 
 class UniversalisMarketEmbed(discord.Embed):
-    """
-    Universalis Embed requires Market Board Information.
-
-    """
+    """Universalis Embed requires Market Board Information."""
 
     icons: list[discord.File]
     cog: FFXIV
@@ -110,7 +101,7 @@ class UniversalisMarketEmbed(discord.Embed):
             name="Marketboard Information:",
             value=f"{'- World:' if isinstance(world_or_dc, WorldEnum) else '- Data Center'} =={world_or_dc.name}==\n-------------",
         )
-        # todo - Decide on which keys and values to display on the embed.
+        # TODO - Decide on which keys and values to display on the embed.
         # Iterate through the listings looking for the homeworld name, if it matches place that at the top under it's own section.
         #
         self.item.universalis_current.get("averagePrice")
@@ -128,16 +119,19 @@ class UniversalisMarketEmbed(discord.Embed):
         self.icons.append(self.cog.ffxiv_resources.item_banner)
         self.set_image(url="attachment://ffxiv-banner.png")
         print("FOOTER ICON", self.item.patch.name)
-        self.set_footer(text=f"Universalis Marketboard integration made by {info.owner.name}", icon_url=f"attachment://{self.item.patch.name}.png")
+        self.set_footer(
+            text=f"Universalis Marketboard integration made by {info.owner.name}",
+            icon_url=f"attachment://{self.item.patch.name}.png",
+        )
 
     def get_attachments(self) -> list[discord.File]:
-        """
-        Returns a list of icons/files used for this Instance of the embed.
+        """Returns a list of icons/files used for this Instance of the embed.
 
         Returns
-        --------
+        -------
         :class:`list[discord.File]`
             A list of images to be used on our Embed..
+
         """
         return self.icons
 
@@ -185,7 +179,11 @@ class GarlandToolsItemView(discord.ui.View):
     original_message: discord.Message
 
     def __init__(
-        self, cog: FFXIV, item_embed: GarlandToolsItemInfoEmbed, interaction_user: Union[discord.Member, discord.User], orig_message: discord.Message
+        self,
+        cog: FFXIV,
+        item_embed: GarlandToolsItemInfoEmbed,
+        interaction_user: Union[discord.Member, discord.User],
+        orig_message: discord.Message,
     ) -> None:
         self.cog = cog
         self.item_embed = item_embed
@@ -200,13 +198,11 @@ class GarlandToolsItemView(discord.ui.View):
         # self.add_item(item=self.mb_button)
 
     async def more_info_embed(self) -> discord.Message:
-        """
-        Edits the original Embed MSG with the full Item Details and removes the "more info" button
-        """
+        """Edits the original Embed MSG with the full Item Details and removes the "more info" button"""
         self.remove_item(item=self.more_info)
         # Update our Embed Fields and redispatch.
         embed: GarlandToolsItemInfoEmbed = self.item_embed.get_full_details()
-        # todo - See about a way to add the ffxiv-banner as an attachment and not lose the previous message attachments.
+        # TODO - See about a way to add the ffxiv-banner as an attachment and not lose the previous message attachments.
         return await self.original_message.edit(content=None, embed=embed, view=self)
 
     async def get_marketboard(self, interaction: discord.Interaction) -> None:
@@ -219,13 +215,11 @@ class GarlandToolsItemView(discord.ui.View):
             view = UniversalisMarketView(cog=self.cog, item=self.item_embed.item, interaction_user=interaction.user)
             # We dispatch our new View and Embed while adding our new attachments.
             await self.original_message.edit(embed=embed, view=view, attachments=embed.get_attachments())
-        return None
+        return
 
 
 class GarlandToolsItemInfoEmbed(discord.Embed):
-    """
-    This Embed is for Garland Tools API information related to an `FFXIVItem`
-    """
+    """This Embed is for Garland Tools API information related to an `FFXIVItem`"""
 
     icons: list[discord.File]
     cog: FFXIV
@@ -246,7 +240,7 @@ class GarlandToolsItemInfoEmbed(discord.Embed):
         self.item = item.get_garland_info()
         self.cog = cog
         self.icons = []
-        # todo - Possibly host the file online to prevent file IO issues?
+        # TODO - Possibly host the file online to prevent file IO issues?
         # self.icons.append(self.cog.ffxiv_emojitable.get_banner())
         description: str | None = f"*{item.description[:1020] + ' ...'}*" if item.description is not None else None
 
@@ -268,24 +262,24 @@ class GarlandToolsItemInfoEmbed(discord.Embed):
         self.set_footer(text=f"Garland Tools integration made by {info.owner.name}", icon_url=f"attachment://{self.item.patch.name}.png")
 
     def get_attachments(self) -> list[discord.File]:
-        """
-        Returns a list of icons/files used for this Instance of the embed.
+        """Returns a list of icons/files used for this Instance of the embed.
 
         Returns
-        --------
+        -------
         :class:`list[discord.File]`
             A list of images to be used on our Embed..
+
         """
         return self.icons
 
     def get_full_details(self) -> Self:
-        """
-        Retrieves more information regarding the FFXIV Item supplied and returns an updated Embed.
+        """Retrieves more information regarding the FFXIV Item supplied and returns an updated Embed.
 
         Returns
-        --------
+        -------
         :class:`discord.Embed`
             The updated Self object.
+
         """
         # This should remove the original "Links" field.
         self.remove_field(index=0)
@@ -317,45 +311,45 @@ class GarlandToolsItemInfoEmbed(discord.Embed):
             self.add_field(name="**__Fish Guide__**:", value=fishing, inline=False)
         # Item Links to various websites.
         self.add_field(name="**__Links__**:", value=self.item.get_hyper_links(), inline=False)
-        # todo - fix the banner image
+        # TODO - fix the banner image
         # self.icons.append(self.cog.ffxiv_emojitable.get_banner())
         # self.set_image(url="attachment://ffxiv-banner.png")
         return self
 
     async def get_market_info_dc(self, interaction: discord.Interaction) -> UniversalisMarketEmbed:
-        """
-        Collect the Universalis Marketboard Information and updates our `FFXIVItem` attributes and our new Embed to display~
+        """Collect the Universalis Marketboard Information and updates our `FFXIVItem` attributes and our new Embed to display~
 
         Parameters
-        -----------
+        ----------
         interaction: :class:`discord.Interaction`
             The Discord Interaction from the Button interaction.
 
         Returns
-        --------
+        -------
         :class:`UniversalisItemEmbed`
             A updated Embed with market information related to the item.
-        """
 
+        """
         uni_user: FFXIVUser | None = await self.cog.add_or_get_ffxiv_user(user=interaction.user, guild=interaction.guild)
         if uni_user is None:
             self.cog.logger.warning(
-                "Failed to find the Universalis User: %s | Guild: %s -- Defaulting to %s", interaction.user, interaction.guild, DataCenterEnum.Crystal
+                "Failed to find the Universalis User: %s | Guild: %s -- Defaulting to %s",
+                interaction.user,
+                interaction.guild,
+                DataCenterEnum.Crystal,
             )
             world_or_dc: WorldEnum | DataCenterEnum = DataCenterEnum.Crystal
         else:
             world_or_dc = uni_user.home_world
 
         item: FFXIVItem = self.item.set_marketboard_current(
-            data=await self.cog.get_universalis_current_mb_data(items=self.item, world_or_dc=world_or_dc)
+            data=await self.cog.get_universalis_current_mb_data(items=self.item, world_or_dc=world_or_dc),
         )
         return UniversalisMarketEmbed(info=self.info, item=item, cog=self.cog, world_or_dc=world_or_dc)
 
 
 class GarlandToolsItemSelect(discord.ui.Select):
-    """
-    Related to `GarlandToolsItemSelectionView` to handle the options and return the results.
-    """
+    """Related to `GarlandToolsItemSelectionView` to handle the options and return the results."""
 
     view: GarlandToolsItemSelectionView
     result: str
@@ -375,9 +369,7 @@ class GarlandToolsItemSelect(discord.ui.Select):
 
 
 class GarlandToolsItemSelectionView(discord.ui.View):
-    """
-    This is used to handle multiple Items having very similar names and isolating the item the user is searching for.
-    """
+    """This is used to handle multiple Items having very similar names and isolating the item the user is searching for."""
 
     cog: FFXIV
     item_list: list[FFXIVItem]
@@ -407,28 +399,27 @@ class GarlandToolsItemSelectionView(discord.ui.View):
         if self.item_select.is_done:
             information: discord.AppInfo = await self.cog.bot.application_info()
             await interaction.response.send_message(
-                embed=GarlandToolsItemInfoEmbed(info=information, item=self.get_item_from_list(item_id=self.item_select.result), cog=self.cog),
+                embed=GarlandToolsItemInfoEmbed(
+                    info=information,
+                    item=self.get_item_from_list(item_id=self.item_select.result),
+                    cog=self.cog,
+                ),
                 ephemeral=True,
             )
             return True
         return False
 
     def get_item_from_list(self, item_id: str) -> FFXIVItem:
-        """
-        Returns the FFXIV Item by the provided `item_id`, if it exists in our `self.item_list`.
-        """
+        """Returns the FFXIV Item by the provided `item_id`, if it exists in our `self.item_list`."""
         for item in self.item_list:
             if item.item_id == item_id:
                 return item
-        else:
-            self.cog.bot.logger.error("Failed to find the selected Item inside MarketBoardView.get_item_from_list(%s)", item_id)
-            raise IndexError("Failed to find the selected Item: %s", item_id)
+        self.cog.bot.logger.error("Failed to find the selected Item inside MarketBoardView.get_item_from_list(%s)", item_id)
+        raise IndexError("Failed to find the selected Item: %s", item_id)
 
 
 class FFXIV(Cog):
-    """
-    FFXIV Unversalis Cog for Discord.
-    """
+    """FFXIV Unversalis Cog for Discord."""
 
     ffxiv_resources: FFXIVResource
     garland_api: GarlandAPIWrapper
@@ -491,84 +482,64 @@ class FFXIV(Cog):
                     user.id,
                     home_world.value,
                 )
-                raise sqlite3.DataError("We encountered an error inserting a Row into the database via Unversalis.add_or_get_user_datacenter().")
+                raise sqlite3.DataError(
+                    "We encountered an error inserting a Row into the database via Unversalis.add_or_get_user_datacenter().",
+                )
 
             return FFXIVUser(data=res, db_pool=self.bot.pool) if res is not None else res
-
-    async def update_ffxiv_user(self, user: FFXIVUser) -> FFXIVUser | None:
-        async with self.bot.pool.acquire() as conn:
-            res: FFXIVUser | None = await conn.fetchone(
-                """UPDATE ffxivuser SET home_world = ? AND loc = ? WHERE discord_id = ? AND guild_id = ? RETURNING *""",
-                user.home_world,
-                user.loc,
-                user.id,
-                user.guild_id,
-            )  # type: ignore - I know the dataset because of above.
-            return res
 
     @commands.command(help="", aliases=["fxtest"])
     @commands.is_owner()
     async def ffxiv_test_func(self, context: Context, item_id: str) -> None:
-        universalis_user: FFXIVUser | None = await self.add_or_get_ffxiv_user(user=context.author, guild=context.guild)
-        print("UNIVERSALIS USER", universalis_user.guild_id, universalis_user.discord_id)
-        # icon: ClientResponse = await self.bot.session.get(url="https://www.garlandtools.org/files/icons/item/25102.png")
-        # if icon.status == 200:
-        #     print(icon.content_type, icon.content.read())
-        # res: GarlandToolsAPI_ItemTyped = self.garland_api.item(int(item_id))
-        # print(res)
-        res = self.garland_api.fishing()
-        self.bot.loghandler.dump_file(res.content.decode("utf-8"), file_name="garland_fishing.json")
-        await context.send(content=str(res))
         pass
 
-    @commands.command(help="", aliases=["isearch", "xlitem"])
-    async def ffxiv_item_lookup(self, context: Context, *, item: str) -> discord.Message:
-        universalis_user: FFXIVUser | None = await self.add_or_get_ffxiv_user(user=context.author, guild=context.guild)
-        if universalis_user is None:
-            return await context.send(content="Failed to Find User...")
+    # @commands.command(help="", aliases=["isearch", "xlitem"])
+    # async def ffxiv_item_lookup(self, context: Context, *, item: str) -> discord.Message:
+    #     universalis_user: FFXIVUser | None = await self.add_or_get_ffxiv_user(user=context.author, guild=context.guild)
+    #     if universalis_user is None:
+    #         return await context.send(content="Failed to Find User...")
 
-        items: list[FFXIVItem] = self.convert_item_name_to_ids(item_name=item, limit_results=1)
-        information: discord.AppInfo = await self.bot.application_info()
-        # todo - Validate the Selection View works and albe to select an Option, etc..
-        # if we have multiple items; let's prompt a View with a select to find the specific item they are after.
-        if len(items) > 1:
-            return await context.send(
-                view=GarlandToolsItemSelectionView(item_list=items, interaction_user=context.author, localization=universalis_user.loc, cog=self)
-            )
+    #     items: list[FFXIVItem] = self.convert_item_name_to_ids(item_name=item, limit_results=1)
+    #     information: discord.AppInfo = await self.bot.application_info()
+    #     # TODO - Validate the Selection View works and albe to select an Option, etc..
+    #     # if we have multiple items; let's prompt a View with a select to find the specific item they are after.
+    #     if len(items) > 1:
+    #         return await context.send(
+    #             view=GarlandToolsItemSelectionView(item_list=items, interaction_user=context.author, localization=universalis_user.loc, cog=self)
+    #         )
 
-        msg: discord.Message = await context.send(content=f"Looking up your Item: {item}", ephemeral=True)
-        embed = GarlandToolsItemInfoEmbed(info=information, item=items[0], cog=self)
-        view = GarlandToolsItemView(cog=self, item_embed=embed, interaction_user=context.author, orig_message=msg)
-        return await msg.edit(content=None, embed=embed, view=view, attachments=embed.get_attachments())
+    #     msg: discord.Message = await context.send(content=f"Looking up your Item: {item}", ephemeral=True)
+    #     embed = GarlandToolsItemInfoEmbed(info=information, item=items[0], cog=self)
+    #     view = GarlandToolsItemView(cog=self, item_embed=embed, interaction_user=context.author, orig_message=msg)
+    #     return await msg.edit(content=None, embed=embed, view=view, attachments=embed.get_attachments())
 
-    @commands.command(help="", aliases=["pc", "pricecheck", "price"])
-    @commands.is_owner()
-    async def ffxiv_price_check(self, context: Context, *, item: str) -> discord.Message:
-        item_list: list[FFXIVItem] | list[str] = [item] if item.isnumeric() else self.convert_item_name_to_ids(item_name=item)
+    # @commands.command(help="", aliases=["pc", "pricecheck", "price"])
+    # @commands.is_owner()
+    # async def ffxiv_price_check(self, context: Context, *, item: str) -> discord.Message:
+    #     item_list: list[FFXIVItem] | list[str] = [item] if item.isnumeric() else self.convert_item_name_to_ids(item_name=item)
 
-        user_dc: FFXIVUser | None = await self.add_or_get_ffxiv_user(user=context.author, guild=context.guild)
-        data_center: DataCenterEnum = DataCenterEnum.Crystal if user_dc is None else DataCenterEnum(value=user_dc.datacenter_id)
-        if data_center.value == 0:
-            try:
-                res: UniversalisAPI_CurrentTyped = await self.get_universalis_current_mb_data(items=item_list)
-            except Exception:
-                temp: list[str] = [e.item_id if isinstance(e, FFXIVItem) else e for e in item_list]
-                return await context.send(
-                    content=f"Oh no.. {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_head_clench)} \nWe failed to find the items: {','.join(temp)}"
-                )
-        else:
-            res: UniversalisAPI_CurrentTyped = await self.get_universalis_current_mb_data(items=item, world_or_dc=data_center)
+    #     user_dc: FFXIVUser | None = await self.add_or_get_ffxiv_user(user=context.author, guild=context.guild)
+    #     data_center: DataCenterEnum = DataCenterEnum.Crystal if user_dc is None else DataCenterEnum(value=user_dc.datacenter_id)
+    #     if data_center.value == 0:
+    #         try:
+    #             res: UniversalisAPI_CurrentTyped = await self.get_universalis_current_mb_data(items=item_list)
+    #         except Exception:
+    #             temp: list[str] = [e.item_id if isinstance(e, FFXIVItem) else e for e in item_list]
+    #             return await context.send(
+    #                 content=f"Oh no.. {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_head_clench)} \nWe failed to find the items: {','.join(temp)}"
+    #             )
+    #     else:
+    #         res: UniversalisAPI_CurrentTyped = await self.get_universalis_current_mb_data(items=item, world_or_dc=data_center)
 
-        return await context.send(
-            content=f"Checking marketboard pricing...\nItem Name Searched: {item}\nDataCenter: {data_center}\nItem IDs: {' | '.join([e.item_id if isinstance(e, FFXIVItem) else e for e in item_list])}",
-            ephemeral=True,
-        )
+    #     return await context.send(
+    #         content=f"Checking marketboard pricing...\nItem Name Searched: {item}\nDataCenter: {data_center}\nItem IDs: {' | '.join([e.item_id if isinstance(e, FFXIVItem) else e for e in item_list])}",
+    #         ephemeral=True,
+    #     )
 
     @commands.command()
     @commands.is_owner()
     async def ffxiv_get_price(self, context: Context, item: str) -> None:
         await context.send(content=context.message.content)
-        pass
 
     @commands.command(help="Parse Allagon Tools Export.csv", aliases=["imarket", "atoolsmarket", "invmarket"])
     @commands.is_owner()

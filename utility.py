@@ -1,5 +1,4 @@
-"""
-Copyright (C) 2021-2022 Katelynn Cadwallader.
+"""Copyright (C) 2021-2022 Katelynn Cadwallader.
 
 This file is part of Kuma Kuma Bear, a Discord Bot.
 
@@ -40,7 +39,7 @@ from discord.ext import commands
 from git import Repo
 
 from kuma_kuma import Kuma_Kuma
-from utils.cog import KumaCog as Cog  # need to replace with your own Cog class
+from utils import KumaCog as Cog  # need to replace with your own Cog class
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -48,30 +47,30 @@ if TYPE_CHECKING:
     from aiohttp import ClientResponse
 
     from kuma_kuma import Kuma_Kuma
+    from utils import KumaContext as Context
     from utils._types import GitHubIssueSubmissionResponse
-    from utils.context import KumaContext as Context
 
 BOT_NAME = "Kuma Kuma"
 
 
 def get_latest_commits(url: str, repo: Repo, branch: str, max_count: int = 5) -> str:
-    """
-    Retrieves a Github Repo's lastest commits.
+    """Retrieves a Github Repo's lastest commits.
 
     Parameters
-    -----------
+    ----------
     max_count: :class:`int`, optional
         The max number of github commit's to collect, by default 5.
 
     Returns
-    --------
+    -------
     :class:`str`
         A elongated string of github commit information seperated by new lines.
+
     """
     reply = ""
     # url = "https://github.com/k8thekat/Kuma_Kuma"
     # repo: Repo = Repo(Path(__file__).parent.as_posix())
-    # todo figure out which commits this is grabbing and which direction as they don't like up.
+    # TODO figure out which commits this is grabbing and which direction as they don't like up.
     commits = repo.iter_commits(branch, max_count=max_count)
     for i in commits:
         assert i.author.name
@@ -142,7 +141,7 @@ class CopyStickerButton(discord.ui.Button):
 
         if to_guild is None:  # the view is limited to one selection so no need to check the rest.
             return await interaction.response.send_message(content="Failed to find the guild", ephemeral=True)
-        elif to_guild.me.guild_permissions.manage_emojis_and_stickers:
+        if to_guild.me.guild_permissions.manage_emojis_and_stickers:
             try:
                 await to_guild.create_sticker(
                     name=sticker.name,
@@ -228,10 +227,9 @@ class GithubIssueSubmissionModal(discord.ui.Modal):
         if res.status == 201:
             resp: GitHubIssueSubmissionResponse = await res.json()
             return await interaction.response.send_message(embed=GithubIssueSubmissionEmbed(gh_response=resp, user=interaction.user))
-        else:
-            return await interaction.response.send_message(
-                content=f"We failed to create an issue. | {res.status} -> ['Code'](https://docs.github.com/en/rest/issues/issues?apiVersion=2022-11-28#create-an-issue)"
-            )
+        return await interaction.response.send_message(
+            content=f"We failed to create an issue. | {res.status} -> ['Code'](https://docs.github.com/en/rest/issues/issues?apiVersion=2022-11-28#create-an-issue)",
+        )
 
 
 class GithubIssueSubmissionResult(TypedDict):
@@ -277,7 +275,7 @@ class GithubIssueSubmissionView(discord.ui.View):
                     issue_msg=self.issue_msg,
                     repo=self.repo.result,
                     submission_type=self.submission_type.result,
-                )
+                ),
             )
             return True
         return False
@@ -329,9 +327,7 @@ class GithubIssueSubmissionEmbed(discord.Embed):
 
 
 class URLref(TypedDict):
-    """
-    This is used for URL linking.
-    """
+    """This is used for URL linking."""
 
     aliases: list[str]
     urls: list[str]
@@ -510,7 +506,7 @@ class Utility(Cog):
                     + "\n- ".join(list(self.lookup[key]["urls"])),
                 )
         return await context.reply(
-            content=f"I was unable to understand your request.. {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_head_clench)}"
+            content=f"I was unable to understand your request.. {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_head_clench)}",
         )
 
     @commands.command(name="source")
@@ -545,7 +541,7 @@ class Utility(Cog):
             # Handles my seperate repo URLs. (Could store this as part of the cog class?)
             # This requires you do define `repo_url` per script for files in a different parent directory than your bot.py
             if code_class != None and hasattr(code_class, "repo_url"):
-                source_url = getattr(obj._cog, "repo_url")
+                source_url = obj._cog.repo_url
 
         lines, firstlineno = inspect.getsourcelines(src)
         if not module.startswith("discord"):
@@ -568,7 +564,7 @@ class Utility(Cog):
         await interaction.response.send_message(view=StickerYoinkView(bot=self.bot, sticker_msg=message), delete_after=self.message_timeout)
 
     async def create_github_issue(self, interaction: discord.Interaction, message: discord.Message) -> None:
-        """Create a github issue via a Discord Message"""
+        """Create a github issue via a Discord Message."""
         if interaction.user.id in self.bot.owner_ids or await self.bot.is_owner(interaction.user):
             await interaction.response.send_message(
                 content="Kuma Kuma Bear says please select a GitHub Repository to create an issue for:",

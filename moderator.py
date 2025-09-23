@@ -1,3 +1,4 @@
+import asyncio
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -7,14 +8,16 @@ from typing import TYPE_CHECKING, TypedDict, Union
 
 import discord
 from asqlite import Cursor
-from discord import Member, Message, User, app_commands
+from discord import Colour, Member, Message, User, app_commands
 from discord.app_commands import Choice
 from discord.ext import commands
 
 from extensions import EXTENSIONS
 from kuma_kuma import Kuma_Kuma, _get_prefix, _get_trusted
-from utils.cog import KumaCog as Cog  # need to replace with your own Cog class
-from utils.context import KumaContext as Context
+from utils import (
+    KumaCog as Cog,  # need to replace with your own Cog class
+    KumaContext as Context,
+)
 
 if TYPE_CHECKING:
     from sqlite3 import Row
@@ -40,9 +43,6 @@ class ModeratorSettings(TypedDict):
     online_player_count: bool
 
 
-from discord import Colour
-
-
 class ModeratorSettingsEmbed(discord.Embed):
     def __init__(
         self,
@@ -54,23 +54,24 @@ class ModeratorSettingsEmbed(discord.Embed):
         assert self.context.guild
         super().__init__(
             colour=Colour.blurple(),
-            title=f"{BOT_NAME} Moderator settings",
-            description=f"These settings are specific to {self.context.guild.name}. ",
+            title=f"{BOT_NAME} Guild Settings",
+            description=f"These settings are specific to **{self.context.guild.name}**. ",
         )
 
         self.add_field(name="", value="-------------------------------")
-        self.add_field(inline=False, name="Use Mystbin", value="- " + str(bool(content["use_mystbin"])))
+        self.add_field(inline=False, name="__Use Mystbin__", value="- " + str(bool(content["use_mystbin"])))
         self.set_footer(text="Kuma Kuma - Moderator Settings Embed", icon_url=footer_icon_url)
 
 
 class Moderator(Cog):
-    """
-    Moderator type commands and functionality for Discord.
-    """
+    """Moderator type commands and functionality for Discord."""
 
     repo_url: str = "https://github.com/k8thekat/public_dpy_modules"
     guild_settings = list[dict[int, ModeratorSettings]]  # key will be the guild ID -> guild settings
-    CODEBLOCK_PATTERN: re.Pattern[str] = re.compile(pattern=r"`{3}(?P<LANG>\w+)?\n?(?P<CODE>(?:(?!`{3}).)+)\n?`{3}", flags=re.DOTALL | re.MULTILINE)
+    CODEBLOCK_PATTERN: re.Pattern[str] = re.compile(
+        pattern=r"`{3}(?P<LANG>\w+)?\n?(?P<CODE>(?:(?!`{3}).)+)\n?`{3}",
+        flags=re.DOTALL | re.MULTILINE,
+    )
 
     def __init__(self, bot: Kuma_Kuma) -> None:
         super().__init__(bot=bot)
@@ -80,23 +81,23 @@ class Moderator(Cog):
             await conn.execute(MODERATOR_SETUP_SQL)
 
     async def get_mod_settings(self, guild: discord.Guild) -> ModeratorSettings | None:
-        """
-        Retrieves the Moderator Settings for the provided Discord guild.
+        """Retrieves the Moderator Settings for the provided Discord guild.
 
         Parameters
-        -----------
+        ----------
         guild: :class:`discord.Guild`
             The Discord guild to get Moderator settings for.
 
         Returns
-        --------
+        -------
         :class:`ModeratorSettings | None`
             The settings related to the Discord guild.
 
         Raises
-        -------
+        ------
         :exc:`ConnectionError`
             Raises a connection error if unable to connect to the Database for any reason.
+
         """
         try:
             async with self.bot.pool.acquire() as conn:
@@ -115,39 +116,40 @@ class Moderator(Cog):
             raise ConnectionError("Unable to connect to the database.")
 
     async def set_mod_settings(self, guild: discord.Guild, use_mystbin: bool = False) -> ModeratorSettings | None:
-        """
-        Set Moderator specific settings for the provided Discord guild.
+        """Set Moderator specific settings for the provided Discord guild.
 
         Parameters
-        -----------
+        ----------
         guild: :class:`discord.Guild`
             The Discord guild object.
         use_mystbin: :class:`bool`, optional
             If the Discord guild should use mystbin conversion for longer messages, by default False.
 
         Returns
-        --------
+        -------
         :class:`ModeratorSettings | None`
             The Discord guild specific Moderator settings.
 
         Raises
-        -------
+        ------
         :exc:`sqlite3.DatabaseError`
             If we are unable to INSERT the row into the Database table.
         :exc:`ConnectionError`
             If we are unable to connect to the Database.
+
         """
         try:
             async with self.bot.pool.acquire() as conn:
                 data: ModeratorSettings | None = await conn.fetchone(
-                    """INSERT INTO moderator(serverid, use_mystbin) VALUES(?, ?) RETURNING *""", guild.id, use_mystbin
+                    """INSERT INTO moderator(serverid, use_mystbin) VALUES(?, ?) RETURNING *""",
+                    guild.id,
+                    use_mystbin,
                 )  # type: ignore
                 if data is None:
                     self.logger.error("We encountered an error inserting a row into the database. | GuildID: %s", guild.id)
 
                     raise sqlite3.DatabaseError("Unable to insert a row in to the database.")
-                else:
-                    return data
+                return data
         except Exception as e:
             self.logger.error("We encountered an error executing %s", __name__ + "set_mod_settings", exc_info=e)
             raise ConnectionError("Unable to connect to the database.")
@@ -179,7 +181,7 @@ class Moderator(Cog):
             and before.permissions_for(before.guild.me).manage_threads is True
         ):
             if before.locked == False and after.locked == True:
-                if before.name.lower().startswith("[locked] -"):
+                if before.name.lower().startswith("[locked] -") or after.name.lower().startswith("[locked] -"):
                     return
                 self.logger.info(
                     "Updating Locked Thread's name. | Guild ID: %s | Thread Name: %s | Thread ID: %s | Thread Name After: %s",
@@ -190,7 +192,7 @@ class Moderator(Cog):
                 )
                 await after.edit(name=f"[LOCKED] - {after.name}")
             elif before.archived == False and after.archived == True:
-                if before.name.lower().startswith("[closed] - "):
+                if before.name.lower().startswith("[closed] - ") or after.name.lower().startswith("[closed] - "):
                     return
                 res: discord.Thread = await after.edit(archived=False)
                 await res.edit(name=f"[CLOSED] - {after.name}", archived=True)
@@ -203,13 +205,13 @@ class Moderator(Cog):
                 )
 
     async def _auto_on_mystbin(self, message: Message) -> None:
-        """
-        Converts a `discord.Message` into a Mystbin URL
+        """Converts a `discord.Message` into a Mystbin URL
 
         Parameters
-        -----------
+        ----------
         message: :class:`Message`
             The Discord Message to be converted.
+
         """
         content: str = message.content
         assert message.guild  # we are force checking this function earlier to make sure we are in a guild only.
@@ -308,8 +310,11 @@ class Moderator(Cog):
             if len(res) > 0:
                 prefixes = "\n".join([entry["prefix"] for entry in res])
                 return await context.send(content=f"**Current Prefixes:** \n{prefixes}", delete_after=self.message_timeout, ephemeral=True)
-            else:
-                return await context.send(content="It appears you do not have any prefix's set", delete_after=self.message_timeout, ephemeral=True)
+            return await context.send(
+                content="It appears you do not have any prefix's set",
+                delete_after=self.message_timeout,
+                ephemeral=True,
+            )
 
     @prefix.command(name="add", help=f"Add a prefix to {BOT_NAME}", aliases=["prea", "pa"])
     @commands.is_owner()
@@ -339,12 +344,18 @@ class Moderator(Cog):
         assert context.guild is not None
         async with self.bot.pool.acquire() as conn:
             await conn.execute("""DELETE FROM prefix WHERE serverid = ?""", context.guild.id)
-            return await context.send(content=f"Removed all prefix's for {context.guild.name}", delete_after=self.message_timeout, ephemeral=True)
+            return await context.send(
+                content=f"Removed all prefix's for {context.guild.name}",
+                delete_after=self.message_timeout,
+                ephemeral=True,
+            )
 
     @commands.command(name="trusted", help=f"Add/Remove and list {BOT_NAME} Owner IDs.")
     @commands.is_owner()
     @commands.guild_only()
-    @app_commands.choices(option=[Choice(name="add", value="add"), Choice(name="remove", value="remove"), Choice(name="list", value="list")])
+    @app_commands.choices(
+        option=[Choice(name="add", value="add"), Choice(name="remove", value="remove"), Choice(name="list", value="list")],
+    )
     async def trust(self, context: Context, option: Choice, member: Union[Member, User, int, None]) -> Message | None:
         assert context.guild
         if isinstance(member, int):
@@ -405,7 +416,6 @@ class Moderator(Cog):
                 til_message = await context.channel.fetch_message(amount)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 await context.reply(content="We were unable to find the Discord Message ID provided.", delete_after=self.message_timeout)
-                pass
 
         if bot_only:
             messages = await context.channel.purge(
@@ -447,8 +457,10 @@ class Moderator(Cog):
                 emoji: discord.Emoji | None = res.get_emoji(self.emoji_table.kuma_wow)
                 if emoji is not None:
                     return await context.send(embed=ModeratorSettingsEmbed(footer_icon_url=emoji.url, content=settings, context=context))
-                else:
-                    return await context.send(embed=ModeratorSettingsEmbed(content=settings, context=context), delete_after=self.message_timeout)
+                return await context.send(
+                    embed=ModeratorSettingsEmbed(content=settings, context=context),
+                    delete_after=self.message_timeout,
+                )
 
         return await context.send(
             content=self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_crying),
@@ -463,8 +475,7 @@ class Moderator(Cog):
         if res is not None:
             embed = discord.Embed(color=res.color, title=res.global_name, description=f"**{res.id}**")
             return await context.send(embed=embed)
-        else:
-            return await context.send(content=f"Unable to find the Discord ID: {discord_id}")
+        return await context.send(content=f"Unable to find the Discord ID: {discord_id}")
 
 
 async def setup(bot: Kuma_Kuma) -> None:

@@ -1,5 +1,4 @@
-"""
-Copyright (C) 2021-2022 Katelynn Cadwallader.
+"""Copyright (C) 2021-2022 Katelynn Cadwallader.
 
 This file is part of Kuma Kuma Bear, a Discord Bot.
 
@@ -29,13 +28,13 @@ import discord
 from discord import Embed, app_commands
 from discord.ext import commands
 
-from utils.cog import KumaCog
+from utils import KumaCog
 
 interaction = discord.Interaction
 
 
 class RoleButton(discord.ui.Button):
-    """This is for the Reaction Role View"""
+    """Reaction Role View."""
 
     def __init__(
         self,
@@ -87,7 +86,10 @@ class AutoRole(KumaCog):
         embed.add_field(name="**What is this for?**", value=field_body)
 
         role_view = ReactionRoleView(
-            timeout=None, custom_id=f"RR::BUTTON::{role.id}", button_label=role.name, button_emoji=emoji
+            timeout=None,
+            custom_id=f"RR::BUTTON::{role.id}",
+            button_label=role.name,
+            button_emoji=emoji,
         )
 
         if channel == None:
@@ -98,10 +100,10 @@ class AutoRole(KumaCog):
     @commands.Cog.listener("on_interaction")
     async def on_reaction_role(self, interaction: discord.Interaction):
         if interaction.type != discord.InteractionType.component:
-            return
+            return None
 
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            return
+            return None
 
         custom_id = (interaction.data or {}).get("custom_id", "")
         match = self.REACTION_ROLES_BUTTON_REGEX.fullmatch(custom_id)
@@ -111,7 +113,8 @@ class AutoRole(KumaCog):
             role = interaction.guild.get_role(role_id)
             if not role:
                 return await interaction.response.send_message(
-                    "Sorry, that role does not seem to exist anymore...", ephemeral=True
+                    "Sorry, that role does not seem to exist anymore...",
+                    ephemeral=True,
                 )
 
             meth, message = (
