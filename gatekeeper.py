@@ -22,6 +22,7 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 from __future__ import annotations
 
 import asyncio
+import logging
 from configparser import ConfigParser
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
@@ -78,13 +79,13 @@ SERVER_CHANNELS: dict[str, int] = {
 #         color: discord.Color = discord.Color.blurple()
 
 #         super().__init__(color=color, title=title, description="", timestamp=discord.utils.utcnow())
-
+LOGGER = logging.getLogger()
 
 class Gatekeeper(Cog):
     ADS: AMPControllerInstance
     servers_dict: dict[str, InstanceTypeAliases]
     servers_chat_dict: dict[str, GuildChannel]
-    _servers: set[InstanceTypeAliases]
+    _servers: set[InstanceTypeAliases] | ActionResultError
 
     # Server Status Emojis
     stopped_emoji = "\U0001f6d1"  # Octagonal Sign
@@ -94,7 +95,7 @@ class Gatekeeper(Cog):
         super().__init__(bot=bot)
 
     @property
-    def servers(self) -> set[InstanceTypeAliases]:
+    def servers(self) -> set[InstanceTypeAliases] | ActionResultError:
         return self._servers
 
     async def cog_load(self) -> None:
@@ -104,20 +105,24 @@ class Gatekeeper(Cog):
         # Easier lookup to get AMP Instance objects.
         self._servers = await self.ADS.get_instances()
         self.servers_dict = {}
-        if isinstance(self._servers, ActionResultError):
-            self.logger.error(
+
+        self.servers_chat_dict = {}
+
+        if isinstance(self._servers, ActionResultError) or isinstance(self.servers, ActionResultError):
+            LOGGER.error(
                 "Failed to retrieve AMP Instances via `AMPControllerInstance.get_instances()`. | Error: %s",
                 ActionResultError,
             )
-        else:
-            for server in self.servers:
-                self.servers_dict[server.friendly_name] = server
+            return
+
+        for server in self.servers:
+            self.servers_dict[server.friendly_name] = server
 
         self.server_choices: list[app_commands.Choice[str]] = [
             app_commands.Choice(name=e.friendly_name, value=e.instance_id) for e in self.servers
         ]
         if self.update_server_list.is_running() is False:
-            self.logger.info(
+            LOGGER.info(
                 "Starting Gatekeeper.update_server_list task, running every %s minutes. | Reconnect: %s",
                 self.update_server_list.minutes,
                 self.update_server_list.reconnect,
@@ -126,7 +131,7 @@ class Gatekeeper(Cog):
             self.bot.task_loops.append(self.update_server_list)
 
         # if self.server_status_via_channels.is_running() == False:
-        #     self.logger.info(
+        #     LOGGER.info(
         #         "Starting Gatekeeper.server_status_via_channels task, running every %s minutes. | Reconnect: %s",
         #         self.server_status_via_channels.minutes,
         #         self.server_status_via_channels.reconnect,
@@ -134,9 +139,8 @@ class Gatekeeper(Cog):
         #     self.server_status_via_channels.start()
         #     self.bot.task_loops.append(self.server_status_via_channels)
 
-        self.servers_chat_dict = {}
         # if self.server_chat_via_channels.is_running() == False:
-        #     self.logger.info(
+        #     LOGGER.info(
         #         "Starting Gatekeeper.server_chat_via_channels task, running every %s minutes. | Reconnect: %s",
         #         self.server_chat_via_channels.minutes,
         #         self.server_chat_via_channels.reconnect,
@@ -145,7 +149,7 @@ class Gatekeeper(Cog):
         #     self.bot.task_loops.append(self.server_chat_via_channels)
 
     def ini_load(self) -> None:
-        """Parse my local ini file to load AMP login information."""
+        """Parse the local ini file to load AMP login information."""
         file: Path = self.bot.local_ini
         if file.is_file():
             settings = ConfigParser(converters={"list": lambda setting: [value.strip() for value in setting.split(",")]})
@@ -155,10 +159,11 @@ class Gatekeeper(Cog):
             user: Optional[str] = settings.get(section="AMP", option="user", fallback=None)
             password: Optional[str] = settings.get(section="AMP", option="password", fallback=None)
             token: Optional[str] = settings.get(section="AMP", option="token", fallback=None)
-            self.logger.debug(("Gatekeeper Creds. | Url: %s | User: %s | Token: %s | Path: %s"), url, user, token, file.as_posix())
+            LOGGER.debug(("Gatekeeper Creds. | Url: %s | User: %s | Token: %s | Path: %s"), url, user, token, file.as_posix())
             if url is None or user is None or password is None or token is None:
+                msg = "Gatekeeper failed to load credentials. | Url: %s | User: %s | Token: %s | Password: %s"
                 raise ValueError(
-                    "Gatekeeper failed to load credentials. | Url: %s | User: %s | Token: %s | Password: %s",
+                    msg,
                     url,
                     user,
                     token,
@@ -166,11 +171,11 @@ class Gatekeeper(Cog):
                 )
             Bridge(api_params=APIParams(url=url, user=user, password=password, token=token, use_2fa=True))
         else:
-            raise ValueError("Gatekeeper failed to load credentials from path: %s", file)
+            msg = "Gatekeeper failed to load credentials from path: %s"
+            raise ValueError(msg, file)
         return
 
     async def autocomp_server_list(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-        global SERVER_OWNERS
 
         if await self.bot.is_owner(interaction.user):
             return [entry for entry in self.server_choices if current.lower() in (entry.name.lower() or entry.value.lower())]
@@ -181,7 +186,7 @@ class Gatekeeper(Cog):
         priv_servers: list[app_commands.Choice[str]] = [entry for entry in self.server_choices if entry.value in temp]
         return [entry for entry in priv_servers if current.lower() in (entry.name.lower() or entry.value.lower())]
 
-    async def autocomp_role_list(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str | int]]:
+    async def autocomp_role_list(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str | int]]:  # noqa: ARG002
         roles: list[Role] | ActionResultError = await self.ADS.get_role_data()
         if isinstance(roles, ActionResultError):
             return [app_commands.Choice(name="Failed Lookup", value="NONE")]
@@ -191,31 +196,31 @@ class Gatekeeper(Cog):
             if current.lower() in role.name.lower() or current.lower() in role.id
         ]
 
-    @tasks.loop(minutes=10, reconnect=True)
+    @tasks.loop(minutes=1, reconnect=True)
     async def update_server_list(self) -> None:
         res: set[AMPInstance | AMPMinecraftInstance | AMPADSInstance] = await self.ADS.get_instances()
         if isinstance(res, ActionResultError):
-            return self.logger.error("Failed to retrieve AMP Instances via `get_instances()`. | Error: %s", ActionResultError)
+            return LOGGER.error("Failed to retrieve AMP Instances via `get_instances()`. | Error: %s", ActionResultError)
         if res != self.servers:
             # Update the attribute with the new Instance set.
             self._servers = res
             # Update the dictionary we use to store the Instance objects.
             for server in self.servers:
                 self.servers_dict[server.friendly_name] = server
-            self.logger.info("Updated our list of available AMP Instances. | Num of Instances: %s", len(self.servers))
+            LOGGER.info("Updated our list of available AMP Instances. | Num of Instances: %s", len(self.servers))
         return None
 
     @tasks.loop(minutes=3, reconnect=True)
     async def server_status_via_channels(self) -> Any:
         if self.bot.is_ready() is False:
-            self.logger.debug("Kuma Kuma bear is not ready, restarting the Gatekeeper.server_status_via_channels task in %s seconds.", 5)
+            LOGGER.debug("Kuma Kuma bear is not ready, restarting the Gatekeeper.server_status_via_channels task in %s seconds.", 5)
             await asyncio.sleep(5)
             self.server_status_via_channels.restart()
             return
 
         neko_guild: Optional[discord.Guild] = await self.get_guild()
         if neko_guild is None:
-            self.logger.error("Failed to retrieve the Discord Guild inside <Gatekeeper.server_status_via_channels>.")
+            LOGGER.error("Failed to retrieve the Discord Guild inside <Gatekeeper.server_status_via_channels>.")
             return
 
         # We go through all the AMP Instances and see if we have any channels set; then update them.
@@ -223,16 +228,16 @@ class Gatekeeper(Cog):
             chan_id: Optional[int] = SERVER_CHANNELS.get(instance.instance_id, None)
             if chan_id is None:
                 # This isn't really an error or warning worthy as we have hard coded the dict.
-                self.logger.debug("Failed to find a Channel ID for Instance: %s", instance.friendly_name)
+                LOGGER.debug("Failed to find a Channel ID for Instance: %s", instance.friendly_name)
                 continue
 
             guild_channel: Optional[GuildChannel] = neko_guild.get_channel(chan_id)
             if guild_channel is None:
-                self.logger.warning("Failed to retrieve Guild Channel ID: %s for Instance: %s", chan_id, instance.friendly_name)
+                LOGGER.warning("Failed to retrieve Guild Channel ID: %s for Instance: %s", chan_id, instance.friendly_name)
                 continue
 
             if guild_channel.permissions_for(neko_guild.me).manage_channels is False:
-                self.logger.warning(
+                LOGGER.warning(
                     "Unable to manage the Guild Channel: %s, we do not have the `manage_channels` permission.",
                     guild_channel,
                 )
@@ -241,7 +246,7 @@ class Gatekeeper(Cog):
             # Now lets get updated Instance information so we can update the channel better.
             status: Status | ActionResultError = await instance.get_application_status()
             if isinstance(status, ActionResultError):
-                self.logger.error(
+                LOGGER.error(
                     "<Instance.get_application_stats()> returned an Error.| Instance: %s | Error: %s",
                     instance.friendly_name,
                     status,
@@ -261,14 +266,14 @@ class Gatekeeper(Cog):
     @tasks.loop(seconds=30, reconnect=True)
     async def server_chat_via_channels(self) -> Any:
         if self.bot.is_ready() is False:
-            self.logger.debug("Kuma Kuma bear is not ready, restarting the Gatekeeper.server_status_via_channels task in %s seconds.", 5)
+            LOGGER.debug("Kuma Kuma bear is not ready, restarting the Gatekeeper.server_status_via_channels task in %s seconds.", 5)
             await asyncio.sleep(5)
             self.server_chat_via_channels.restart()
             return
 
         neko_guild: discord.Guild | None = await self.get_guild()
         if neko_guild is None:
-            self.logger.error("Failed to retrieve the Discord Guild inside <Gatekeeper.server_chat_via_channels()>.")
+            LOGGER.error("Failed to retrieve the Discord Guild inside <Gatekeeper.server_chat_via_channels()>.")
             return
 
         for instance in self.servers:
@@ -276,7 +281,7 @@ class Gatekeeper(Cog):
             amp_instance: InstanceTypeAliases | ActionResultError = await instance.get_instance_status()
             # Any AMP API issues fall into this if check.
             if isinstance(amp_instance, ActionResultError):
-                self.logger.error(
+                LOGGER.error(
                     "Failed to retrieve <Instance.get_instance_status()> for Instance %s. | Error: %s",
                     instance.friendly_name,
                     amp_instance,
@@ -286,11 +291,11 @@ class Gatekeeper(Cog):
             # Let's also update your dict with the most recent AMPInstance object.
             self.servers_dict[instance.friendly_name] = amp_instance
             if amp_instance.running is False:
-                self.logger.warning("The Instance: %s is not Running, unable to get console updates.", amp_instance.friendly_name)
+                LOGGER.warning("The Instance: %s is not Running, unable to get console updates.", amp_instance.friendly_name)
                 continue
             res: Updates | ActionResultError = await amp_instance.get_updates()
             if isinstance(res, ActionResultError):
-                self.logger.error(
+                LOGGER.error(
                     "Failed to retrieve <Instance.get_updates()> for Instance %s. | Error: %s",
                     amp_instance.friendly_name,
                     res,
@@ -300,16 +305,16 @@ class Gatekeeper(Cog):
             chan_id: Optional[int] = SERVER_CHANNELS.get(instance.instance_id, None)
             if chan_id is None:
                 # This isn't really an error or warning worthy as we have hard coded the dict.
-                self.logger.debug("Failed to find a Channel ID for Instance: %s", instance.friendly_name)
+                LOGGER.debug("Failed to find a Channel ID for Instance: %s", instance.friendly_name)
                 continue
 
             guild_channel: Optional[GuildChannel] = neko_guild.get_channel(chan_id)
             if guild_channel is None:
-                self.logger.warning("Failed to retrieve Guild Channel ID: %s for Instance: %s", chan_id, instance.friendly_name)
+                LOGGER.warning("Failed to retrieve Guild Channel ID: %s for Instance: %s", chan_id, instance.friendly_name)
                 continue
 
             if guild_channel.permissions_for(neko_guild.me).send_messages is False:
-                self.logger.warning("Unable to manage the Guild Channel: %s, we do not have the `send_messages` permission.", guild_channel)
+                LOGGER.warning("Unable to manage the Guild Channel: %s, we do not have the `send_messages` permission.", guild_channel)
                 continue
 
             # Now let's send our Console messages to the channel.
@@ -332,6 +337,8 @@ class Gatekeeper(Cog):
         name: str,
         action: str = "add",
     ) -> Optional[discord.Message]:
+        await context.typing(ephemeral=True)
+
         if server == "NONE":
             return await context.send(
                 content=f"{self.emoji_table.to_inline_emoji('kuma_uwu')}",
@@ -342,15 +349,15 @@ class Gatekeeper(Cog):
         try:
             instance: Instance | ActionResultError = await self.ADS.get_instance(instance_id=server)
             if isinstance(instance, ActionResultError):
-                self.logger.error(
+                LOGGER.error(
                     "Failed Instance lookup in Whitelist Server. | Instance ID: %s | IGN: %s | Action: %s | Discord User: %s",
                     server,
                     name,
                     action,
                     context.author,
                 )
-                raise
-        except Exception as e:
+                return await context.send(content=f"Failed to get instance by ID: {server} || {instance}")
+        except Exception as e:  # noqa: BLE001
             return await context.send(content=f"Failed to get instance by ID: {server} || {e}")
 
         # TODO(@k8theat): - The app_state check may cause problems in the future. Need to test.
@@ -361,7 +368,10 @@ class Gatekeeper(Cog):
             # We may get the wrong message though.
             await asyncio.sleep(delay=1)
             await instance.get_updates()
-            return await context.send(content=instance.console_entries[-1].contents, ephemeral=True, delete_after=self.message_timeout)
+            # TODO(@k8thekat) - Index issue with console entries.
+            if len(instance.console_entries) > 0:
+                return await context.send(content=instance.console_entries[-1].contents, ephemeral=True, delete_after=self.message_timeout)
+            return await context.send(content="Failed to get console reply", ephemeral=True, delete_after=self.message_timeout)
         return await context.send(
             content=f"It appears the Instance is having trouble...{self.emoji_table.to_inline_emoji('kuma_bleh')}",
             ephemeral=True,
@@ -380,8 +390,12 @@ class Gatekeeper(Cog):
         try:
             instance: InstanceTypeAliases | ActionResultError = await self.ADS.get_instance(instance_id=server)
             if isinstance(instance, ActionResultError):
-                raise
-        except Exception as e:
+                return await context.send(
+                    content=f"Failed to get Instance by ID. | Server ID: {server}",
+                    ephemeral=True,
+                    delete_after=self.message_timeout,
+                )
+        except Exception as e:  # noqa: BLE001
             return await context.send(
                 content=f"Failed to get instance by ID: {server} || {e}",
                 ephemeral=True,
@@ -389,7 +403,8 @@ class Gatekeeper(Cog):
             )
 
         if isinstance(instance, InstanceTypeAliases) and instance.running is True:
-            # By calling get_updates() early with how the API handles console entries gaurentee's the next entry in the console will most likely be our console message and the response to it.
+            # By calling get_updates() early with how the API handles console entries gaurentee's the next entry in the console will most
+            # likely be our console message and the response to it.
             await instance.get_updates()
             await instance.send_console_message(msg=message)
             await asyncio.sleep(delay=1)
@@ -401,7 +416,7 @@ class Gatekeeper(Cog):
                 console_content = console_content[:1980] + "\n...."
 
             return await context.send(
-                content=f"Issues Command: {message}\n" + console_content,
+                content=f"**Sent Message**: {message}\n**Response**:" + console_content,
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
@@ -411,6 +426,7 @@ class Gatekeeper(Cog):
             ephemeral=True,
             delete_after=self.message_timeout,
         )
+        return None
 
     @commands.hybrid_command(name="duplicate_role", help="Duplicate an AMP User Role", aliases=["role_dupe", "amprd", "amp_rd"])
     @commands.is_owner()
@@ -425,7 +441,7 @@ class Gatekeeper(Cog):
             new_role = await self.ADS.get_role(role_id=res.result)
 
         if source_role is None or new_role is None or isinstance(source_role, ActionResultError) or isinstance(new_role, ActionResultError):
-            self.logger.error("Failed to locate Role ID: %s . | Roles: %s", source, roles)
+            LOGGER.error("Failed to locate Role ID: %s . | Roles: %s", source, roles)
             return await context.send(content=f"Failed to locate the Role ID: {source}", ephemeral=True, delete_after=self.message_timeout)
 
         temp: list[str] = []
@@ -434,7 +450,7 @@ class Gatekeeper(Cog):
                 await self.ADS.set_amp_role_permission(role_id=new_role.id, permission_node=perm.replace("-", ""), enabled=False)
                 temp.append(f"Set {perm.replace('-', '')}: **False**")
             else:
-                print(await self.ADS.set_amp_role_permission(role_id=new_role.id, permission_node=perm, enabled=True))
+                LOGGER.info(await self.ADS.set_amp_role_permission(role_id=new_role.id, permission_node=perm, enabled=True))
                 temp.append(f"Set {perm}: **True**")
 
         return await context.send(
@@ -443,6 +459,7 @@ class Gatekeeper(Cog):
             delete_after=self.message_timeout,
         )
 
+    # TODO(@k8thekat): Convert to view with proper components?
     @commands.hybrid_command(
         name="instance_app_control",
         help="Perform certain actions on the Server.",
@@ -465,15 +482,20 @@ class Gatekeeper(Cog):
             )
         try:
             instance: InstanceTypeAliases | ActionResultError = await self.ADS.get_instance(instance_id=server)
-            # We raise just to trigger the Exception clause and spit out a reply.
-            if isinstance(instance, ActionResultError):
-                raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return await context.send(
                 content=f"Failed to get instance by ID: {server} || {e}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
+
+        if isinstance(instance, ActionResultError):
+            return await context.send(
+                content=f"Failed to get instance by ID: {server} || {instance}",
+                ephemeral=True,
+                delete_after=self.message_timeout,
+            )
+
         failed = False
         res = None
         if isinstance(instance, InstanceTypeAliases) and instance.running is True:
@@ -526,6 +548,7 @@ class Gatekeeper(Cog):
                 )
         return None
 
+    # TODO(@k8thekat): Appears to be broken and won't handle a message.
     @commands.hybrid_command(name="instance_info", help="Retrieve relvant information about an AMP Instance", aliases=["aii", "ampii"])
     @app_commands.autocomplete(server=autocomp_server_list)
     async def instance_information(self, context: Context, server: str) -> Any:
@@ -538,12 +561,16 @@ class Gatekeeper(Cog):
             )
         try:
             instance: InstanceTypeAliases | ActionResultError = await self.ADS.get_instance(instance_id=server)
-            # We raise just to trigger the Exception clause and spit out a reply.
-            if isinstance(instance, ActionResultError):
-                raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return await context.send(
                 content=f"Failed to get instance by ID: {server} || {e}",
+                ephemeral=True,
+                delete_after=self.message_timeout,
+            )
+
+        if isinstance(instance, ActionResultError):
+            return await context.send(
+                content=f"Failed to get instance by ID: {server} || {instance}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
@@ -580,7 +607,9 @@ class Gatekeeper(Cog):
                     ephemeral=True,
                     delete_after=self.message_timeout,
                 )
+        else:
+            return await context.send("IDK :shrug:")
         return None
 
-async def setup(bot: Kuma_Kuma) -> None:
+async def setup(bot: Kuma_Kuma) -> None:  # noqa: D103 # docstring
     await bot.add_cog(Gatekeeper(bot=bot))

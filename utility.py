@@ -1,4 +1,4 @@
-"""Copyright (C) 2021-2022 Katelynn Cadwallader.
+"""Copyright (C) 2021-2025 Katelynn Cadwallader.
 
 This file is part of Kuma Kuma Bear, a Discord Bot.
 
@@ -24,12 +24,13 @@ from __future__ import annotations
 import inspect
 import io
 import json
+import logging
 import os
 import platform
 import re
 import unicodedata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, TypedDict, Union
 
 import aiofiles
 import discord
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
     from utils._types import GitHubIssueSubmissionResponse
 
 BOT_NAME = "Kuma Kuma"
+LOGGER = logging.getLogger()
 
 
 def get_latest_commits(url: str, repo: Repo, branch: str, max_count: int = 5) -> str:
@@ -58,6 +60,12 @@ def get_latest_commits(url: str, repo: Repo, branch: str, max_count: int = 5) ->
 
     Parameters
     ----------
+    url: : :class:`str`
+        The base url of the github repository.
+    repo: :class:`git.Repo`
+        The git repository to pull commits from.
+    branch: :class:`str`
+        The branch to pull commits from.
     max_count: :class:`int`, optional
         The max number of github commit's to collect, by default 5.
 
@@ -71,7 +79,7 @@ def get_latest_commits(url: str, repo: Repo, branch: str, max_count: int = 5) ->
     # url = "https://github.com/k8thekat/Kuma_Kuma"
     # repo: Repo = Repo(Path(__file__).parent.as_posix())
     # TODO figure out which commits this is grabbing and which direction as they don't like up.
-    commits = repo.iter_commits(branch, max_count=max_count)
+    commits  = repo.iter_commits(branch, max_count=max_count)
     for i in commits:
         assert i.author.name
         commit_link = f"[{i.hexsha[:4]}]({url + f'/commit/{i.hexsha}'})"
@@ -101,7 +109,9 @@ async def count_others(path: str, filetype: str = ".py", file_contains: str = "d
             if i.path.endswith(filetype):
                 if skip_venv and re.search(pattern=r"(\\|/)?venv(\\|/)", string=i.path):
                     continue
-                line_count += len([line for line in (await (await aiofiles.open(file=i.path)).read()).split(sep="\n") if file_contains in line])
+                line_count += len([
+                    line for line in (await (await aiofiles.open(file=i.path)).read()).split(sep="\n") if file_contains in line
+                ])
         elif i.is_dir():
             line_count += await count_others(path=i.path, filetype=filetype, file_contains=file_contains)
     return line_count
@@ -109,7 +119,7 @@ async def count_others(path: str, filetype: str = ".py", file_contains: str = "d
 
 class ToFileButton(discord.ui.Button):
     def __init__(self, *, style: discord.ButtonStyle = discord.ButtonStyle.blurple, label: str = "To File") -> None:
-        self.view: StickerYoinkView
+        self.view: YoinkView
         super().__init__(style=style, label=label)
 
     async def callback(self, interaction: discord.Interaction) -> Any:
@@ -119,16 +129,21 @@ class ToFileButton(discord.ui.Button):
 
         # We need the full sticker object if possible (specifically a discord.GuildSticker)
         sticker: Union[discord.Sticker, discord.StandardSticker, discord.GuildSticker] = await self.view.sticker_msg.stickers[0].fetch()
-        return await interaction.response.send_message(content="Here is the sticker as a file.", file=await sticker.to_file(), ephemeral=True)
+        return await interaction.response.send_message(
+            content="Here is the sticker as a file.",
+            file=await sticker.to_file(),
+            ephemeral=True,
+        )
 
 
 class CopyStickerButton(discord.ui.Button):
-    view: StickerYoinkView
+    view: YoinkView
 
     def __init__(self, *, style: discord.ButtonStyle = discord.ButtonStyle.green, label: str = "Copy Sticker") -> None:
         super().__init__(style=style, label=label)
 
     async def callback(self, interaction: discord.Interaction) -> Union[discord.InteractionCallbackResponse, None]:
+        # TODO: Add support for Emojis here
         # check if the original message has any stickers.
         if len(self.view.sticker_msg.stickers) == 0:
             return await interaction.response.send_message(content="Message does not contain any stickers", ephemeral=True)
@@ -151,12 +166,12 @@ class CopyStickerButton(discord.ui.Button):
                     reason="Yoinked",
                 )
             except discord.errors.HTTPException as e:
-                self.view.bot.logger.exception(msg="Exception occurred in the CopySticker.callback():\n%s", exc_info=e)
+                LOGGER.exception(msg="Exception occurred in the CopySticker.callback():\n%s", exc_info=e)
                 return await interaction.response.send_message(content="We encountered an error processing your command.", ephemeral=True)
         return await super().callback(interaction=interaction)
 
 
-class StickerYoinkView(discord.ui.View):
+class YoinkView(discord.ui.View):
     def __init__(
         self,
         *,
@@ -168,7 +183,9 @@ class StickerYoinkView(discord.ui.View):
         self.bot: Kuma_Kuma = bot
         self.sticker_msg: discord.Message = sticker_msg
         self.sticker = CopyStickerButton()
-        options: list[discord.SelectOption] = [discord.SelectOption(label=entry.name, value=str(object=entry.id)) for entry in self.bot.guilds]
+        options: list[discord.SelectOption] = [
+            discord.SelectOption(label=entry.name, value=str(object=entry.id)) for entry in self.bot.guilds
+        ]
 
         self.guild: discord.ui.Select = discord.ui.Select(placeholder="Which Guild...?", options=options)
         self.add_item(item=self.guild)  # our guild select.
@@ -195,15 +212,18 @@ class GithubIssueSubmissionModal(discord.ui.Modal):
         self.repo = repo
         self.submission_type = submission_type
         super().__init__(title=title)
+        # TODO: Change formatting on Placeholder, looks odd...
         self.issue_title = discord.ui.TextInput(
             label=f"{self.repo} - Issue Title",
             placeholder=f"{self.repo}...issue!",
             required=True,
         )
+        # TODO: Validate default field is grabbing enough of the original message content to make it obvious what is going on.
+        # Maybe consider a larger text input? If possible?
         self.issue_body = discord.ui.TextInput(
             label=f"{self.repo} - Issue Body",
             default=self.issue_msg.content,
-            style=discord.TextStyle.paragraph,
+            style=discord.TextStyle.long,
             required=True,
         )
         self.add_item(item=self.issue_title)
@@ -216,6 +236,7 @@ class GithubIssueSubmissionModal(discord.ui.Modal):
             "Accept": "application/vnd.github.raw+json",
         }
         # We made need to truncate the "title" field eventually if they get too long. See `self.issue_title` and set `max_length`.
+        # TODO: See about adding file attachments from the message to the Github issue.
         modified_title: str = self.submission_type + " " + self.issue_title.value + " | submitted via Discord"
         data: dict[str, Union[str, list]] = {
             "title": modified_title,
@@ -247,7 +268,13 @@ class GithubIssueSubmissionView(discord.ui.View):
     submission_type: GithubIssueSubmissionSelect
     interaction_user: Union[discord.Member, discord.User]
 
-    def __init__(self, bot: Kuma_Kuma, cog: Utility, issue_msg: discord.Message, interaction_user: Union[discord.User, discord.Member]) -> None:
+    def __init__(
+        self,
+        bot: Kuma_Kuma,
+        cog: Utility,
+        issue_msg: discord.Message,
+        interaction_user: Union[discord.User, discord.Member],
+    ) -> None:
         self.cog = cog
         self.bot = bot
         self.issue_msg = issue_msg
@@ -327,7 +354,7 @@ class GithubIssueSubmissionEmbed(discord.Embed):
 
 
 class URLref(TypedDict):
-    """This is used for URL linking."""
+    """Used for URL linking."""
 
     aliases: list[str]
     urls: list[str]
@@ -455,6 +482,7 @@ class Utility(Cog):
     @commands.command(name="charinfo")
     async def charinfo(self, context: Context, *, characters: str) -> Union[discord.Message, None]:
         """Shows you information about a number of characters.
+
         Only up to 25 characters at a time.
         """
         if characters.startswith("<") and characters.endswith(">"):
@@ -472,7 +500,7 @@ class Utility(Cog):
                 delete_after=self.message_timeout,
             )
             return await context.send(content=f"{msg[:1995]} ....")
-        await context.send(content=msg, delete_after=self.message_timeout)
+        return await context.send(content=msg, delete_after=self.message_timeout)
 
     @commands.command(name="ping")
     async def ping(self, context: Context) -> discord.Message:
@@ -502,16 +530,17 @@ class Utility(Cog):
             if var in key or var in self.lookup[key]["aliases"]:
                 return await context.reply(
                     suppress_embeds=True,
-                    content=f"Is this right *Kuma*? {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_peak)}:\n- "
+                    content=f"Is this right *Kuma*? {self.emoji_table.kuma_peak}:\n- "
                     + "\n- ".join(list(self.lookup[key]["urls"])),
                 )
         return await context.reply(
-            content=f"I was unable to understand your request.. {self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_head_clench)}",
+            content=f"I was unable to understand your request.. {self.emoji_table.kuma_head_clench}",
         )
 
     @commands.command(name="source")
     async def source(self, context: Context, *, command: Union[str, None]) -> Union[discord.Message, None]:
-        """Displays my full source code or for a specific command.
+        """Displays full source code or for a specific command.
+
         To display the source code of a subcommand you can separate it by
         periods, e.g. tag.create for the create subcommand of the tag command
         or by spaces.
@@ -536,12 +565,12 @@ class Utility(Cog):
             src = obj.callback.__code__
             module = obj.callback.__module__
             filename = src.co_filename
-            code_class = obj._cog
+            code_class = obj._cog  # noqa: SLF001
 
             # Handles my seperate repo URLs. (Could store this as part of the cog class?)
             # This requires you do define `repo_url` per script for files in a different parent directory than your bot.py
-            if code_class != None and hasattr(code_class, "repo_url"):
-                source_url = obj._cog.repo_url
+            if code_class is not None and hasattr(obj._cog, "repo_url"):  # noqa: SLF001
+                source_url = obj._cog.repo_url # pyright: ignore[reportAttributeAccessIssue]
 
         lines, firstlineno = inspect.getsourcelines(src)
         if not module.startswith("discord"):
@@ -558,10 +587,11 @@ class Utility(Cog):
 
         final_url: str = f"<{source_url}/blob/{branch}/{location}#L{firstlineno}-L{firstlineno + len(lines) - 1}>"
         await context.reply(content=final_url)
+        return None
 
     @app_commands.checks.has_permissions(manage_emojis_and_stickers=True)
     async def yoink(self, interaction: discord.Interaction, message: discord.Message) -> None:
-        await interaction.response.send_message(view=StickerYoinkView(bot=self.bot, sticker_msg=message), delete_after=self.message_timeout)
+        await interaction.response.send_message(view=YoinkView(bot=self.bot, sticker_msg=message), delete_after=self.message_timeout)
 
     async def create_github_issue(self, interaction: discord.Interaction, message: discord.Message) -> None:
         """Create a github issue via a Discord Message."""
@@ -574,7 +604,7 @@ class Utility(Cog):
             )
         else:
             await interaction.response.send_message(
-                content=f"Kuma Kuma Bear says Creating GitHub Issues is only allowed for __Trusted Users__. {self.emoji_table.to_inline_emoji(emoji='kuma_pout')}",
+                content=f"Kuma Kuma Bear says Creating GitHub Issues is only allowed for __Trusted Users__. {self.emoji_table.kuma_pout}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
@@ -589,6 +619,38 @@ class Utility(Cog):
             return await context.send(file=log_f)
         return await context.send(content=f"```ps\n{self.bot.loghandler.parse_log()}```", delete_after=self.message_timeout)
 
+
+    @commands.command(name="app-emojis", help="Displays a list of all application emojis.")
+    async def app_emojis(self,context:Context, *, query: Optional[str], codefmt: bool = False)-> None:
+        """Displays a list of all application emojis."""
+        content = "__**Application Emojis:**__\n"
+
+        emojis = await self.bot.fetch_application_emojis()
+        self.bot._app_emojis = sorted(emojis, key=lambda x : x.name)  # noqa: SLF001
+
+        for indx, emoji in enumerate(self.bot._app_emojis):  # noqa: SLF001
+            temp = f"- {emoji} | Inline: `<:{emoji.name}:{emoji.id}>`"
+            if codefmt:
+                temp = f'`{emoji.name} = "<:{emoji.name}:{emoji.id}>"`'
+            if query is not None and query.lower() in emoji.name.lower():
+                await context.send(content=f"Found matching emoji {self.emoji_table.kuma_happy}:\n{temp}", reference=context.message)
+
+            if indx > len(emojis) -1:
+                break
+            if len(content + temp) > 1950:
+                await context.send(content=content, reference=context.message)
+                content = temp + "\n"
+            else:
+                content += temp + "\n"
+
+        if len(content) > 0:
+            await context.send(content=content, reference=context.message)
+
+    @commands.command(name="reload_app_emojis", help="Reloads the application emojis from Discord.")
+    async def reload_app_emojis(self, context: Context) -> discord.Message:
+        """Reloads the application emojis from Discord."""
+        self.bot._app_emojis = await self.bot.fetch_application_emojis()  # noqa: SLF001
+        return await context.send(content=f"Reloaded application emojis {self.emoji_table.kuma_happy}", delete_after=self.message_timeout)
 
 async def setup(bot: Kuma_Kuma) -> None:
     await bot.add_cog(Utility(bot=bot))
