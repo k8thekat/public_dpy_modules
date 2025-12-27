@@ -174,6 +174,48 @@ class ViewParams(TypedDict):
     "Any Items to pre-append to the View and display during `__init__`"
     owner: discord.Member | discord.User
     "The Member or User who dispatched the view/interaction."
+    embeds: Sequence[MoogleEmbed | ItemEmbed] | None
+    "The Embeds associated with the view, if applicable."
+    dispatched_by: Optional[BaseView | discord.ui.Button[BaseView]]
+    "Who dispatched the View..."
+    timeout: NotRequired[float | None]
+    "Default View timeout parameter."
+
+
+class ViewParamsPartial(TypedDict):
+    """Similar to :class:`ViewParams`, but only `cog`, `xivuser` and `owner` are required.
+
+    Params
+    ------
+    cog: :class:`FFXIV`
+        The Cog that dispatched the view.
+    xivuser: :class:`XIVUser`
+        The XIV User object associated to the `owner` of the :class:`View`.
+    owner: :class:`discord.Member | discord.User`
+        The Member or User who dispatched the view/interaction.
+    recent_interaction: :class:`NotRequired[discord.Message]`
+        The most recent :class:`discord.Interaction` that sent content..
+    components: :class:`NotRequired[list[discord.ui.Item]]`
+        Any Items to pre-append to the View and display.
+    embeds: :class:`NotRequired[Sequence[MoogleEmbed | ItemEmbed] | None]`
+        The Embeds associated with the view, if applicable.
+    dispatched_by: :class:`NotRequired[Optional[BaseView | discord.ui.Button[BaseView]]]`
+        The Object that dispatched the View..
+    timeout: :class:`NotRequired[float | None]`
+        Default View timeout parameter.
+
+    """
+
+    cog: FFXIV
+    "The Cog that dispatched the view."
+    xivuser: XIVUser
+    "The XIV User object associated to the `owner` of the :class:`View`."
+    owner: discord.Member | discord.User
+    "The Member or User who dispatched the view/interaction."
+    recent_interaction: NotRequired[Optional[discord.Interaction]]
+    "The most recent :class:`discord.Interaction` that sent content.."
+    components: NotRequired[list[discord.ui.Item]]
+    "Any Items to pre-append to the View and display during `__init__`"
     embeds: NotRequired[Sequence[MoogleEmbed | ItemEmbed] | None]
     "The Embeds associated with the view, if applicable."
     dispatched_by: NotRequired[Optional[BaseView | discord.ui.Button[BaseView]]]
@@ -532,7 +574,6 @@ class UserEmbed(MoogleEmbed):
         self.add_field(name="World or DataCenter:", value=ffxiv_user.datacenter.name)
 
 
-# TODO(@k8thekat): Add moogle Icon for Author and set up footer.
 class ControlPanelEmbed(MoogleEmbed):
     moogle: Moogle
 
@@ -543,7 +584,8 @@ class ControlPanelEmbed(MoogleEmbed):
         if kwargs.get("title") is None:
             kwargs["title"] = "Control Panel"
         super().__init__(cog, **kwargs)
-        self.set_author(name="Moogles Intuition", icon_url="attachment://moogle-icon.png")
+        self.set_author(name="Moogles Intuition", icon_url="attachment://avatar-icon.png")
+        self.set_thumbnail(url="attachment://thumbnail-icon.png")
 
     async def add_metrics(self) -> Self:
         self.add_field(name="Total XIV Users:", value=await self.cog.count_users())
@@ -556,6 +598,15 @@ class ControlPanelEmbed(MoogleEmbed):
         }
         self.add_field(name="Metrics:", value="\n- ".join([f"{key}: {value}" for key, value in metrics.items()]), inline=False)
         return self
+
+    @property
+    def thumbnail_icon(self) -> discord.File:
+        return FFXIVResources.get_moogle_icon(filename="thumbnail-icon.png")
+
+    @property
+    def avatar_icon(self) -> discord.File:
+        return FFXIVResources.get_moogle_icon(filename="avatar-icon.png")
+
 
 class ItemEmbed(MoogleEmbed):
     """FFXIV Item information."""
@@ -645,13 +696,30 @@ class ItemEmbed(MoogleEmbed):
     def footer_icon(self) -> discord.File:
         return FFXIVResources.get_moogle_icon(filename="footer-icon.png")
 
+    @property
+    def mapped_links(self) -> dict[str, str]:
+
+        _mapped_links: dict[str, str] = {
+            "garlandtools": f"[GarlandTools]({self.item.garland_tools_url})",
+            "xivwiki": f"[FFXIV Wiki]({self.item.ffxivconsolegames_wiki_url})",
+        }
+
+        if self.item.fishing is not None:
+            _mapped_links["angler"] = f"[FF14 Angler]({self.item.fishing.angler_url})"
+
+        if self.item.recipe is not None:
+            _mapped_links["teamcraft"] = f"[Create Teamcaft]({self.cog.moogle.teamcraft_list([self.item])})"
+
+        if not self.item.is_untradable or self.item.item_ui_category != ItemUICategory.other:
+            _mapped_links["universalis"] = f"[Universalis]({self.item.universalis_url})"
+
+        return _mapped_links
+
     def add_links(self, value: Optional[str] = None, *, index: int = 25, inline: bool = False) -> Self:
         """Adds useful links to the bottom of the Embed.
 
-        ..note::
-            When `value` is None it is replaced with the below `str`.
-            - `[GarlandTools]({self.item.garland_tools_url}) |
-            [FFXIV Wiki]({self.item.ffxivconsolegames_wiki_url}) | [Universalis]({self.item.universalis_url})`
+        .. note::
+            When `value` is None, `value` will be replaced with :class:`Self.mapped_links`.
 
         Parameters
         ----------
@@ -664,16 +732,20 @@ class ItemEmbed(MoogleEmbed):
 
         """
         self.add_blank_field(index=index - 1, inline=False)
+        fields = ""
         if value is None:
+            for value in self.mapped_links.values():
+                fields += value + " | "
             self.insert_field_at(
                 index=index,
                 name="Links:",
-                value=(
-                    f"[GarlandTools]({self.item.garland_tools_url}) | "
-                    f"[FFXIV Wiki]({self.item.ffxivconsolegames_wiki_url}) | "
-                    f"[Universalis]({self.item.universalis_url}) | "
-                    f"[Create Teamcaft]({self.cog.moogle.teamcraft_list([self.item])})"
-                ),
+                # value=(
+                #     f"[GarlandTools]({self.item.garland_tools_url}) | "
+                #     f"[FFXIV Wiki]({self.item.ffxivconsolegames_wiki_url}) | "
+                #     f"[Universalis]({self.item.universalis_url}) | "
+                #     f"[Create Teamcaft]({self.cog.moogle.teamcraft_list([self.item])})"
+                # ),
+                value=fields,
                 inline=inline,
             )
         else:
@@ -708,7 +780,7 @@ class ItemEmbed(MoogleEmbed):
 
         return self
 
-    def add_shop_info(self, shops: list[Vendor], limit: int = 3, *, name: Literal["Vendors", "Tradeshops"], inline: bool = False) -> Self:
+    def add_shop_info(self, shops: list[Vendor], limit: int = 4, *, name: Literal["Vendors", "Tradeshops"], inline: bool = False) -> Self:
         """Add :class:`Vendor` information fields to the embed.
 
         .. note::
@@ -733,7 +805,7 @@ class ItemEmbed(MoogleEmbed):
         """
         data: list[str] = []
         last_currency: Optional[Item] = None
-        limit = 3
+        # limit = 3
         for idx, cur_shop in enumerate(iterable=shops, start=1):
             if idx > limit:
                 break
@@ -811,12 +883,11 @@ class FishingEmbed(ItemEmbed):
         if kwargs.get("title") is None:
             kwargs["title"] = f"**{item.name}** [{item.id}]"
 
-        super().__init__(item=self.item, cog=cog, add_links=True, **kwargs)
+        super().__init__(item=self.item, add_links=False, cog=cog, **kwargs)
         # Using patch
         self.set_author(name="Moogles Intuition: Fishing Information", icon_url="attachment://avatar-icon.png")
         self.set_thumbnail(url="attachment://thumbnail-icon.png")
 
-        self.add_blank_field(inline=False)
         if item.fishing is None or (item.fishing.angler_data is None and angler_data is None):
             self.add_field(name="Error:", value=f"{RESOURCES.emojis.error_icon}  No Fishing data found...", inline=False)
             return
@@ -839,27 +910,58 @@ class FishingEmbed(ItemEmbed):
             if item.fishing.ocean_stars > 0:
                 stars = f"{item.fishing.ocean_stars} \U00002b50"
             # f"Location: {place_name} | {fishing_spot.x},{fishing_spot.z}",
-            data = [
-                f"- Category: `Lv.{fishing_spot.gathering_level}` **{fishing_spot.fishing_spot_category.name}** {stars}",
-                f"- Rare: {fishing_spot.rare}",
-                f"- Hidden: {item.fishing.is_hidden}",
-            ]
-            general_fields.extend(data)
+
+            general_fields.append(f"- `Lv.{fishing_spot.gathering_level}` **{fishing_spot.fishing_spot_category.name.title()}** {stars}")
+            if fishing_spot.rare is True:
+                general_fields.append(f"- Rare: {fishing_spot.rare}")
+            if item.fishing.is_hidden is True:
+                general_fields.append(f"- Hidden: {item.fishing.is_hidden}")
             self.add_field(name="__Info__:", value="\n ".join(general_fields), inline=False)
 
+
+        # FF14 Angler Data parsing.
         best_bait: AnglerBaits | None = angler_data.best_bait()
         if best_bait is None:
             best_bait = next(iter(angler_data.baits.values()))
-        restrictions = "N/A" if len(angler_data.restrictions) < 1 else ",".join(angler_data.restrictions)
-        data = [
-            f"- Restrictions: {restrictions}",
-            f"Avg. Hook Time: **~{angler_data.hook_time}**",
-            f"Double Hook: **{angler_data.double_fish}x**",
-            f"Best Bait: **{best_bait.bait_name.title()}** [{best_bait.hook_percent * 100}%]",
-        ]
-        self.add_field(name=f"{angler_data.location_name}", value="\n- ".join(data), inline=False)
 
+        data = []
+        if len(angler_data.restrictions) > 1:
+            data.append(f"- Restrictions: {','.join(angler_data.restrictions)}")
+
+        data.extend([
+            f"{RESOURCES.emojis.hook} **~{angler_data.hook_time}** | {self.hook_converter(angler_data.double_fish)} ",
+            f"Best Bait: **{best_bait.bait_name.title()}** [{best_bait.hook_percent * 100}%]",
+        ])
+        # Attempt to add X,Z cordinates of the Fishing spot.
+        if (
+            item.fishing.fishing_spot is not None
+            and isinstance(item.fishing.fishing_spot.place_name, PlaceName)
+            and angler_data.sub_area_name is not None
+        ):
+            # print(item.fishing.fishing_spot._raw)
+            # print(item.fishing.angler_data)
+            # TODO(@k8thekat): Finish adding location Parent name zone and links
+
+            if item.fishing.fishing_spot.place_name.name.lower() == angler_data.sub_area_name.lower():
+                if angler_data.area_name is not None:
+                    location = f"{angler_data.area_name}: {angler_data.sub_area_name} | [{item.fishing.fishing_spot.x}, {item.fishing.fishing_spot.z}]"
+                else:
+                    location = f"{angler_data.sub_area_name} | [{item.fishing.fishing_spot.x}, {item.fishing.fishing_spot.z}]"
+                data.insert(0, f"- **{location}**")
+
+            else:
+                data.insert(0, f"- {angler_data.sub_area_name}")
+
+        self.add_field(name="__Locations__:", value="\n".join(data), inline=False)
         self.add_blank_field(inline=False)
+        self.add_links()
+
+    def hook_converter(self, value: int) -> str:
+        if value == 2:
+            return RESOURCES.emojis.double_hook
+        if value == 3:
+            return RESOURCES.emojis.triple_hook
+        return RESOURCES.emojis.hook
 
 
 class UniversalisEmbed(ItemEmbed):
@@ -1249,6 +1351,8 @@ class CurrencyEmbed(ItemEmbed):
 class BaseView(discord.ui.View):
     """Our "Base" :class:`discord.ui.View`.
 
+    Already has a "Reset", "Previous" and "Next" buttons built in.
+
     .. warning::
         Overwrite `reset_view()` function if you want to implement different functionality;
         otherwise the view will clear all items and re-add any :class:`discord.ui.Item` in the `.components` attribute.
@@ -1456,6 +1560,7 @@ class BaseView(discord.ui.View):
                 owner=self.owner,
                 cog=self.cog,
                 embeds=self.dispatched_by.embeds,
+                dispatched_by=self,
             )
 
         if view.embeds is not None:
@@ -1601,12 +1706,12 @@ class BaseView(discord.ui.View):
                 )
                 return
         # else:
-            # LOGGER.warning(
-            #     "<%s.%s> | Unable to delete View on timeout, no recent interaction. | Obj: %s",
-            #     __class__.__name__,
-            #     "on_timeout",
-            #     self.recent_interaction,
-            # )
+        # LOGGER.warning(
+        #     "<%s.%s> | Unable to delete View on timeout, no recent interaction. | Obj: %s",
+        #     __class__.__name__,
+        #     "on_timeout",
+        #     self.recent_interaction,
+        # )
         return
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: uiItem[Any]) -> None:
@@ -1622,7 +1727,19 @@ class BaseView(discord.ui.View):
 
 
 class ItemView(BaseView):
-    """Item specific view.
+    """Our custom View for Items.
+
+    Typically this is dispatched first for "most" items in the game unless otherwise needed.
+    - Contains 4 buttons for Universalis(Marketboard), Crafting, Gathering, and Fishing(FF14 Angler)
+
+    .. note::
+        Supply the `embeds` parameter of this view with your :class:`discord.Embeds`  you plan to display to handle the Pagination, otherwise
+
+
+    .. note::
+        Does not overwrite, `on_timeout()` or `on_error()` functionality,
+        this is handled by :class:`BaseView` and should be overwritten to handle any Component states.
+
 
     Attributes
     ----------
@@ -1779,7 +1896,10 @@ class ItemView(BaseView):
 
     @discord.ui.button(label="Fishing", style=discord.ButtonStyle.primary, emoji=RESOURCES.emojis.fishing_log_icon, disabled=False, row=0)
     async def fishing_callback(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:  # noqa: ARG002
-        LOGGER.debug("<%s.%s>", __class__.__name__, "fishing_callback")
+        LOGGER.info("<%s.%s>", __class__.__name__, "fishing_callback")
+
+        await interaction.response.defer()
+
         if self.item.fishing is not None:
             await self.item.fishing.get_angler_data()
 
@@ -1796,14 +1916,14 @@ class ItemView(BaseView):
             timeout=self._timeout,
         )
         self.recent_interaction = interaction
-        await interaction.response.edit_message(view=view, embed=embed, attachments=embed.attachments)
+        await interaction.edit_original_response(view=view, embed=embed, attachments=embed.attachments)
         return
 
 
 class UserView(BaseView):
     def __init__(
         self,
-        **kwargs: Unpack[ViewParams],
+        **kwargs: Unpack[ViewParamsPartial],
     ) -> None:
         super().__init__(**kwargs)
 
@@ -2116,19 +2236,21 @@ class RecipeView(ItemView):
         for entry in self.components:
             self.remove_item(entry)
 
+        # This is to satisfy the linter; we are checking this attribute prior to creating this view.
         if item.recipe is None:
             return
-
-        options = [
-            discord.SelectOption(label=entry.craft_type.name, value=entry.craft_type.to_abbr())
-            for entry in item.recipe
-            if entry.craft_type is not None
-        ]
-        self.job_select = JobSelect(view=self, options=options, row=4)
 
         # If we only have ONE job recipe; no need to offer changing Jobs.
         if len(item.recipe) <= 1:
             self.change_job_callback.disabled = True
+
+        else:
+            options = [
+                discord.SelectOption(label=entry.craft_type.name, value=entry.craft_type.to_abbr())
+                for entry in item.recipe
+                if entry.craft_type is not None
+            ]
+            self.job_select = JobSelect(view=self, options=options, row=4)
 
         self.components.extend([self.change_job_callback, self.crafting_cost_callback])
 
@@ -2148,8 +2270,24 @@ class RecipeView(ItemView):
         if self.item is None or self.embeds is None:
             self.reset_view()
             return
-        # TODO(@k8thekat): Error: list index out of range
-        embed = self.embeds[self.indx]
+
+        try:
+            embed = self.embeds[self.indx]
+        except IndexError:
+            # I don't care about the exception as it's a built in. I triggered an IndexError here prior and this is purely for catching it.
+            # (assuming it happens again)
+            LOGGER.error(  # noqa: TRY400
+                "<%s.%s> | Index error accessing View Embeds. | Indx: %s | Embeds: %s/%s",
+                __class__.__name__,
+                "crafting_cost_callback",
+                self.indx,
+                len(self.embeds),
+                self.embeds,
+            )
+            self.reset_view()
+            await interaction.edit_original_response(view=self)
+            return
+
         if isinstance(embed, RecipeEmbed):
             embed = await embed.add_crafting_cost(world_or_dc=self.xivuser.datacenter)
             await interaction.edit_original_response(view=self, embed=embed, attachments=embed.attachments)
@@ -2223,23 +2361,26 @@ class FishingView(ItemView):
         **kwargs: Unpack[ViewParams],
     ) -> None:
         self.item = item
+
         super().__init__(item, **kwargs)
 
-        # if isinstance(item.garlandtools_data, dict):
-        #     self.patch_icon: discord.File = FFXIVResources.get_patch_icon(patch_id=item.garlandtools_data.get("item").get("patch"))
-        # else:
-        #     self.patch_icon = FFXIVResources.get_patch_icon(patch_id=1)
+        # Removes our `ItemView` components we added so we display only what we need.
+        for entry in self.components:
+            self.remove_item(entry)
 
         if item.fishing is not None and item.fishing.angler_data is not None:
             locations: list[discord.SelectOption] = [
-                discord.SelectOption(label=str(entry.location_name), value=str(entry.location_name)) for entry in item.fishing.angler_data
+                discord.SelectOption(label=str(entry.sub_area_name), value=str(entry.sub_area_name))
+                for entry in item.fishing.angler_data
+                if entry.sub_area_name is not None
             ]
             self.loc_select = FishingSpotSelect(view=self, options=locations, row=4)
 
             if len(item.fishing.angler_data) > 1:
+                # self.remove_item(self.spots_callback)
                 self.spots_callback.disabled = False
 
-        self.components = [self.goback_callback, self.spots_callback]
+        self.components.extend([self.spots_callback])
 
     @discord.ui.button(label="Fishing Spots", style=discord.ButtonStyle.green, disabled=True)
     async def spots_callback(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:  # noqa: ARG002
@@ -2250,28 +2391,6 @@ class FishingView(ItemView):
         else:
             self.reset_view()
             await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="Reset", style=discord.ButtonStyle.danger, disabled=True, row=1)
-    async def undo_callback(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:
-        LOGGER.debug("<%s.%s>", __class__.__name__, "reset_callback")
-        item.disabled = True
-        self.reset_view()
-        embed = FishingEmbed(cog=self.cog, item=self.item)
-        await interaction.response.edit_message(view=self, embed=embed)
-
-    @discord.ui.button(label="Go Back", style=discord.ButtonStyle.gray, disabled=False)
-    async def goback_callback(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:  # noqa: ARG002
-        LOGGER.debug("<%s.%s>", __class__.__name__, "goback_callback")
-
-        # Handles getting the item Icon URL from garland tools.
-        await self.item.get_icon()
-        embed = ItemEmbed(cog=self.cog, item=self.item, color=interaction.user.color)
-
-        if isinstance(self.dispatched_by, BaseView):
-            LOGGER.debug("Dispatched by View")
-
-            await interaction.response.edit_message(view=self.dispatched_by, embed=embed, attachments=embed.attachments)
-            return
 
     def reset_view(self) -> None:
         if self.item.fishing is not None and self.item.fishing.angler_data is not None and len(self.item.fishing.angler_data) > 1:
@@ -2284,7 +2403,6 @@ class ControlPanelView(BaseView):
         self.remove_item(item=self.previous_callback)
         self.remove_item(item=self.next_callback)
         self.remove_item(item=self.reset_callback)
-
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.owner:
@@ -2304,16 +2422,15 @@ class ControlPanelView(BaseView):
         await interaction.followup.send(content="Rebuilding Moogle's Intuition data, this may take a while...")
 
         old_item_count = len(self.cog.moogle._items)  # noqa: SLF001
-        self.cog.moogle = await Moogle().build(rebuild_data=True)
+        self.cog.moogle = await Moogle().build(relocate_data=True)
         self.cog.item_choices = self.cog.build_item_choices()
         msg = (
-            f"@{interaction.user} | We finished rebuilding XIV data in **{int(time.time() - stime)}** seconds. \n > "
-            f"- We have {len(self.cog.moogle._items) - old_item_count} new Items!."  # noqa: SLF001
+            f"{interaction.user.mention}\nWe finished rebuilding XIV data in **{int(time.time() - stime)}** seconds. \n > "
+            f"- We have **{len(self.cog.moogle._items) - old_item_count}** new Items!."  # noqa: SLF001
         )
         await interaction.edit_original_response(
             content=msg,
         )
-
 
     @discord.ui.button(label="Rebuild Item Choice", style=discord.ButtonStyle.red, emoji=RESOURCES.emojis.chest2, disabled=False)
     async def rebuild_item_choices(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:
@@ -2323,8 +2440,12 @@ class ControlPanelView(BaseView):
         self.cog.item_choices = self.cog.build_item_choices()
         await interaction.followup.send(content="Reset Moogle's Intuition Item Choices for application commands.", ephemeral=True)
 
-
-    @discord.ui.button(label="Clear Item Cache", style=discord.ButtonStyle.blurple, emoji=RESOURCES.emojis.bag_with_exclamation, disabled=False)
+    @discord.ui.button(
+        label="Clear Item Cache",
+        style=discord.ButtonStyle.blurple,
+        emoji=RESOURCES.emojis.bag_with_exclamation,
+        disabled=False,
+    )
     async def clear_cache(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:
         item.disabled = True
         self.cog.moogle._items_cache = {}  # noqa: SLF001
@@ -2492,7 +2613,6 @@ class FFXIV(Cog):
         if self.item_choices is None:
             self.item_choices = self.build_item_choices()
 
-
     # async def cog_unload(self) -> None:
     #     await self.moogle.clean_up()
 
@@ -2579,13 +2699,18 @@ class FFXIV(Cog):
             Etheir an :class:`discord.Emoji` object or a Discord inline emoji string when inline is
 
         """
+        # 'glamour_prism_(woodworking)
         if isinstance(emoji, str):
             emoji = emoji.replace(" ", "_")
+            # this should handle some other oddities.
+            # "steel_amalj'ok"
+            emoji = emoji.replace("'", "")
         LOGGER.debug("<%s.%s> | Attempting to resolve Currency. | Args %s", __class__.__name__, "resolve_currency", (emoji, inline))
         for entry in self.bot.app_emojis:
-            if (entry.name.lower() == str(emoji) or str(emoji) in entry.name.lower()) or entry.id == emoji:
+            if (entry.name.lower() == str(emoji).lower() or str(emoji).lower() in entry.name.lower()) or entry.id == emoji:
                 LOGGER.debug("Results: %s", entry)
                 return entry if inline is False else f"<:{entry.name}:{entry.id}>"
+        LOGGER.warning("<%s.%s> | Failed to resolve Currency. | Args %s", __class__.__name__, "resolve_currency", (emoji, inline))
         return RESOURCES.emojis.error_icon if inline is False else f"{RESOURCES.emojis.error_icon}"
 
     async def count_users(self) -> int:
@@ -2664,9 +2789,8 @@ class FFXIV(Cog):
         await embed.add_metrics()
         user: XIVUser = await self.get_ffxiv_user(ctx=context)
         view = ControlPanelView(cog=self, xivuser=user, owner=context.author, embeds=[embed], recent_interaction=None, dispatched_by=None)
-        await context.send(embed=embed, view=view, delete_after=self.message_timeout, ephemeral=True)
+        await context.send(embed=embed, files=embed.attachments, view=view, delete_after=self.message_timeout, ephemeral=True)
 
-    # TODO: - Verify DB data handling, User creation and moogle session handling.
     @commands.before_invoke(get_ffxiv_user)
     @commands.is_owner()
     @commands.guild_only()
@@ -2712,8 +2836,7 @@ class FFXIV(Cog):
         if timeout == 0:
             timeout = None
 
-
-        view = ItemView(item=item, cog=self, owner=interaction.author, xivuser=user, embeds=[embed], timeout=timeout)
+        view = ItemView(item=item, cog=self, owner=interaction.author, xivuser=user, embeds=[embed], timeout=timeout, dispatched_by=None)
         embed.set_footer(text=f"{view.indx + 1} out of 1 | Moogles Intuition")
         await interaction.send(content="Results:", embed=embed, view=view, files=embed.attachments, delete_after=self.message_timeout)
         return
@@ -2758,6 +2881,7 @@ class FFXIV(Cog):
             embeds=[embed],
             timeout=timeout,
             recent_interaction=interaction,
+            dispatched_by=None,
         )
         embed.set_footer(text=f"{view.indx + 1} out of 1 | Moogles Intuition")
         await interaction.edit_original_response(
@@ -2873,7 +2997,7 @@ class FFXIV(Cog):
             )
             embeds.append(embed)
 
-        view = UniversalisView(item=item, cog=self, xivuser=user, owner=interaction.user, embeds=embeds)
+        view = UniversalisView(item=item, cog=self, xivuser=user, owner=interaction.user, embeds=embeds, dispatched_by=None)
 
         await interaction.edit_original_response(
             content="Results:",
@@ -2933,7 +3057,7 @@ class FFXIV(Cog):
         user: XIVUser = await self.get_ffxiv_user(ctx=interaction)
         embed: ItemEmbed = embeds[0]
         embed.set_footer(text=f"1 out of {len(embeds)} | Moogles Intuition")
-        view = CurrencyView(embeds=embeds, cog=self, xivuser=user, owner=interaction.user, timeout=0)
+        view = CurrencyView(embeds=embeds, cog=self, xivuser=user, owner=interaction.user, timeout=0, dispatched_by=None)
         await interaction.edit_original_response(
             content="Results: ",
             embed=embed,
@@ -2957,11 +3081,6 @@ class FFXIV(Cog):
             owner=interaction.user,
         )
         await interaction.edit_original_response(embed=embed, view=view)
-
-    # TODO - Base UI/command to have buttons to use Moogle functionality.
-    @app_commands.command(name="moogle", description="Brings up the Interaction panel for Moogle.")
-    async def moogle_func(self, interaction: discord.Interaction) -> None:
-        pass
 
 
 async def setup(bot: Kuma_Kuma) -> None:  # noqa: D103
