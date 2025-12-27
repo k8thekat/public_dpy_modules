@@ -30,7 +30,8 @@ import platform
 import re
 import unicodedata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Optional, TypedDict, Union
+from re import Match
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Self, TypedDict, Union
 
 import aiofiles
 import discord
@@ -51,6 +52,8 @@ if TYPE_CHECKING:
     from utils import KumaContext as Context
     from utils._types import GitHubIssueSubmissionResponse
 
+
+ErrorAliases = (discord.errors.HTTPException, discord.errors.NotFound, TypeError, ValueError, discord.errors.DiscordException)
 BOT_NAME = "Kuma Kuma"
 LOGGER = logging.getLogger()
 
@@ -79,7 +82,7 @@ def get_latest_commits(url: str, repo: Repo, branch: str, max_count: int = 5) ->
     # url = "https://github.com/k8thekat/Kuma_Kuma"
     # repo: Repo = Repo(Path(__file__).parent.as_posix())
     # TODO figure out which commits this is grabbing and which direction as they don't like up.
-    commits  = repo.iter_commits(branch, max_count=max_count)
+    commits = repo.iter_commits(branch, max_count=max_count)
     for i in commits:
         assert i.author.name
         commit_link = f"[{i.hexsha[:4]}]({url + f'/commit/{i.hexsha}'})"
@@ -117,58 +120,68 @@ async def count_others(path: str, filetype: str = ".py", file_contains: str = "d
     return line_count
 
 
-class ToFileButton(discord.ui.Button):
-    def __init__(self, *, style: discord.ButtonStyle = discord.ButtonStyle.blurple, label: str = "To File") -> None:
-        self.view: YoinkView
-        super().__init__(style=style, label=label)
+class YoinkGuildSelect(discord.ui.Select["YoinkView"]):
+    def __init__(
+        self,
+        *,
+        emoji: Optional[discord.PartialEmoji] = None,
+        sticker: Optional[Union[discord.Sticker, discord.StandardSticker, discord.GuildSticker]] = None,
+        content: Literal["emoji", "sticker"],
+        placeholder: str,
+        options: list[discord.SelectOption],
+    ) -> None:
+        super().__init__(placeholder=placeholder, options=options)
+        self.content = content
+        self.emoji = emoji
+        self.sticker = sticker
 
-    async def callback(self, interaction: discord.Interaction) -> Any:
-        # check if the original message has any stickers.
-        if len(self.view.sticker_msg.stickers) == 0:
-            return await interaction.response.send_message(content="Message does not contain any stickers", ephemeral=True)
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if len(self.values) > 0 and self.view is not None:
+            to_guild = self.view.cog.bot.get_guild(int(self.values[0]))
+            if to_guild is None:
+                await interaction.response.send_message(content="Failed to find the guild", ephemeral=True)
+                return
+            if self.content == "sticker" and self.sticker is not None:
+                try:
+                    s_emoji: str = "" if not isinstance(self.sticker, discord.GuildSticker) else self.sticker.emoji
+                    sticker = await to_guild.create_sticker(
+                        name=self.sticker.name,
+                        description=self.sticker.description,
+                        emoji=s_emoji,
+                        file=await self.sticker.to_file(),
+                        reason="Yoinked",
+                    )
+                    await interaction.response.send_message(content=f"Successfully copied the sticker. -> {sticker}", ephemeral=True)
+                except ErrorAliases as e:
+                    LOGGER.exception(
+                        "<%s.%s> | Exception occurred when trying to create a sticker.",
+                        __class__.__name__,
+                        "copy_sticker",
+                        exc_info=e,
+                    )
+                    self.view.remove_item(self)
+                    await interaction.response.send_message(
+                        content=f"We encountered an creating a sticker. Error: \n{e}", ephemeral=True,
+                    )
+                    return
 
-        # We need the full sticker object if possible (specifically a discord.GuildSticker)
-        sticker: Union[discord.Sticker, discord.StandardSticker, discord.GuildSticker] = await self.view.sticker_msg.stickers[0].fetch()
-        return await interaction.response.send_message(
-            content="Here is the sticker as a file.",
-            file=await sticker.to_file(),
-            ephemeral=True,
-        )
-
-
-class CopyStickerButton(discord.ui.Button):
-    view: YoinkView
-
-    def __init__(self, *, style: discord.ButtonStyle = discord.ButtonStyle.green, label: str = "Copy Sticker") -> None:
-        super().__init__(style=style, label=label)
-
-    async def callback(self, interaction: discord.Interaction) -> Union[discord.InteractionCallbackResponse, None]:
-        # TODO: Add support for Emojis here
-        # check if the original message has any stickers.
-        if len(self.view.sticker_msg.stickers) == 0:
-            return await interaction.response.send_message(content="Message does not contain any stickers", ephemeral=True)
-
-        # We need the full sticker object if possible (specifically a discord.GuildSticker)
-        sticker: Union[discord.Sticker, discord.StandardSticker, discord.GuildSticker] = await self.view.sticker_msg.stickers[0].fetch()
-        s_emoji: str = "" if not isinstance(sticker, discord.GuildSticker) else sticker.emoji
-
-        to_guild: Union[discord.Guild, None] = self.view.bot.get_guild(int(self.view.guild.values[0]))
-
-        if to_guild is None:  # the view is limited to one selection so no need to check the rest.
-            return await interaction.response.send_message(content="Failed to find the guild", ephemeral=True)
-        if to_guild.me.guild_permissions.manage_emojis_and_stickers:
-            try:
-                await to_guild.create_sticker(
-                    name=sticker.name,
-                    description=sticker.description,
-                    emoji=s_emoji,
-                    file=await sticker.to_file(),
-                    reason="Yoinked",
-                )
-            except discord.errors.HTTPException as e:
-                LOGGER.exception(msg="Exception occurred in the CopySticker.callback():\n%s", exc_info=e)
-                return await interaction.response.send_message(content="We encountered an error processing your command.", ephemeral=True)
-        return await super().callback(interaction=interaction)
+            elif self.content == "emoji" and self.emoji is not None:
+                try:
+                    emoji = await to_guild.create_custom_emoji(name=self.emoji.name, image=await self.emoji.read(), reason="Yoinked")
+                    await interaction.response.send_message(content=f"Successfully copied the emoji. -> {emoji}", ephemeral=True)
+                except ErrorAliases as e:
+                    LOGGER.exception(
+                        "<%s.%s> | Exception occurred when trying to create an emoji.",
+                        __class__.__name__,
+                        "copy_emoji",
+                        exc_info=e,
+                    )
+                    self.view.remove_item(self)
+                    await interaction.response.send_message(
+                        content="We encountered an creating the emoji. Error: \n{e}", ephemeral=True,
+                    )
+                    return
+        return
 
 
 class YoinkView(discord.ui.View):
@@ -176,21 +189,76 @@ class YoinkView(discord.ui.View):
         self,
         *,
         timeout: Union[float, None] = 180,
-        bot: Kuma_Kuma,
-        sticker_msg: discord.Message,
+        cog: Utility,
+        message: discord.Message,
     ) -> None:
         super().__init__(timeout=timeout)
-        self.bot: Kuma_Kuma = bot
-        self.sticker_msg: discord.Message = sticker_msg
-        self.sticker = CopyStickerButton()
-        options: list[discord.SelectOption] = [
-            discord.SelectOption(label=entry.name, value=str(object=entry.id)) for entry in self.bot.guilds
-        ]
+        self.cog: Utility = cog
+        self.message: discord.Message = message
 
-        self.guild: discord.ui.Select = discord.ui.Select(placeholder="Which Guild...?", options=options)
-        self.add_item(item=self.guild)  # our guild select.
-        self.add_item(item=self.sticker)
-        self.add_item(item=ToFileButton())
+        self.options: list[discord.SelectOption] = []
+        for guild in self.cog.bot.guilds:
+            if guild.me.guild_permissions.manage_emojis_and_stickers:
+                self.options.append(discord.SelectOption(label=guild.name, value=str(object=guild.id)))
+                continue
+
+        if len(message.stickers) == 0:
+            self.remove_item(item=self.copy_sticker)
+            self.remove_item(item=self.sticker_to_file)
+
+        self.emoji: Optional[discord.PartialEmoji] = None
+        res: Match[str] | None = re.search("(<:.*?:.*?>)", self.message.content)
+        if isinstance(res, Match):
+            self.emoji = discord.PartialEmoji.from_str(res.group(0))
+            # Being lazy here, don't want to use `_with_state` and parse the string myself.
+            self.emoji._state = self.cog.bot._connection  # noqa: SLF001
+        else:
+            self.remove_item(item=self.copy_emoji)
+            self.remove_item(item=self.emoji_to_file)
+
+    @discord.ui.button(label="Copy Sticker", style=discord.ButtonStyle.green, disabled=False)
+    async def copy_sticker(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:
+        await interaction.response.defer()
+        item.disabled = True
+
+        # We need the full sticker object if possible (specifically a discord.GuildSticker)
+        sticker: Union[discord.Sticker, discord.StandardSticker, discord.GuildSticker] = await self.message.stickers[0].fetch()
+        self.add_item(item=YoinkGuildSelect(sticker=sticker, placeholder="Which Guild...?", options=self.options, content="sticker"))
+        await interaction.edit_original_response(view=self)
+        return
+
+    @discord.ui.button(label="Copy Emoji", style=discord.ButtonStyle.green, disabled=False)
+    async def copy_emoji(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:
+        await interaction.response.defer()
+        item.disabled = True
+
+        self.add_item(item=YoinkGuildSelect(emoji=self.emoji, placeholder="Which Guild...?", options=self.options, content="emoji"))
+        await interaction.edit_original_response(view=self)
+        return
+
+    @discord.ui.button(label="Sticker To File", style=discord.ButtonStyle.blurple)
+    async def sticker_to_file(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:  # noqa: ARG002
+        # We need the full sticker object if possible (specifically a discord.GuildSticker)
+        sticker: Union[discord.Sticker, discord.StandardSticker, discord.GuildSticker] = await self.message.stickers[0].fetch()
+        await interaction.response.send_message(
+            content="Here is the sticker as a file.",
+            file=await sticker.to_file(),
+            ephemeral=True,
+        )
+        return
+
+    @discord.ui.button(label="Emoji To File", style=discord.ButtonStyle.blurple)
+    async def emoji_to_file(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:  # noqa: ARG002
+        # We need the full sticker object if possible (specifically a discord.GuildSticker)
+        if self.emoji is None:
+            return
+
+        await interaction.response.send_message(
+            content="Here is the Emoji as a file.",
+            file=await self.emoji.to_file(),
+            ephemeral=True,
+        )
+        return
 
 
 class GithubIssueSubmissionModal(discord.ui.Modal):
@@ -334,9 +402,9 @@ class GithubIssueSubmissionEmbed(discord.Embed):
         self,
         gh_response: GitHubIssueSubmissionResponse,
         user: Union[discord.Member, discord.User],
-        colour: discord.Color = discord.Color.og_blurple(),
+        colour: discord.Color = discord.Color.og_blurple(),  # noqa: B008
         title: str = "__GitHub Issue Submission__",
-        timestamp: datetime = discord.utils.utcnow(),
+        timestamp: datetime = discord.utils.utcnow(),  # noqa: B008
     ) -> None:
         self.gh_response = gh_response
         self.user = user
@@ -392,7 +460,7 @@ class Utility(Cog):
 
     def __init__(self, bot: Kuma_Kuma) -> None:
         super().__init__(bot=bot)
-        self.yoink_menu = app_commands.ContextMenu(name="Sticker Yoink", callback=self.yoink)
+        self.yoink_menu = app_commands.ContextMenu(name="Yoink!", callback=self.yoink)
         self.gh_issue = app_commands.ContextMenu(name="Create GH issue", callback=self.create_github_issue)
         self.bot.tree.add_command(self.yoink_menu)
         self.bot.tree.add_command(self.gh_issue)
@@ -505,7 +573,11 @@ class Utility(Cog):
     @commands.command(name="ping")
     async def ping(self, context: Context) -> discord.Message:
         """Pong..."""
-        return await context.send(content=f"Pong `{round(number=self.bot.latency * 1000)}ms`", ephemeral=True, delete_after=self.message_timeout)
+        return await context.send(
+            content=f"Pong `{round(number=self.bot.latency * 1000)}ms`",
+            ephemeral=True,
+            delete_after=self.message_timeout,
+        )
 
     @commands.command(name="get_webhooks", help="Displays a channels webhooks by `Name` and `ID`", aliases=["getwh", "gwh"])
     @commands.guild_only()
@@ -530,8 +602,7 @@ class Utility(Cog):
             if var in key or var in self.lookup[key]["aliases"]:
                 return await context.reply(
                     suppress_embeds=True,
-                    content=f"Is this right *Kuma*? {self.emoji_table.kuma_peak}:\n- "
-                    + "\n- ".join(list(self.lookup[key]["urls"])),
+                    content=f"Is this right *Kuma*? {self.emoji_table.kuma_peak}:\n- " + "\n- ".join(list(self.lookup[key]["urls"])),
                 )
         return await context.reply(
             content=f"I was unable to understand your request.. {self.emoji_table.kuma_head_clench}",
@@ -570,7 +641,7 @@ class Utility(Cog):
             # Handles my seperate repo URLs. (Could store this as part of the cog class?)
             # This requires you do define `repo_url` per script for files in a different parent directory than your bot.py
             if code_class is not None and hasattr(obj._cog, "repo_url"):  # noqa: SLF001
-                source_url = obj._cog.repo_url # pyright: ignore[reportAttributeAccessIssue]
+                source_url = obj._cog.repo_url  # pyright: ignore[reportAttributeAccessIssue]
 
         lines, firstlineno = inspect.getsourcelines(src)
         if not module.startswith("discord"):
@@ -591,7 +662,8 @@ class Utility(Cog):
 
     @app_commands.checks.has_permissions(manage_emojis_and_stickers=True)
     async def yoink(self, interaction: discord.Interaction, message: discord.Message) -> None:
-        await interaction.response.send_message(view=YoinkView(bot=self.bot, sticker_msg=message), delete_after=self.message_timeout)
+        await interaction.response.defer(ephemeral=True)
+        await interaction.edit_original_response(view=YoinkView(cog=self, message=message))
 
     async def create_github_issue(self, interaction: discord.Interaction, message: discord.Message) -> None:
         """Create a github issue via a Discord Message."""
@@ -619,12 +691,11 @@ class Utility(Cog):
             return await context.send(file=log_f)
         return await context.send(content=f"```ps\n{self.bot.loghandler.parse_log()}```", delete_after=self.message_timeout)
 
-
-    @commands.command(name="app-emojis", help="Displays a list of all application emojis.")
-    async def app_emojis(self,context:Context, *, query: Optional[str], codefmt: bool = False)-> None:
+    @commands.command(name="app_emojis", help="Displays a list of all application emojis.")
+    async def app_emojis(self, context: Context, *, query: Optional[str], codefmt: bool = False) -> None:
         """Displays a list of all application emojis."""
         emojis = await self.bot.fetch_application_emojis()
-        self.bot._app_emojis = sorted(emojis, key=lambda x : x.name)  # noqa: SLF001
+        self.bot._app_emojis = sorted(emojis, key=lambda x: x.name)  # noqa: SLF001
 
         content = "__**Application Emojis:**__\n"
         if query is not None:
@@ -643,8 +714,7 @@ class Utility(Cog):
 
                 continue
 
-
-            if indx > len(emojis) -1:
+            if indx > len(emojis) - 1:
                 break
 
             if len(content + temp) > 1950:
@@ -665,6 +735,7 @@ class Utility(Cog):
         """Reloads the application emojis from Discord."""
         self.bot._app_emojis = await self.bot.fetch_application_emojis()  # noqa: SLF001
         return await context.send(content=f"Reloaded application emojis {self.emoji_table.kuma_happy}", delete_after=self.message_timeout)
+
 
 async def setup(bot: Kuma_Kuma) -> None:
     await bot.add_cog(Utility(bot=bot))
