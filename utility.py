@@ -623,28 +623,42 @@ class Utility(Cog):
     @commands.command(name="app-emojis", help="Displays a list of all application emojis.")
     async def app_emojis(self,context:Context, *, query: Optional[str], codefmt: bool = False)-> None:
         """Displays a list of all application emojis."""
-        content = "__**Application Emojis:**__\n"
-
         emojis = await self.bot.fetch_application_emojis()
         self.bot._app_emojis = sorted(emojis, key=lambda x : x.name)  # noqa: SLF001
+
+        content = "__**Application Emojis:**__\n"
+        if query is not None:
+            content = ""
 
         for indx, emoji in enumerate(self.bot._app_emojis):  # noqa: SLF001
             temp = f"- {emoji} | Inline: `<:{emoji.name}:{emoji.id}>`"
             if codefmt:
                 temp = f'`{emoji.name} = "<:{emoji.name}:{emoji.id}>"`'
-            if query is not None and query.lower() in emoji.name.lower():
-                await context.send(content=f"Found matching emoji {self.emoji_table.kuma_happy}:\n{temp}", reference=context.message)
+
+            if query is not None:
+                if query.lower() in emoji.name.lower():
+                    content = f"Found matching emoji {self.emoji_table.kuma_happy}:\n{temp}"
+                    # await context.send(content=f"Found matching emoji {self.emoji_table.kuma_happy}:\n{temp}", reference=context.message)
+                    break
+
+                continue
+
 
             if indx > len(emojis) -1:
                 break
+
             if len(content + temp) > 1950:
                 await context.send(content=content, reference=context.message)
                 content = temp + "\n"
             else:
                 content += temp + "\n"
 
-        if len(content) > 0:
+        # content will always be > 0 if query is None.
+        if len(content):
             await context.send(content=content, reference=context.message)
+        else:
+            await context.send(content=f"Could not find matching emoji {self.emoji_table.kuma_pout}", reference=context.message)
+            return
 
     @commands.command(name="reload_app_emojis", help="Reloads the application emojis from Discord.")
     async def reload_app_emojis(self, context: Context) -> discord.Message:
