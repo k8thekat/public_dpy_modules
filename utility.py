@@ -548,7 +548,7 @@ class Utility(Cog):
         await ctx.reply(embed=embed, files=[banner, thumbnail], delete_after=self.message_timeout)
 
     @commands.command(name="charinfo")
-    async def charinfo(self, context: Context, *, characters: str) -> Union[discord.Message, None]:
+    async def charinfo(self, context: Context, *, characters: str = "") -> Union[discord.Message, None]:
         """Shows you information about a number of characters.
 
         Only up to 25 characters at a time.
