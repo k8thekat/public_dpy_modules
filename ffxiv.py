@@ -59,9 +59,11 @@ from async_universalis import (
     ItemQuality,
     World,
 )
+from async_universalis.errors import UniversalisError
 from discord import Color, Colour, app_commands
+from discord.app_commands.errors import CommandInvokeError
 from discord.errors import Forbidden, HTTPException, NotFound
-from discord.ext import commands
+from discord.ext import commands, tasks
 from moogle_intuition import CraftType, Moogle
 from moogle_intuition._types import CurrencySpender
 from moogle_intuition.ext.converters import Converter
@@ -69,6 +71,7 @@ from moogle_intuition.ff14angler import AnglerBaits, AnglerFish
 from moogle_intuition.modules import (
     Currency,
     Expansion,
+    Fishing,
     FishingSpot,
     GatheringNode,
     Item,
@@ -76,8 +79,10 @@ from moogle_intuition.modules import (
     MoogleLookupError,
     PlaceName,
     Recipe,
+    SpearFishing,
 )
 
+from kuma_kuma import KumaCommandTree
 from utils import FFXIVResources, KumaCog as Cog, KumaContext as Context, KumaEmbed as Embed
 from utils._types import Metrics
 
@@ -85,6 +90,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import asqlite
+    from discord.app_commands import AppCommandError
     from discord.ui.item import Item as uiItem
     from moogle_intuition._types import CurMarketBoardParams, CurrencySpender, GatheringNodeData, ShoppingCurrency, ShoppingItem, Vendor
     from moogle_intuition.ff14angler import AnglerBaits, AnglerFish
@@ -615,14 +621,14 @@ class ItemEmbed(MoogleEmbed):
     _links_index: int
 
     def __init__(self, cog: FFXIV, item: Item, *, add_links: bool = True, **kwargs: Unpack[EmbedParams]) -> None:
-        """__init__ _summary_.
+        """Build your ItemEmbed.
 
         Parameters
         ----------
-        cog: :class:`Cog`
-            _description_.
+        cog: :class:`FFXIV`
+            The FFXIV cog class.
         item: :class:`Item`
-            _description_.
+            The FFXIV Item to base the Embed off of.
         add_links: :class:`bool`, optional
             Adds pre-filled links to the bottom of the Embed (just above the footer), by default True.
         **kwargs: :class:`Unpack[EmbedParams]`
@@ -648,6 +654,8 @@ class ItemEmbed(MoogleEmbed):
         self.set_author(name="Moogles Intuition: FFXIV Item lookup", icon_url="attachment://avatar-icon.png")
         self.set_thumbnail(url="attachment://thumbnail-icon.png")
 
+        self.add_field(name=f"Slot: {self.item.item_ui_category.name}", value="\u200b", inline=False)
+
         content: list[str] = []
         if not self.item.is_untradable:
             content.append("**Tradeable**")
@@ -660,6 +668,8 @@ class ItemEmbed(MoogleEmbed):
             # self.add_field(name="Gatherable:", value="\u200b", inline=False)
         if self.item.fishing is not None:
             content.append("**Fishable**")
+        if self.item.spear_fishing is not None:
+            content.append("**Spear Fishable**")
             # self.add_field(name="Fishable:", value="\u200b", inline=False)
 
         if len(content) >= 1:
@@ -682,36 +692,64 @@ class ItemEmbed(MoogleEmbed):
 
     @property
     def thumbnail_icon(self) -> discord.File:
-        if self.item._icon_data is not None:  # noqa: SLF001
-            return discord.File(io.BytesIO(self.item._icon_data.data), filename="thumbnail-icon.png")  # noqa: SLF001
+        """The Embed thumbnail icon from the Item's icon data, if applicable.
+
+        Returns
+        -------
+        :class:`discord.File`
+            A discord File object of the Item icon..
+
+        """
+        if self.item.icon_data is not None:
+            return discord.File(io.BytesIO(self.item.icon_data.data), filename="thumbnail-icon.png")
         return FFXIVResources.get_moogle_icon(filename="thumbnail-icon.png")
 
     @property
     def avatar_icon(self) -> discord.File:
+        """The Embed avatar icon from the Item's patch data, if applicable.
+
+        Returns
+        -------
+        :class:`discord.File`
+            A discord File object of the patch icon.
+
+        """
         if self.item.garlandtools_data is not None:
             return FFXIVResources.get_patch_icon(patch_id=self.item.garlandtools_data.get("item").get("patch"), filename="avatar-icon.png")
         return FFXIVResources.get_patch_icon(patch_id=1, filename="avatar-icon.png")
 
     @property
     def footer_icon(self) -> discord.File:
+        """The Embed Moogle footer icon.
+
+        Returns
+        -------
+        :class:`discord.File`
+            A discord File object of the Moogle footer icon.
+
+        """
         return FFXIVResources.get_moogle_icon(filename="footer-icon.png")
 
     @property
     def mapped_links(self) -> dict[str, str]:
 
         _mapped_links: dict[str, str] = {
-            "garlandtools": f"[GarlandTools]({self.item.garland_tools_url})",
-            "xivwiki": f"[FFXIV Wiki]({self.item.ffxivconsolegames_wiki_url})",
+            "garlandtools": f"{RESOURCES.emojis.garlandtools_icon} [GarlandTools]({self.item.garland_tools_url})",
+            "xivwiki": f"{RESOURCES.emojis.xiv_wiki_icon} [FFXIV Wiki]({self.item.ffxivconsolegames_wiki_url})",
         }
 
         if self.item.fishing is not None:
-            _mapped_links["angler"] = f"[FF14 Angler]({self.item.fishing.angler_url})"
+            _mapped_links["angler"] = f"{RESOURCES.emojis.hook} [FF14 Angler]({self.item.fishing.angler_url})"
 
         if self.item.recipe is not None:
-            _mapped_links["teamcraft"] = f"[Create Teamcaft]({self.cog.moogle.teamcraft_list([self.item])})"
+            _mapped_links["teamcraft"] = (
+                f"{RESOURCES.emojis.teamcraft_icon} [Create Teamcaft]({self.cog.moogle.teamcraft_list([self.item])})"
+            )
 
         if not self.item.is_untradable or self.item.item_ui_category != ItemUICategory.other:
-            _mapped_links["universalis"] = f"[Universalis]({self.item.universalis_url})"
+            _mapped_links["universalis"] = f"{RESOURCES.emojis.universalis_icon} [Universalis]({self.item.universalis_url})"
+
+        _mapped_links["issues"] = f"{RESOURCES.emojis.error_icon} [Issues?](https://github.com/k8thekat/public_dpy_modules/issues)"
 
         return _mapped_links
 
@@ -783,9 +821,6 @@ class ItemEmbed(MoogleEmbed):
     def add_shop_info(self, shops: list[Vendor], limit: int = 4, *, name: Literal["Vendors", "Tradeshops"], inline: bool = False) -> Self:
         """Add :class:`Vendor` information fields to the embed.
 
-        .. note::
-            By default will remove any links field from the embed.
-
         Parameters
         ----------
         shops: :class:`list[Vendor]`
@@ -803,41 +838,60 @@ class ItemEmbed(MoogleEmbed):
             Returns `Self` for fluent coding..
 
         """
-        data: list[str] = []
-        last_currency: Optional[Item] = None
-        # limit = 3
+        # data: list[str] = []
+        res: str = ""
+        used_currencies: list[Item] = []
+
         for idx, cur_shop in enumerate(iterable=shops, start=1):
             if idx > limit:
                 break
-
-            # This should allow some variance to which TradeShops we get.
             currency: Item | None = cur_shop.get("currency", None)
-            if last_currency is None:
-                last_currency = currency
-            elif isinstance(last_currency, Item) and isinstance(currency, Item) and last_currency.id == currency.id:
-                limit += 1
+            if currency is None:
+                currency = self.cog.moogle.get_item("gil", limit_results=1)
+
+            if currency in used_currencies:
                 continue
 
             value = f"[**{cur_shop.get('name')}** | {cur_shop.get('shop_name')}]({cur_shop.get('url', 'N/A')})"
-            if currency is not None:
-                emoji = self.cog.resolve_currency(currency.name.lower(), inline=True)
-                value += f"\n> **{cur_shop.get('price', 0):,d}** [{emoji}]({currency.garland_tools_url})"
-            else:
-                value += f"\n> **{cur_shop.get('price', 0):,d}** {self.resources.emojis.gil}"
-            data.append(value)
+            emoji = self.cog.resolve_currency(currency.name.lower(), inline=True)
+            value += f"\n> **{cur_shop.get('price', 0):,d}** [{emoji}]({currency.garland_tools_url})"
 
-        self.add_field(name=f"{RESOURCES.emojis.vendor_icon} {name}:", value="\n".join(data), inline=inline)
+            limit += 1
+            used_currencies.append(currency)
+            # data.append(value)
+            if (len(res) + len(value)) > 1000:
+                break
+
+            res += f"\n {value}"
+
+        self.add_field(name=f"{RESOURCES.emojis.vendor_icon} {name}:", value=res, inline=inline)
 
         return self
 
     def add_currency_info(self, data: CurrencySpender) -> Self:
+        """Add spendable Currency information to the embed.
 
+        .. note::
+            Removes the last 3 fields from an :class:`ItemEmbed`.
+
+
+        Parameters
+        ----------
+        data: :class:`CurrencySpender`
+            The results from the Currency function.
+
+        Returns
+        -------
+        :class:`Self`
+            Returns `Self` for fluent coding...
+
+        """
         self.remove_field(len(self.fields) - 2)
         self.remove_field(len(self.fields) - 1)
         self.remove_field(len(self.fields))
 
         if self.item.mb_current is None:
-            self.add_field(name="Error:", value=f"{RESOURCES.emojis.error_icon} | Failed to fetch Marketboard information...")
+            self.add_field(name="Error:", value=f"{RESOURCES.emojis.error_icon} | Marketboard information not applicable...")
             return self
 
         self.add_field(name=f"{data['currency'].name.replace('_', ' ').title()}", value=f"Cost: **{data['cost']:,d}**", inline=False)
@@ -891,6 +945,7 @@ class FishingEmbed(ItemEmbed):
         if item.fishing is None or (item.fishing.angler_data is None and angler_data is None):
             self.add_field(name="Error:", value=f"{RESOURCES.emojis.error_icon}  No Fishing data found...", inline=False)
             return
+
         if angler_data is None and item.fishing.angler_data is not None:
             angler_data = item.fishing.angler_data[0]
 
@@ -898,59 +953,56 @@ class FishingEmbed(ItemEmbed):
             self.add_field(name="Error:", value=f"{RESOURCES.emojis.error_icon} No Fishing data found...", inline=False)
             return
 
-        general_fields: list[str] = []
-        # place_name = "UNK"
-        if item.fishing.fishing_spot is not None:
-            fishing_spot: FishingSpot = item.fishing.fishing_spot
-
-            # if isinstance(fishing_spot.place_name, PlaceName):
-            #     place_name = fishing_spot.place_name.name
-
-            stars = ""
-            if item.fishing.ocean_stars > 0:
-                stars = f"{item.fishing.ocean_stars} \U00002b50"
-            # f"Location: {place_name} | {fishing_spot.x},{fishing_spot.z}",
-
-            general_fields.append(f"- `Lv.{fishing_spot.gathering_level}` **{fishing_spot.fishing_spot_category.name.title()}** {stars}")
-            if fishing_spot.rare is True:
-                general_fields.append(f"- Rare: {fishing_spot.rare}")
-            if item.fishing.is_hidden is True:
-                general_fields.append(f"- Hidden: {item.fishing.is_hidden}")
-            self.add_field(name="__Info__:", value="\n ".join(general_fields), inline=False)
-
-
         # FF14 Angler Data parsing.
         best_bait: AnglerBaits | None = angler_data.best_bait()
         if best_bait is None:
             best_bait = next(iter(angler_data.baits.values()))
 
         data = []
-        if len(angler_data.restrictions) > 1:
-            data.append(f"- Restrictions: {','.join(angler_data.restrictions)}")
+        if len(angler_data.restrictions) >= 1:
+            data.append(f"Restrictions: **{','.join(angler_data.restrictions)}**")
 
         data.extend([
-            f"{RESOURCES.emojis.hook} **~{angler_data.hook_time}** | {self.hook_converter(angler_data.double_fish)} ",
+            f"Hook time: **~{angler_data.hook_time}**",
             f"Best Bait: **{best_bait.bait_name.title()}** [{best_bait.hook_percent * 100}%]",
         ])
-        # Attempt to add X,Z cordinates of the Fishing spot.
-        if (
-            item.fishing.fishing_spot is not None
-            and isinstance(item.fishing.fishing_spot.place_name, PlaceName)
-            and angler_data.sub_area_name is not None
-        ):
-            # print(item.fishing.fishing_spot._raw)
-            # print(item.fishing.angler_data)
-            # TODO(@k8thekat): Finish adding location Parent name zone and links
 
-            if item.fishing.fishing_spot.place_name.name.lower() == angler_data.sub_area_name.lower():
-                if angler_data.area_name is not None:
-                    location = f"{angler_data.area_name}: {angler_data.sub_area_name} | [{item.fishing.fishing_spot.x}, {item.fishing.fishing_spot.z}]"
-                else:
-                    location = f"{angler_data.sub_area_name} | [{item.fishing.fishing_spot.x}, {item.fishing.fishing_spot.z}]"
-                data.insert(0, f"- **{location}**")
+        general_fields: list[str] = []
+        # place_name = "UNK"
+        if item.fishing.fishing_spots is not None:
+            for spot in item.fishing.fishing_spots:
+                fishing_spot: FishingSpot = spot
 
-            else:
-                data.insert(0, f"- {angler_data.sub_area_name}")
+                # if isinstance(fishing_spot.place_name, PlaceName):
+                #     place_name = fishing_spot.place_name.name
+
+                stars = ""
+                if item.fishing.ocean_stars > 0:
+                    stars = f"{item.fishing.ocean_stars} \U00002b50"
+                # f"Location: {place_name} | {fishing_spot.x},{fishing_spot.z}",
+
+                general_fields.append(
+                    f"- `Lv.{fishing_spot.gathering_level}` **{fishing_spot.fishing_spot_category.name.title()}** {stars}",
+                )
+                if fishing_spot.rare is True:
+                    general_fields.append(f"- Rare: {fishing_spot.rare}")
+                if item.fishing.is_hidden is True:
+                    general_fields.append(f"- Hidden: {item.fishing.is_hidden}")
+                self.add_field(name="__Info__:", value="\n ".join(general_fields), inline=False)
+
+        if item.fishing.fishing_spots is not None:
+            for spot in item.fishing.fishing_spots:
+                if isinstance(spot.place_name, PlaceName) and angler_data.sub_area_name is not None:
+                    # This logic fails because `area_name` was not accessed earlier.
+                    if spot.place_name.name.lower() == angler_data.sub_area_name.lower():
+                        if angler_data.area_name is not None:
+                            location = f"{angler_data.area_name}: {angler_data.sub_area_name} | [{spot.x}, {spot.z}]"
+                        else:
+                            location = f"{angler_data.sub_area_name} | [{spot.x}, {spot.z}]"
+                        data.insert(0, f"- **{location}**")
+
+                    else:
+                        data.insert(0, f"- {angler_data.sub_area_name}")
 
         self.add_field(name="__Locations__:", value="\n".join(data), inline=False)
         self.add_blank_field(inline=False)
@@ -962,6 +1014,62 @@ class FishingEmbed(ItemEmbed):
         if value == 3:
             return RESOURCES.emojis.triple_hook
         return RESOURCES.emojis.hook
+
+
+class SpearFishingEmbed(ItemEmbed):
+    def __init__(self, cog: FFXIV, item: Item, angler_data: Optional[AnglerFish] = None, **kwargs: Unpack[EmbedParams]) -> None:
+        self.item = item
+        if kwargs.get("description") is None:
+            if item.description is not None:
+                item.description = item._moogle._builder.sanitize_html(item.description)  # noqa: SLF001
+                if len(item.description) > 1020:
+                    kwargs["description"] = f"*{item.description[:1020] + ' ...'}*"
+                else:
+                    kwargs["description"] = item.description
+            else:
+                kwargs["description"] = "..."
+
+        if kwargs.get("title") is None:
+            kwargs["title"] = f"**{item.name}** [{item.id}]"
+
+        super().__init__(item=self.item, add_links=False, cog=cog, **kwargs)
+
+        self.set_author(name="Moogles Intuition: Spear Fishing Information", icon_url="attachment://avatar-icon.png")
+        self.set_thumbnail(url="attachment://thumbnail-icon.png")
+
+        if item.spear_fishing is None or (item.spear_fishing.angler_data is None and angler_data is None):
+            self.add_field(name="Error:", value=f"{RESOURCES.emojis.error_icon}  No Spear Fishing data found...", inline=False)
+            return
+
+        if angler_data is None and item.spear_fishing.angler_data is not None:
+            angler_data = item.spear_fishing.angler_data[0]
+
+        if angler_data is None:
+            self.add_field(name="Error:", value=f"{RESOURCES.emojis.error_icon} No Spear Fishing data found...", inline=False)
+            return
+
+        data = []
+        # TODO(@k8thekat): This may bork, I think some "Fish" can return a `[''] array.`
+        if len(angler_data.restrictions) >= 1:
+            data.append(f"Restrictions: **{','.join(angler_data.restrictions)}**")
+
+        if item.spear_fishing.territory_type is not None:
+            spot = item.spear_fishing.territory_type
+            if isinstance(spot.place_name, PlaceName) and angler_data.sub_area_name is not None:
+                # This logic fails because `area_name` was not accessed earlier.
+                if spot.place_name.name.lower() == angler_data.sub_area_name.lower():
+                    if angler_data.area_name is not None:
+                        location = f"{angler_data.area_name}: {angler_data.sub_area_name} | [{spot.x}, {spot.y}]"
+                    else:
+                        location = f"{angler_data.sub_area_name} | [{spot.x}, {spot.y}]"
+                    data.insert(0, f"- **{location}**")
+
+                else:
+                    data.insert(0, f"- {angler_data.sub_area_name}")
+
+        self.add_field(name="__Locations__:", value="\n".join(data), inline=False)
+        self.add_blank_field(inline=False)
+        self.add_links()
 
 
 class UniversalisEmbed(ItemEmbed):
@@ -976,7 +1084,7 @@ class UniversalisEmbed(ItemEmbed):
         hist_listings: list[HistoryDataEntries],
         **kwargs: Unpack[EmbedParams],
     ) -> None:
-        """__init__ _summary_.
+        """...
 
         Parameters
         ----------
@@ -1024,6 +1132,7 @@ class UniversalisEmbed(ItemEmbed):
             f"Updated: **{ftime}**",
             f"Sale Velocity HQ **{int(mb_data.hq_sale_velocity):,d}** | NQ **{int(mb_data.nq_sale_velocity):,d}**",
             f"Num Units Sold: **{mb_data.units_sold:,d}** *(per fetched History data)*",
+            f"Avg. Current Price: **{int(mb_data.current_average_price):,d}** | History **{int(mb_data.average_price):,d}**",
             "*note* - Total prices include `TAX` | **Total**`(Price Per Unit)`",
         ]
 
@@ -1135,9 +1244,9 @@ class RecipeEmbed(ItemEmbed):
         data = []
         # This is for when we use the "Change Job" select/button setup.
         if job_recipe is not None:
-            recipe: Recipe = getattr(item.recipe, job_recipe)
+            recipe: Recipe = getattr(item.jobrecipes, job_recipe)
         else:
-            recipe = item.recipe[0]
+            recipe = item.recipe
         if recipe.craft_type is not None:
             result = "" if recipe.amount_result < 1 else f" | *Creates: {recipe.amount_result}*"
             for ingredients in recipe:
@@ -1390,14 +1499,37 @@ class BaseView(discord.ui.View):
     "A list of Items to be added to the view."
     dispatched_by: Optional[BaseView | discord.ui.Button[BaseView]]
     "Who dispatched the View..."
-    embeds: Optional[Sequence[EmbedTypeAlias]]
+    _embeds: Optional[Sequence[EmbedTypeAlias]]
     "Any embeds attached to the view.."
-    indx: int
+    _indx: int
     "Index key for Embeds[], by default is 0."
     _timeout: Optional[float]
 
     ts_string: str
     "UTC aware timestamp formatted string"
+
+    @property
+    def indx(self) -> int:
+        """Index key for `Self.embeds[]`, by default is 0.
+
+        You cannot set this value larger than the len(self.embeds)-1.
+        """
+        if self.embeds is not None and self._indx > len(self.embeds) - 1:
+            return len(self.embeds)
+        return self._indx
+
+    @indx.setter
+    def indx(self, value: int = 0) -> None:
+        self._indx = value
+
+    @property
+    def embeds(self) -> Optional[Sequence[EmbedTypeAlias]]:
+        """The embeds attached to the view, if applicable."""
+        return self._embeds
+
+    @embeds.setter
+    def embeds(self, value: Sequence[EmbedTypeAlias] | None = None) -> None:
+        self._embeds = value
 
     def __init__(
         self,
@@ -1435,8 +1567,8 @@ class BaseView(discord.ui.View):
             - Default is 180 seconds.
 
         """
-        self.indx = 0
-        self.embeds = embeds
+        self._indx = 0
+        self._embeds = embeds
         self.owner = owner
         self.xivuser = xivuser
         self.cog = cog
@@ -1681,7 +1813,7 @@ class BaseView(discord.ui.View):
         LOGGER.debug("<%s.%s>", __class__.__name__, "interaction_check")
         if interaction.user != self.owner:
             await interaction.response.send_message(
-                content=f"Yea, you know this doesn't belong to you..{self.cog.emoji_table.to_inline_emoji('kuma_chuckle')}",
+                content=f"Yea, you know this doesn't belong to you..{self.cog.emoji_table.kuma_chuckle}",
                 ephemeral=True,
             )
             return False
@@ -1733,7 +1865,7 @@ class ItemView(BaseView):
     - Contains 4 buttons for Universalis(Marketboard), Crafting, Gathering, and Fishing(FF14 Angler)
 
     .. note::
-        Supply the `embeds` parameter of this view with your :class:`discord.Embeds`  you plan to display to handle the Pagination, otherwise
+        Supply the `embeds` parameter of this view with your :class:`discord.Embeds`  you plan to display to handle the Pagination.
 
 
     .. note::
@@ -1770,7 +1902,7 @@ class ItemView(BaseView):
 
         # Universalis related Buttons.
         # ItemUICategory(63) is a possible filter to catch "Currency" type items that can be traded to a vendor but not the Marketboard.
-        if self.item.is_untradable or self.item.item_ui_category == ItemUICategory.other:
+        if (self.item.is_untradable and self.item.item_ui_category == ItemUICategory.other) or self.item.is_untradable:
             self.remove_item(self.universalis_callback)
 
         if self.item.recipe is None:
@@ -1779,7 +1911,8 @@ class ItemView(BaseView):
         if self.item.gathering is None:
             self.remove_item(self.gathering_callback)
 
-        if self.item.fishing is None:
+        fishing: Fishing | None | SpearFishing = self.item.fishing if self.item.spear_fishing is None else self.item.spear_fishing
+        if fishing is None:
             self.remove_item(self.fishing_callback)
 
     @discord.ui.button(
@@ -1826,17 +1959,17 @@ class ItemView(BaseView):
         )
         await self.item.get_icon()
         # Sort the Data how we need.
-        cur_listings = []
-        hist_listings = []
+        cur_listings: list[CurrentDataEntries] = []
+        hist_listings: list[HistoryDataEntries] = []
         if self.item.mb_current is not None:
             cur_listings = sorted(self.item.mb_current.listings, key=lambda x: x.price_per_unit)
             if self.item.mb_current.recent_history is not None:
                 hist_listings = sorted(self.item.mb_current.recent_history, key=lambda x: x.timestamp, reverse=True)
 
-        embeds = []
+        embeds: list[UniversalisEmbed] = []
         for indx in range(0, get_entries, step):
             try:
-                cur_entry = cur_listings[indx : indx + step]
+                cur_entry: list[CurrentDataEntries] = cur_listings[indx : indx + step]
             except IndexError:
                 if indx > len(cur_listings):  # noqa: SIM108
                     cur_entry = cur_listings[len(cur_listings) - 1 :]
@@ -1844,7 +1977,7 @@ class ItemView(BaseView):
                     cur_entry = cur_listings[indx : len(cur_listings) - 1]
 
             try:
-                hist_entry = hist_listings[indx : indx + step]
+                hist_entry: list[HistoryDataEntries] = hist_listings[indx : indx + step]
             except IndexError:
                 if indx > len(hist_listings):
                     hist_entry = hist_listings[len(hist_listings) - 1 :]
@@ -1900,11 +2033,18 @@ class ItemView(BaseView):
 
         await interaction.response.defer()
 
-        if self.item.fishing is not None:
-            await self.item.fishing.get_angler_data()
+        fishing: Fishing | None | SpearFishing = self.item.fishing if self.item.spear_fishing is None else self.item.spear_fishing
+
+        if fishing is not None:
+            await fishing.get_angler_data()
 
         await self.item.get_icon()
-        embed = FishingEmbed(cog=self.cog, item=self.item)
+
+        if isinstance(fishing, SpearFishing):
+            embed = SpearFishingEmbed(cog=self.cog, item=self.item)
+        else:
+            embed = FishingEmbed(cog=self.cog, item=self.item)
+
         view = FishingView(
             item=self.item,
             dispatched_by=self,
@@ -2092,7 +2232,7 @@ class UniversalisView(ItemView):
             if self.item.mb_current.recent_history is not None:
                 hist_listings = sorted(self.item.mb_current.recent_history, key=lambda x: x.timestamp, reverse=True)
 
-        embeds = []
+        embeds: Sequence[EmbedTypeAlias] = []
         for indx in range(0, get_entries, step):
             try:
                 cur_entry = cur_listings[indx : indx + step]
@@ -2121,7 +2261,7 @@ class UniversalisView(ItemView):
 
         self.embeds = embeds
         self.recent_interaction = interaction
-        embed: UniversalisEmbed = embeds[self.indx]
+        embed: EmbedTypeAlias = embeds[self.indx]
         embed.set_footer(text=f"{self.indx + 1} out of {len(embeds)} | Moogles Intuition")
         await interaction.edit_original_response(embed=embed, view=self, attachments=embed.attachments)
 
@@ -2237,17 +2377,17 @@ class RecipeView(ItemView):
             self.remove_item(entry)
 
         # This is to satisfy the linter; we are checking this attribute prior to creating this view.
-        if item.recipe is None:
+        if item.jobrecipes is None:
             return
 
         # If we only have ONE job recipe; no need to offer changing Jobs.
-        if len(item.recipe) <= 1:
+        if len(item.jobrecipes) <= 1:
             self.change_job_callback.disabled = True
 
         else:
             options = [
                 discord.SelectOption(label=entry.craft_type.name, value=entry.craft_type.to_abbr())
-                for entry in item.recipe
+                for entry in item.jobrecipes
                 if entry.craft_type is not None
             ]
             self.job_select = JobSelect(view=self, options=options, row=4)
@@ -2262,7 +2402,7 @@ class RecipeView(ItemView):
         row=1,
     )
     async def crafting_cost_callback(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:
-        LOGGER.info("<%s.%s>", __class__.__name__, "crafting_cost_callback")
+        LOGGER.debug("<%s.%s>", __class__.__name__, "crafting_cost_callback")
         await interaction.response.defer(ephemeral=True)
         item.disabled = True
         self.undo_callback.disabled = False
@@ -2300,6 +2440,7 @@ class RecipeView(ItemView):
         LOGGER.debug("<%s.%s>", __class__.__name__, "change_job_callback")
         # item.disabled = True
         self.undo_callback.disabled = False
+        self.crafting_cost_callback.disabled = False
 
         self.add_item(self.job_select)
         # await interaction.edit_original_response(view=self)
@@ -2313,7 +2454,7 @@ class RecipeView(ItemView):
         disabled=False,
         row=1,
     )
-    async def ingredients_callback(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:
+    async def ingredients_callback(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:  # noqa: ARG002
         LOGGER.debug("<%s.%s>", __class__.__name__, "ingredients_callback")
         await interaction.response.defer()
 
@@ -2368,15 +2509,17 @@ class FishingView(ItemView):
         for entry in self.components:
             self.remove_item(entry)
 
-        if item.fishing is not None and item.fishing.angler_data is not None:
+        fishing: Fishing | None | SpearFishing = item.fishing if item.spear_fishing is None else item.spear_fishing
+
+        if fishing is not None and fishing.angler_data is not None:
             locations: list[discord.SelectOption] = [
                 discord.SelectOption(label=str(entry.sub_area_name), value=str(entry.sub_area_name))
-                for entry in item.fishing.angler_data
+                for entry in fishing.angler_data
                 if entry.sub_area_name is not None
             ]
             self.loc_select = FishingSpotSelect(view=self, options=locations, row=4)
 
-            if len(item.fishing.angler_data) > 1:
+            if len(fishing.angler_data) > 1:
                 # self.remove_item(self.spots_callback)
                 self.spots_callback.disabled = False
 
@@ -2385,7 +2528,9 @@ class FishingView(ItemView):
     @discord.ui.button(label="Fishing Spots", style=discord.ButtonStyle.green, disabled=True)
     async def spots_callback(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:  # noqa: ARG002
         await interaction.response.defer()
-        if self.item.fishing is not None and self.item.fishing.angler_data is not None:
+        fishing: Fishing | None | SpearFishing = self.item.fishing if self.item.spear_fishing is None else self.item.spear_fishing
+
+        if fishing is not None and fishing.angler_data is not None:
             self.add_item(self.loc_select)
             await interaction.response.edit_message(view=self)
         else:
@@ -2393,7 +2538,8 @@ class FishingView(ItemView):
             await interaction.response.edit_message(view=self)
 
     def reset_view(self) -> None:
-        if self.item.fishing is not None and self.item.fishing.angler_data is not None and len(self.item.fishing.angler_data) > 1:
+        fishing: Fishing | None | SpearFishing = self.item.fishing if self.item.spear_fishing is None else self.item.spear_fishing
+        if fishing is not None and fishing.angler_data is not None and len(fishing.angler_data) > 1:
             self.spots_callback.disabled = False
 
 
@@ -2596,11 +2742,24 @@ class FFXIV(Cog):
     moogle: Moogle
     item_choices: Optional[list[app_commands.Choice]] = None
     metrics: dict[str, XIVMetrics]
+    reply_messages: list[discord.WebhookMessage]
+    reply_flag = True
+    _reply_lock = asyncio.Lock()
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self.reply_messages = []
 
         self.metrics = {__class__.__name__: {"item_queries": 0, "uptime": {"start": datetime.datetime.now(datetime.UTC)}}}
+
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: AppCommandError) -> None:
+        if isinstance(error, CommandInvokeError):
+            await interaction.followup.send(
+                content=f"<{__class__.__name__}> | We encountered an error executing {error.command.name}",
+                ephemeral=True,
+            )
+        LOGGER.error("<%s.%s> | We encountered an Error. %s", __class__.__name__, "cog_app_command_error", error)
+        return await super().cog_app_command_error(interaction, error)
 
     async def cog_load(self) -> None:
         async with self.bot.pool.acquire() as conn:
@@ -2608,16 +2767,34 @@ class FFXIV(Cog):
             await conn.execute(WATCH_LIST_SETUP_SQL)
 
         # self.moogle = await Moogle(garlandtools=GarlandToolsAsync()).build()
-        self.moogle = await Moogle(session=self.bot.session).build()
+        self.moogle = await Moogle(session=self.bot.session).build(use_v2=True)
 
         if self.item_choices is None:
             self.item_choices = self.build_item_choices()
 
-    # async def cog_unload(self) -> None:
-    #     await self.moogle.clean_up()
+    async def cog_unload(self) -> None:
+        self.reply_messages = []
 
     # async def cog_before_invoke(self, ctx):
     #     return await super().cog_before_invoke(ctx)
+
+    @tasks.loop(seconds=5, reconnect=True)
+    async def processing_replies(self) -> None:
+        LOGGER.debug(
+            "<%s.%s> | Processing Replies loop running... | Len of Messages: %s",
+            __class__.__name__,
+            "processing_replies",
+            len(self.reply_messages),
+        )
+
+        if len(self.reply_messages) == 0:
+            self.processing_replies.stop()
+
+        async with self._reply_lock:
+            for msg in self.reply_messages:
+                await msg.edit(content=f"Processing... {RESOURCES.emojis.moogle1 if self.reply_flag else RESOURCES.emojis.moogle2}")
+
+        self.reply_flag ^= True
 
     async def _disambiguate_items(
         self,
@@ -2772,12 +2949,12 @@ class FFXIV(Cog):
                 app_commands.Choice(name=entry.name, value=str(entry.value))
                 for entry in worlds
                 if current.lower() in (entry.name.lower() or str(entry.value))
-            ][:25]
+            ][:24]
         return [
             app_commands.Choice(name=entry.name, value=str(entry.value))
             for entry in World
             if current.lower() in (entry.name.lower() or str(entry.value))
-        ][:25]
+        ][:24]
 
     @commands.is_owner()
     @commands.command(name="xivcp", aliases=["xivcontrol_panel", "xivstats"])
@@ -2823,15 +3000,6 @@ class FFXIV(Cog):
         await item.get_current_marketboard()
         user: XIVUser = await self.get_ffxiv_user(ctx=interaction)
         embed = ItemEmbed(cog=self, item=item, color=interaction.author.color)
-        # await interaction.followup.send(embed=item_embed, ephemeral=True, files=[patch_icon, item_icon])
-        # await interaction.edit_original_response(content="Results:", embed=item_embed )
-        # embed.add_currency_info(
-        #     data={
-        #         "item": item,
-        #         "cost": 3,
-        #         "currency": Currency(28),
-        #     },
-        # )
 
         if timeout == 0:
             timeout = None
@@ -2843,7 +3011,7 @@ class FFXIV(Cog):
 
     @app_commands.command(name="xivitem", description="Get an FFXIV Item.")
     @app_commands.autocomplete(query=autocomp_item_list)
-    async def items(
+    async def item(
         self,
         interaction: discord.Interaction,
         query: str,
@@ -2866,9 +3034,7 @@ class FFXIV(Cog):
         await item.get_icon()
 
         embed = ItemEmbed(cog=self, item=item, color=interaction.user.color)
-        # await interaction.followup.send(embed=item_embed, ephemeral=True, files=[patch_icon, item_icon])
         user: XIVUser = await self.get_ffxiv_user(ctx=interaction)
-        # await interaction.edit_original_response(content="Results:", embed=item_embed )
 
         if timeout == 0:
             timeout = None
@@ -3006,6 +3172,7 @@ class FFXIV(Cog):
             attachments=embeds[0].attachments,
         )
 
+    @app_commands.autocomplete(world=autocomp_worlds)
     @app_commands.command(name="xivcurrency", description="Get items available to purchase per Currency.")
     async def currency(
         self,
@@ -3013,7 +3180,8 @@ class FFXIV(Cog):
         query: Currency,
         *,
         patch: Expansion = Expansion.dawntrail,
-        datacenter: DataCenter = DataCenter.Crystal,
+        datacenter: Optional[DataCenter],
+        world: Optional[str],
         sale_threshold: int = 1,
     ) -> None:
         if query.value == 0:
@@ -3024,16 +3192,47 @@ class FFXIV(Cog):
             )
             return
         await interaction.response.defer(thinking=True, ephemeral=True)
-        await interaction.followup.send(content="This may take a while to process....", ephemeral=True)
-
-        res: dict[int, CurrencySpender] | None = await self.moogle.currency_spender(
-            currency=query,
-            num_listings=60,
-            patch=patch,
-            world_or_dc=datacenter,
+        reply: discord.WebhookMessage = await interaction.followup.send(
+            content=f"Processing... {RESOURCES.emojis.moogle2}.",
+            ephemeral=True,
+            wait=True,
         )
+
+        async with self._reply_lock:
+            self.reply_messages.append(reply)
+            if self.processing_replies.is_running() is False:
+                self.processing_replies.start()
+
+        # I have had two instances of this failing with a generic Universalis Error (eg a 503 or similar)
+        # This should help at least communicate to the user to re-run the command at the very least.
+        user: XIVUser = await self.get_ffxiv_user(ctx=interaction)
+        # We will attempt to use the xiv Users datacenter, otherwise we will use the commands parameters.
+        if world is not None:
+            try:
+                world_or_dc = World(int(world))
+            except ValueError:
+                world_or_dc = user.datacenter
+        else:
+            world_or_dc = datacenter
+        try:
+            res: dict[int, CurrencySpender] | None = await self.moogle.currency_spender(
+                currency=query,
+                num_listings=60,
+                patch=patch,
+                world_or_dc=world_or_dc,
+            )
+        except UniversalisError as e:
+            res = None
+            LOGGER.exception("<%s.%s> | Failed to process currency_spender function.", exc_info=e)
+
         if res is None:
-            await interaction.followup.send(content=f"Failed to find results for {query.name}", ephemeral=True)
+            async with self._reply_lock:
+                self.reply_messages.remove(reply)
+
+            await interaction.followup.send(
+                content=f"{RESOURCES.emojis.error_icon} Failed to find results for {query.name}",
+                ephemeral=True,
+            )
             return
 
         embeds: list[ItemEmbed] = []
@@ -3054,10 +3253,14 @@ class FFXIV(Cog):
         except AttributeError:
             pass
 
-        user: XIVUser = await self.get_ffxiv_user(ctx=interaction)
+        # user: XIVUser = await self.get_ffxiv_user(ctx=interaction)
         embed: ItemEmbed = embeds[0]
         embed.set_footer(text=f"1 out of {len(embeds)} | Moogles Intuition")
         view = CurrencyView(embeds=embeds, cog=self, xivuser=user, owner=interaction.user, timeout=0, dispatched_by=None)
+
+        async with self._reply_lock:
+            self.reply_messages.remove(reply)
+
         await interaction.edit_original_response(
             content="Results: ",
             embed=embed,

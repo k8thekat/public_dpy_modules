@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from configparser import ConfigParser
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import discord
@@ -61,6 +62,15 @@ if TYPE_CHECKING:
 
 BOT_NAME = "Kuma Kuma"
 
+
+class WhitelistActions(Enum):
+    add = "add"
+    remove = "remove"
+    on = "on"
+    off = "off"
+    list = "list"
+
+
 # Discord USER ID = [INSTANCE IDs]
 SERVER_OWNERS: dict[str, list[str]] = {
     "447422100798570496": ["3534c4c1-e212-458f-a013-31aa86935c49"],  # Vaskels Server
@@ -80,6 +90,7 @@ SERVER_CHANNELS: dict[str, int] = {
 
 #         super().__init__(color=color, title=title, description="", timestamp=discord.utils.utcnow())
 LOGGER = logging.getLogger()
+
 
 class Gatekeeper(Cog):
     ADS: AMPControllerInstance
@@ -225,7 +236,7 @@ class Gatekeeper(Cog):
 
         # We go through all the AMP Instances and see if we have any channels set; then update them.
         for instance in self.servers:
-            chan_id: Optional[int] = SERVER_CHANNELS.get(instance.instance_id, None)
+            chan_id: Optional[int] = SERVER_CHANNELS.get(instance.instance_id)
             if chan_id is None:
                 # This isn't really an error or warning worthy as we have hard coded the dict.
                 LOGGER.debug("Failed to find a Channel ID for Instance: %s", instance.friendly_name)
@@ -302,7 +313,7 @@ class Gatekeeper(Cog):
                 )
                 continue
 
-            chan_id: Optional[int] = SERVER_CHANNELS.get(instance.instance_id, None)
+            chan_id: Optional[int] = SERVER_CHANNELS.get(instance.instance_id)
             if chan_id is None:
                 # This isn't really an error or warning worthy as we have hard coded the dict.
                 LOGGER.debug("Failed to find a Channel ID for Instance: %s", instance.friendly_name)
@@ -335,13 +346,13 @@ class Gatekeeper(Cog):
         context: Context,
         server: str,
         name: str,
-        action: str = "add",
+        action: WhitelistActions = WhitelistActions.add,
     ) -> Optional[discord.Message]:
         await context.typing(ephemeral=True)
 
         if server == "NONE":
             return await context.send(
-                content=f"{self.emoji_table.to_inline_emoji('kuma_uwu')}",
+                content=f"{self.emoji_table.kuma_uwu}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
@@ -368,10 +379,17 @@ class Gatekeeper(Cog):
             # We may get the wrong message though.
             await asyncio.sleep(delay=1)
             await instance.get_updates()
-            # TODO(@k8thekat) - Index issue with console entries.
+
             if len(instance.console_entries) > 0:
-                return await context.send(content=instance.console_entries[-1].contents, ephemeral=True, delete_after=self.message_timeout)
+                try:
+                    # Managed to get an Index error on the console_entries.
+                    return await context.send(
+                        content=instance.console_entries[-1].contents, ephemeral=True, delete_after=self.message_timeout,
+                    )
+                except IndexError:
+                    pass
             return await context.send(content="Failed to get console reply", ephemeral=True, delete_after=self.message_timeout)
+
         return await context.send(
             content=f"It appears the Instance is having trouble...{self.emoji_table.to_inline_emoji('kuma_bleh')}",
             ephemeral=True,
@@ -610,6 +628,7 @@ class Gatekeeper(Cog):
         else:
             return await context.send("IDK :shrug:")
         return None
+
 
 async def setup(bot: Kuma_Kuma) -> None:  # noqa: D103 # docstring
     await bot.add_cog(Gatekeeper(bot=bot))

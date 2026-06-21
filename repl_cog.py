@@ -25,7 +25,7 @@ import io
 import logging
 import traceback
 from contextlib import redirect_stdout
-from typing import Any, Optional, reveal_type
+from typing import Any, Optional, TypedDict, reveal_type
 
 import discord
 from discord.ext import commands
@@ -38,6 +38,12 @@ from utils import (
 
 LOGGER = logging.getLogger()
 
+class Session(TypedDict):
+    user: discord.User | discord.Member
+    message: discord.Message
+    channel: int
+
+
 
 class Repl(Cog):
     repo_url: str = "https://github.com/k8thekat/public_dpy_modules"
@@ -48,7 +54,7 @@ class Repl(Cog):
     async def cog_load(self) -> None:
         # TODO - Add support for multiple users in a single channel.
         # self._sessions: set[int] = set()
-        self._sessions: dict[int, int] = {}
+        self._sessions: dict[int, Session] = {}
 
     async def on_message(self, message: discord.Message) -> None:
         if message.channel.id == self._sessions.get(message.author.id):
@@ -57,6 +63,10 @@ class Repl(Cog):
     async def cog_unload(self) -> None:
         self._sessions = {}
 
+    # TODO: Replace ctx.message to reference the most recent edited or reply message
+    # Check `pop` references were I remove an existing session. Validate reference messages and content in array.
+
+    # TODO: Fix Results reply formatting.
     @commands.command(hidden=True)
     @commands.is_owner()
     async def repl(self, ctx: Context) -> None:
@@ -69,28 +79,35 @@ class Repl(Cog):
             "channel": ctx.channel,
             "author": ctx.author,
             "pool": self.bot.pool,
-            "`_": None,
+            # "`_`": None, Unsure what this variable was being used for.
         }
 
         if ctx.channel.id in self._sessions:
             await ctx.send(content=f"Already running a `REPL` session in this channel for {ctx.author}. Exit it with `quit`.")
             return
+        # if ctx.author.id not in self._sessions:
+        self._sessions[ctx.author.id] = {"user": ctx.author, "channel": ctx.channel.id, "message": ctx.message}
 
-        self._sessions[ctx.author.id] = ctx.channel.id
         c_vars = "\n- ".join(variables)
         await ctx.send(
-            content=f"""Enter code to execute or evaluate wrapped in '`'. Use `exit()` or `quit` to exit. {self.emoji_table.to_inline_emoji(emoji="kuma_wow")}\nCurrent Set Variables__\n- {c_vars}""",  # noqa: E501
+            content=f"""Enter code to execute or evaluate wrapped in backticks. \nUse `exit()` or `quit` to exit. {self.emoji_table.kuma_wow}\n__Session Variables__\n- {c_vars}""", reference=self._sessions[ctx.author.id]["message"],  # noqa: E501
         )
 
         # def check(message: discord.Message) -> bool:
         #     return message.author.id == ctx.author.id and message.channel.id == ctx.channel.id and message.content.startswith("`")
         def on_msg_check(message: discord.Message) -> bool:
             # print("on_message", message)
-            return message.author.id == ctx.author.id and message.channel.id == ctx.channel.id and message.content.startswith("`")
+            if message.author.id == ctx.author.id and message.channel.id == ctx.channel.id and message.content.startswith("`"):
+                self._sessions[ctx.author.id]["message"] = message
+                return True
+            return False
 
         def on_msg_edit_check(before: discord.Message, after: discord.Message) -> bool:  # noqa: ARG001 # Unsused arg supression.
             # print("on_message_edit", after)
-            return after.author.id == ctx.author.id and after.channel.id == ctx.channel.id and after.content.startswith("`")
+            if after.author.id == ctx.author.id and after.channel.id == ctx.channel.id and after.content.startswith("`"):
+                self._sessions[ctx.author.id]["message"] = after
+                return True
+            return False
 
         while True:
             tasks = [
@@ -113,12 +130,11 @@ class Repl(Cog):
                         "repl",
                         tasks,
                     )
-                    msg = f"Exiting `REPL` session due to **StopIteration Error**.{self.emoji_table.to_inline_emoji(emoji='kuma_shock')}"
+                    msg = f"Exiting `REPL` session due to **StopIteration Error**. | {self.emoji_table.kuma_shock}"
                     try:
-                        await ctx.send(
-                            content=msg,reference=ctx.message)
+                        await ctx.send(content=msg, reference=self._sessions[ctx.author.id]["message"])
                     except discord.HTTPException:
-                        await ctx.send(content=msg)
+                        await ctx.send(content=msg, reference=self._sessions[ctx.author.id]["message"])
 
                     self._sessions.pop(ctx.author.id)
                     return
@@ -142,25 +158,24 @@ class Repl(Cog):
                         finished,
                     )
                     await ctx.send(
-                        content=f"Exiting `REPL` session due to TimeoutError.{self.emoji_table.to_inline_emoji(emoji='kuma_shock')}",
-                        reference=ctx.message,
-                    )
+                        content=f"Exiting `REPL` session due to a TimeoutError. {self.emoji_table.kuma_shock}")
                     self._sessions.pop(ctx.author.id)
                     return
 
+                # Unsure if this scenario would actually occur
                 response: Optional[discord.Message] = result[1] if action == "editmsg" else result
                 if response is None:
                     await ctx.send(
-                        content=f"Exiting `REPL` session due to failed result parsing..{self.emoji_table.to_inline_emoji(emoji='kuma_shock')}",
-                        reference=ctx.message,
+                        content=f"Exiting `REPL` session due to failed result parsing. {self.emoji_table.kuma_shock}",
+                        reference=self._sessions[ctx.author.id]["message"],
                     )
                     self._sessions.pop(ctx.author.id)
                     return
 
             except TimeoutError:
                 await ctx.send(
-                    content=f"Exiting `REPL` session.{self.emoji_table.to_inline_emoji(emoji='kuma_shock')}",
-                    reference=ctx.message,
+                    content=f"Exiting `REPL` session.{self.emoji_table.kuma_shock}",
+                    reference=self._sessions[ctx.author.id]["message"],
                 )
                 self._sessions.pop(ctx.author.id)
                 return
@@ -168,7 +183,7 @@ class Repl(Cog):
             cleaned = self.cleanup_code(response.content)
 
             if cleaned in ("quit", "exit", "exit()", "q"):
-                await ctx.send(content=f"Exiting. {self.emoji_table.to_inline_emoji('kuma_shrug')}", reference=ctx.message)
+                await ctx.send(content=f"Exiting. {self.emoji_table.kuma_shrug}", reference=self._sessions[ctx.author.id]["message"])
                 self._sessions.pop(ctx.author.id)
                 return
 
@@ -202,7 +217,7 @@ class Repl(Cog):
                     code = compile(wrapped, "<repl session>", "exec")
                     use_async_wrapper = True
                 except SyntaxError as e:
-                    await ctx.send(content=self.get_syntax_error(e), reference=ctx.message)
+                    await ctx.send(content=self.get_syntax_error(e), reference=self._sessions[ctx.author.id]["message"])
                     continue
 
             variables["message"] = response
@@ -238,26 +253,25 @@ class Repl(Cog):
             try:
                 if fmt is not None:
                     fmt = fmt[5:-3]  # remove code block for length check
-                    await ctx.send(content="### Results:", reference=ctx.message)
+                    await ctx.send(content="### Results:", reference=self._sessions[ctx.author.id]["message"])
                     if len(fmt) > 2000:
                         res = self.cleanup_output(fmt)
-                        content= ""
+                        content = ""
                         for indx in range(len(res)):
-
                             if len(content + res[indx]) > 1950:
-                                await ctx.send(content=content, reference=ctx.message)
+                                await ctx.send(content=content, reference=self._sessions[ctx.author.id]["message"])
                                 content = res[indx] + "\n"
                             else:
                                 content += res[indx] + "\n"
 
                         if len(content) > 0:
-                            await ctx.send(content=content, reference=ctx.message)
+                            await ctx.send(content=content, reference=self._sessions[ctx.author.id]["message"])
                     else:
-                        await ctx.send(content=fmt, reference=ctx.message)
+                        await ctx.send(content=fmt, reference=self._sessions[ctx.author.id]["message"])
             except discord.Forbidden:
                 pass
             except discord.HTTPException as e:
-                await ctx.send(content=f"Unexpected error: `{e}`", reference=ctx.message)
+                await ctx.send(content=f"Unexpected error: `{e}`", reference=self._sessions[ctx.author.id]["message"])
 
     def cleanup_code(self, content: str) -> str:
         """Automatically removes code blocks from the code."""
@@ -276,10 +290,9 @@ class Repl(Cog):
             return f"```py\n{e.__class__.__name__}: {e}\n```"
         return f"```py\n{e.text}{'^':>{e.offset}}\n{e.__class__.__name__}: {e}```"
 
-
-
     def cleanup_output(self, content: str, *, split: str = ",") -> list[str]:
         return content.split(sep=split)
+
 
 async def setup(bot: Kuma_Kuma) -> None:  # noqa: D103
     await bot.add_cog(Repl(bot=bot))

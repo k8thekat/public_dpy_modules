@@ -20,13 +20,15 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 """
 
 import asyncio
+import inspect
 import logging
 import re
 import sqlite3
 from datetime import datetime, timezone
+from hashlib import sha256
 from pkgutil import ModuleInfo
 from sqlite3 import Row
-from typing import TYPE_CHECKING, Optional, TypedDict, Union
+from typing import TYPE_CHECKING, Literal, Optional, TypedDict, Union, Unpack, reveal_type
 
 import discord
 from asqlite import Cursor
@@ -41,6 +43,8 @@ from utils import (
     KumaContext as Context,
     KumaGuildContext as GuildContext,
 )
+from utils._types import EmbedParams
+from utils.embeds import KumaEmbed
 
 if TYPE_CHECKING:
     from sqlite3 import Row
@@ -49,59 +53,145 @@ if TYPE_CHECKING:
     from asqlite import Cursor
 
 
-BOT_NAME = "Kuma Kuma"
+BOT_NAME = "Kuma Kuma Bear"
 LOGGER = logging.getLogger()
+HTTP_REGEX = r'https?://[^\s<>"{}|\\^`\[\]]+'
 
 MODERATOR_SETUP_SQL = """
 CREATE TABLE IF NOT EXISTS moderator (
     id INTEGER PRIMARY KEY NOT NULL,
     serverid INTEGER NOT NULL,
-    use_mystbin INT NOT NULL DEFAULT 0)
+    use_mystbin INT NOT NULL DEFAULT 0,
+    spam_filter INT NOT NULL DEFAULT 0)
 """
 
+
+class MessageRecords:
+    messages: list[discord.Message]
+    count: int
+    hashes: list[str]
+    """We are only going to store ``16`` characters of the full hash."""
+
+    def __init__(self, messages: list[discord.Message], count: int, hashes: list[str]) -> None:
+        self.messages = messages
+        self.count = count
+        self.hashes = hashes
+
+    def __repr__(self) -> str:
+        return f"Count: {self.count} | Hashes Len: {len(self.hashes)} | Messages Len: {len(self.messages)}"
 
 class ModeratorSettings(TypedDict):
     id: int
     serverid: int
     use_mystbin: bool
-    online_player_count: bool
+    # online_player_count: bool
+    spam_filter: bool
 
 
-class ModeratorSettingsEmbed(discord.Embed):
+def _mod_settings_choices() -> list[app_commands.Choice[str]]:
+    choices: list[app_commands.Choice] = []
+    # inspect.get_annotations(ModeratorSettings)
+    for k in ModeratorSettings.__annotations__:
+        if k in ["id", "serverid", "online_player_count"]:
+            continue
+        choices.append(app_commands.Choice(name=k, value=k))
+    return choices
+
+
+class ModeratorSettingsEmbed(KumaEmbed):
+    def __init__(self, cog: Cog, content: ModeratorSettings, guild: discord.Guild, **kwargs: Unpack[EmbedParams]) -> None:
+
+        if kwargs.get("title") is None:
+            kwargs["title"] = f"{guild} Settings"
+
+        super().__init__(cog=cog, **kwargs)
+
+        self.add_blank_field()
+        for key in content.keys():  # noqa: SIM118 - It thinks it's a dict; when it's a sqlite3.Row Tuple object.
+            # Omitted keys from ModeratorSettings
+            if key in ["id", "serverid", "online_player_count"]:
+                continue
+            self.add_field(inline=False, name=f"__{key.title()}__", value=str(bool(content[key])))
+        self.set_footer(text="Kuma Kuma Bear - Moderator Settings")
+        self.set_thumbnail(url=guild.icon)
+
+
+class AutoModEmbed(KumaEmbed):
+    """Auto Moderation Embed.
+
+    By default sets the ``Thumbnail`` for the :class:`KumaEmbed` to the :class:`discord.Member.avatar.url`
+
+    .. note::
+        - Default ``color`` is :meth:`discord.Color.red()`
+        - The ``reason`` parameter is used for the Embed ``description``.
+
+
+    """
+
     def __init__(
         self,
-        content: ModeratorSettings,
-        context: GuildContext,
-        footer_icon_url: str = "",
+        mod_action: Literal["Ban", "Kick", "Timeout"],
+        user: discord.Member | discord.User,
+        guild: discord.Guild,
+        reason: Optional[str] = None,
+        *,
+        cog: Cog,
+        **kwargs: Unpack[EmbedParams],
     ) -> None:
-        self.context: Context = context
-        super().__init__(
-            colour=Colour.blurple(),
-            title=f"{BOT_NAME} Guild Settings",
-            description=f"These settings are specific to **{self.context.guild.name}**. ",
-        )
+        """Auto Mod __init__.
 
-        self.add_field(name="", value="-------------------------------")
-        self.add_field(inline=False, name="__Use Mystbin__", value="- " + str(bool(content["use_mystbin"])))
-        self.set_footer(text="Kuma Kuma - Moderator Settings Embed", icon_url=footer_icon_url)
+        Parameters
+        ----------
+        mod_action: :class:`str`
+            eg. Ban, Kick, Timeout.
+        user: :class:`discord.Member | discord.User`
+            The Discord User or Member object.
+        guild: :class:`discord.Guild`
+            The Discord Guild.
+        cog: :class:`Cog`
+            The Cog using this embed.
+        reason: :class:`Optional[str]`, optional
+            The reason the User or Member had action taken against them, by default None.
+
+        """
+        kwargs["title"] = f"Auto-Mod | {guild}"
+
+        if reason is not None:
+            kwargs["description"] = reason
+
+        if kwargs.get("color") is None:
+            kwargs["color"] = discord.Color.red()
+
+        super().__init__(cog=cog, **kwargs)
+        self.add_field(name=f"__{self.cog.string_inflection(mod_action)} User__", value=user.display_name)
+
+        if isinstance(user, discord.Member) and user.avatar is not None:
+            self.set_thumbnail(url=user.avatar.url)
 
 
 class Moderator(Cog):
     """Moderator type commands and functionality for Discord."""
 
     repo_url: str = "https://github.com/k8thekat/public_dpy_modules"
-    guild_settings = list[dict[int, ModeratorSettings]]  # key will be the guild ID -> guild settings
+    guild_settings = dict[int, ModeratorSettings]  # key will be the guild ID -> guild settings
+
     CODEBLOCK_PATTERN: re.Pattern[str] = re.compile(
         pattern=r"`{3}(?P<LANG>\w+)?\n?(?P<CODE>(?:(?!`{3}).)+)\n?`{3}",
         flags=re.DOTALL | re.MULTILINE,
     )
+    SPAM_LIMIT: int = 3
+    spam_messages: dict[int, MessageRecords]
 
     def __init__(self, bot: Kuma_Kuma) -> None:
         super().__init__(bot=bot)
 
+
     async def cog_load(self) -> None:
         async with self.bot.pool.acquire() as conn:
             await conn.execute(MODERATOR_SETUP_SQL)
+        self.spam_messages = {}
+        # LOGGER.info(_mod_settings_choices())
+        # LOGGER.info(ModeratorSettings.__annotations__)
 
     async def get_mod_settings(self, guild: discord.Guild) -> ModeratorSettings | None:
         """Retrieves the Moderator Settings for the provided Discord guild.
@@ -126,7 +216,7 @@ class Moderator(Cog):
             async with self.bot.pool.acquire() as conn:
                 res: ModeratorSettings | None = await conn.fetchone("""SELECT * FROM moderator WHERE serverid = ?""", guild.id)  # type: ignore - I know the dataset because of above.
                 if res is None:
-                    await self.set_mod_settings(guild=guild)
+                    await self.set_mod_settings(guild=guild, default=True)
                 else:
                     # data: ModeratorSettings = {
                     #     "id": res["id"],
@@ -139,15 +229,30 @@ class Moderator(Cog):
             msg = "Unable to connect to the database."
             raise ConnectionError(msg) from None
 
-    async def set_mod_settings(self, guild: discord.Guild, use_mystbin: bool = False) -> ModeratorSettings | None:  # noqa: FBT001, FBT002
-        """Set Moderator specific settings for the provided Discord guild.
+    # Allowed column names for UPDATE — guards against SQL injection via the setting parameter.
+    _MOD_SETTING_COLUMNS: frozenset[str] = frozenset({"use_mystbin", "spam_filter"})
+
+    async def set_mod_settings(
+        self,
+        guild: discord.Guild,
+        setting: str | None = None,
+        value: bool = False,
+        default: bool = False,
+    ) -> ModeratorSettings | None:
+        """Set or update Moderator specific settings for the provided Discord guild.
 
         Parameters
         ----------
         guild: :class:`discord.Guild`
             The Discord guild object.
-        use_mystbin: :class:`bool`, optional
-            If the Discord guild should use mystbin conversion for longer messages, by default False.
+        setting: :class:`str`, optional
+            The column name in the moderator table to update (e.g. ``"use_mystbin"``).
+            Must be one of :attr:`_MOD_SETTING_COLUMNS`. Required when ``default`` is False.
+        value: :class:`bool`, optional
+            The value to write to ``setting``, by default False.
+        default: :class:`bool`, optional
+            When True, inserts a new row with default values for the guild instead of
+            updating an existing one. Use this for initial guild setup.
 
         Returns
         -------
@@ -156,27 +261,41 @@ class Moderator(Cog):
 
         Raises
         ------
+        :exc:`ValueError`
+            If ``default`` is False and ``setting`` is None or not a valid column name.
         :exc:`sqlite3.DatabaseError`
-            If we are unable to INSERT the row into the Database table.
+            If the INSERT or UPDATE returns no row.
         :exc:`ConnectionError`
             If we are unable to connect to the Database.
 
         """
+        if not default and (setting is None or setting not in self._MOD_SETTING_COLUMNS):
+            msg = f"setting must be one of {self._MOD_SETTING_COLUMNS!r}, got {setting!r}."
+            raise ValueError(msg)
+
         try:
             async with self.bot.pool.acquire() as conn:
-                data: ModeratorSettings | None = await conn.fetchone(
-                    """INSERT INTO moderator(serverid, use_mystbin) VALUES(?, ?) RETURNING *""",
-                    guild.id,
-                    use_mystbin,
-                )  # pyright: ignore[reportAssignmentType]
+                if default:
+                    data: ModeratorSettings | None = await conn.fetchone(
+                        """INSERT INTO moderator(serverid) VALUES(?) RETURNING *""",
+                        guild.id,
+                    )  # pyright: ignore[reportAssignmentType]
+                else:
+                    data = await conn.fetchone(
+                        f"""UPDATE moderator SET {setting} = ? WHERE serverid = ? RETURNING *""",  # noqa: S608 - column name validated above
+                        value,
+                        guild.id,
+                    )  # pyright: ignore[reportAssignmentType]
+
                 if data is None:
                     LOGGER.error(
-                        "<%s.%s> | We encountered an error inserting a row into the database. | GuildID: %s",
+                        "<%s.%s> | We encountered an error %s a row in the database. | GuildID: %s",
                         __class__.__name__,
                         "set_mod_settings",
+                        "inserting" if default else "updating",
                         guild.id,
                     )
-                    msg = "Unable to insert a row in to the database."
+                    msg = f"Unable to {'insert' if default else 'update'} a row in the database."
                     raise sqlite3.DatabaseError(msg)  # noqa: TRY301
                 return data
         except Exception as e:
@@ -196,11 +315,14 @@ class Moderator(Cog):
         # ignore messages not in a guild.
         if message.guild is not None:
             res: ModeratorSettings | None = await self.get_mod_settings(guild=message.guild)
+
             # So if our message is over 1k char length and the guild settings is True.
             if (res is not None and res["use_mystbin"] is True) and (
                 message.channel.type is not discord.ChannelType.news and len(message.content) > 1000
             ):
                 await self._auto_on_mystbin(message=message)
+            if res is not None and bool(res["spam_filter"]) is True:
+                await self._duplicate_attachment_check(message)
 
     @commands.Cog.listener(name="on_thread_update")
     async def mod_on_thread_update(self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel) -> None:
@@ -275,6 +397,154 @@ class Moderator(Cog):
             if message.channel.permissions_for(message.guild.me).manage_messages:
                 await message.delete()
 
+    async def _duplicate_attachment_check(self, message: discord.Message) -> None:
+        """Checks an incoming message for duplicate attachments or URLs and bans the author if spam is detected.
+
+        Skips DM messages, messages outside a guild, and messages from guild administrators.
+        Inspects both file attachments and any HTTP URL found in the message content, hashing
+        each via `_hash_parse` and comparing against the author's `MessageRecords` entry in
+        `spam_messages`. Retains the last 10 messages and 20 hashes per user.
+
+        If the author's spam count has reached SPAM_LIMIT or more, attempts to ban them from the guild
+        with the reason ``"Spam or Hacked account"`` and sends an embed to the bot owner.
+        Ban failures due to missing permissions are logged and silently ignored.
+
+        Parameters
+        ----------
+        message: :class:`discord.Message`
+            The Discord message to inspect.
+
+        """
+        # If we are in a Guild and the Guild member has admin, ignore.
+        if isinstance(message.author, User) or message.guild is None:
+            # LOGGER.info("<%s.%s> | Duplicate Attachment Check Failed", __class__.__name__, "duplicate_attachment_check")
+            return
+
+        if message.author.guild_permissions.administrator is True:
+            return
+
+        check_attachments: bool = False
+        check_content: bool = False
+        url: str | None = None
+
+        if len(message.attachments) != 0:
+            # LOGGER.info("User sent an Attachment")
+            check_attachments = True
+
+        match: re.Match[str] | None = re.search(HTTP_REGEX, message.content)
+        if match is not None:
+            url = match.group()
+            check_content = True
+            # LOGGER.info("User sent a Content URL. | URL: %s", url)
+
+
+        LOGGER.debug(
+            "<%s.%s> | Author Type: %s | Author Admin: %s | Message Guild: %s | Msg Attachment Count: %s",
+            __class__.__name__,
+            "duplicate_attachment_check",
+            type(message.author),
+            message.author.guild_permissions.administrator,
+            message.guild,
+            len(message.attachments),
+        )
+
+
+        record: MessageRecords = self.spam_messages.get(message.author.id, MessageRecords(messages=[message], count=0, hashes = []))
+        # First time object creation will only have one message, we don't want to add a duplicate of the same message.
+        # We could do a "not in" but this works too.
+        if len(record.messages) > 1:
+            record.messages.append(message)
+
+        # LOGGER.info("User: %s | Record: %s", message.author, record)
+        # Spam message limit holder
+        # Currently after 10 "different" messages truncate the remianing.
+        if len(record.messages) > 10:
+            record.messages = record.messages[len(record.messages) - 10 :]
+
+        # Truncate after 20 different hashes.
+        if len(record.hashes) > 20:
+            record.hashes = record.hashes[len(record.hashes) - 20 :]
+
+         # If the users count breaks 3, we try to ban the user.
+        if record.count >= self.SPAM_LIMIT:
+            user_guild: discord.Guild | None = self.bot.get_guild(message.guild.id)
+            if user_guild is None:
+                LOGGER.warning(
+                    "<%s.%s> | Failed to lookup a Message Guild ID | Guild ID: %s | Message: %s",
+                    __class__.__name__,
+                    "_duplicate_attachment_check",
+                    message.guild.id,
+                    message,
+                )
+                return
+
+            try:
+                await user_guild.ban(user=message.author, reason="Spam or Hacked account")
+                LOGGER.info(
+                    "<%s.%s> | Banned User for Spam/Duplicate Images. | User/Member: %s",
+                    __class__.__name__,
+                    "_duplicate_attachment_check",
+                    message.author,
+                )
+            # In case we do not have permissions in the server we are in.
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                LOGGER.exception(
+                    "<%s.%s> | Failed to Ban a User for Spam | User/Member: %s",
+                    __class__.__name__,
+                    "_duplicate_attachment_check",
+                    message.author,
+                )
+                return
+
+            # Only send a message if we don't trigger the except.
+            embed = AutoModEmbed(cog=self, mod_action="Ban", user=message.author, guild=user_guild, reason="Spam/Duplicate messages.")
+            await self.bot.owner.send(embed=embed, silent=True)
+
+        if check_attachments:
+            for cur_attachment in message.attachments:
+                compare = await self._hash_parse(record=record, url= cur_attachment.url)
+                if compare:
+                    LOGGER.warning(
+                        "<%s.%s> | User sent a duplicate Attachment. | User: %s | Guild ID: %s | Attachment URL: %s",
+                        __class__.__name__,
+                        "_duplicate_attachment_check",
+                        message.author,
+                        message.guild.id,
+                        cur_attachment.url,
+                    )
+        if check_content and url is not None:
+            compare = await self._hash_parse(record=record, url=url)
+            if compare:
+                LOGGER.warning(
+                    "<%s.%s> | User sent duplicate Content URL. | User: %s | Guild ID: %s | URL: %s",
+                    __class__.__name__,
+                    "_duplicate_attachment_check",
+                    message.author,
+                    message.guild.id,
+                    url,
+                )
+
+        self.spam_messages.update({message.author.id : record})
+        # LOGGER.info("User Record: %s", record)
+
+
+    async def _hash_parse(self, record: MessageRecords, url: str) -> bool:
+        data: bytes | None = await self.get_request(url =url)
+        if data is None:
+            return False
+        # Use the bytes from the get request, truncate to 16 chars and compare against existing hashes.
+        res = sha256(data).hexdigest()[:16]
+        if res not in record.hashes:
+            # LOGGER.info("Added a Hash to the User")
+            record.hashes.append(res)
+            return False
+        # LOGGER.info("Found a duplicate Hash for the User")
+        record.count += 1
+        self.spam_messages.update({record.messages[0].author.id : record})
+        return True
+
+
+
     @commands.command(name="reload", help="Reloads all extensions unless specified.")
     @commands.is_owner()
     async def reload(self, context: Context, args: Optional[str] = None) -> None:
@@ -318,7 +588,7 @@ class Moderator(Cog):
     @commands.command(name="sync", help=f"Sync the {BOT_NAME} commands to the guild.")
     @commands.is_owner()
     @commands.guild_only()
-    async def sync(self, context: GuildContext, local: bool = True, reset: bool = False) -> Message | None:  # noqa: FBT001, FBT002
+    async def sync(self, context: GuildContext, local: bool = True, reset: bool = False) -> Message | None:
         await context.typing(ephemeral=True)
 
         if reset is True:
@@ -334,7 +604,7 @@ class Moderator(Cog):
                 self.bot.user.name,
             )
             return await context.send(
-                content=f"**WARNING** Resetting `{self.bot.user.name}s` commands... {self.emoji_table.to_inline_emoji(emoji='kuma_bleh')}",
+                content=f"**WARNING** Resetting `{self.bot.user.name}s` commands... {self.emoji_table.kuma_bleh}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
@@ -409,7 +679,7 @@ class Moderator(Cog):
             member = context.guild.get_member(member)
         if member is None:
             return await context.send(
-                content=f"Hey uhh, I failed to find the member provided.{self.emoji_table.to_inline_emoji('kuma_head_clench')}",
+                content=f"Hey uhh, I failed to find the member provided.{self.emoji_table.kuma_head_clench}",
                 ephemeral=True,
             )
         if option == "add":
@@ -451,7 +721,7 @@ class Moderator(Cog):
         self,
         context: GuildContext,
         amount: int = 15,
-        bot_only: bool = False,  # noqa: FBT001, FBT002
+        bot_only: bool = False,
     ) -> Message:
         messages: list[discord.Message] = []
         til_message: Union[discord.Message, None] = None
@@ -478,34 +748,52 @@ class Moderator(Cog):
                 )
             except discord.errors.Forbidden:
                 return await context.reply(
-                    content=f"I don't have the permissions to do that... {self.emoji_table.to_inline_emoji(self.emoji_table.kuma_pout)}",
+                    content=f"I don't have the permissions to do that... {self.emoji_table.kuma_pout}",
                     delete_after=self.message_timeout,
                 )
 
         tmp: str = f" of {self.bot.user.name} "
         return await context.channel.send(
-            content=f"I ate **{len(messages)}**{tmp if bot_only else ' '}{'messages' if len(messages) > 1 else 'message'}. *nom.. nom..* {self.emoji_table.to_inline_emoji(emoji='kuma_rawr')}",  # noqa: E501
+            content=f"I ate **{len(messages)}**{tmp if bot_only else ' '}{'messages' if len(messages) > 1 else 'message'}. *nom.. nom..* {self.emoji_table.kuma_rawr}",  # noqa: E501
             delete_after=10,
         )
 
-    @commands.group(name="settings", invoke_without_command=True)
-    @app_commands.guild_only()
+    # @app_commands.guild_only()
+    @commands.hybrid_group(name="settings")
     @app_commands.default_permissions(manage_messages=True)
-    async def settings(self, context: GuildContext) -> Message:
-        settings: ModeratorSettings | None = await self.get_mod_settings(guild=context.guild)
+    async def settings(self, interaction: GuildContext) -> Message:
+        settings: ModeratorSettings | None = await self.get_mod_settings(guild=interaction.guild)
         if settings is not None:
             res: discord.Guild | None = await self.get_guild()
             if res is not None:
-                emoji: discord.Emoji | None = res.get_emoji(self.emoji_table.kuma_wow)
-                if emoji is not None:
-                    return await context.send(embed=ModeratorSettingsEmbed(footer_icon_url=emoji.url, content=settings, context=context))
-                return await context.send(
-                    embed=ModeratorSettingsEmbed(content=settings, context=context),
+                embed = ModeratorSettingsEmbed(cog=self, content=settings, guild=res)
+                return await interaction.send(
+                    embed=embed,
                     delete_after=self.message_timeout,
+                    files=embed.attachments,
                 )
 
+        return await interaction.send(
+            content=self.emoji_table.kuma_crying,
+            delete_after=self.message_timeout,
+        )
+
+    @settings.command(name="set")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.choices(option=_mod_settings_choices())
+    async def set_setting(self, context: GuildContext, option: Choice[str], value: bool) -> Message:
+        updated: ModeratorSettings | None = await self.set_mod_settings(guild=context.guild, setting=option.value, value=value)
+
+        if updated is not None:
+            embed = ModeratorSettingsEmbed(cog=self, content=updated, guild=context.guild)
+            return await context.send(
+                embed=embed,
+                delete_after=self.message_timeout,
+                files=embed.attachments,
+            )
         return await context.send(
-            content=self.emoji_table.to_inline_emoji(emoji=self.emoji_table.kuma_crying),
+            content=self.emoji_table.kuma_crying,
             delete_after=self.message_timeout,
         )
 

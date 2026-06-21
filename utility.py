@@ -21,12 +21,14 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 
 from __future__ import annotations
 
+import datetime
 import inspect
 import io
 import json
 import logging
 import os
 import platform
+import random
 import re
 import unicodedata
 from pathlib import Path
@@ -44,7 +46,6 @@ from kuma_kuma import Kuma_Kuma
 from utils import KumaCog as Cog  # need to replace with your own Cog class
 
 if TYPE_CHECKING:
-    from datetime import datetime
 
     from aiohttp import ClientResponse
 
@@ -124,7 +125,7 @@ class YoinkGuildSelect(discord.ui.Select["YoinkView"]):
     def __init__(
         self,
         *,
-        emoji: Optional[discord.PartialEmoji] = None,
+        emoji: Optional[discord.PartialEmoji | discord.Emoji] = None,
         sticker: Optional[Union[discord.Sticker, discord.StandardSticker, discord.GuildSticker]] = None,
         content: Literal["emoji", "sticker"],
         placeholder: str,
@@ -202,16 +203,23 @@ class YoinkView(discord.ui.View):
                 self.options.append(discord.SelectOption(label=guild.name, value=str(object=guild.id)))
                 continue
 
+        # TODO: Validate logic and checking for message content if it contains an emoji.
         if len(message.stickers) == 0:
             self.remove_item(item=self.copy_sticker)
             self.remove_item(item=self.sticker_to_file)
 
-        self.emoji: Optional[discord.PartialEmoji] = None
-        res: Match[str] | None = re.search("(<:.*?:.*?>)", self.message.content)
-        if isinstance(res, Match):
-            self.emoji = discord.PartialEmoji.from_str(res.group(0))
-            # Being lazy here, don't want to use `_with_state` and parse the string myself.
-            self.emoji._state = self.cog.bot._connection  # noqa: SLF001
+        self.emoji: Optional[discord.PartialEmoji | discord.Emoji] = None
+        # This typically populates when it's a reaction style emoji.
+        # res: Match[str] | None = re.search("(<:.*?:.*?>)", self.message.content)
+        # if isinstance(res, Match):
+        #     self.emoji = discord.PartialEmoji.from_str(res.group(0))
+        #     # Being lazy here, don't want to use `_with_state` and parse the string myself.
+        #     self.emoji._state = self.cog.bot._connection
+        # TODO: Add select prompt for each emoji, or possibly a paginator for each "reaction" or "emoji" found in the message
+        # then add the corresponding buttons depending on the type of the content.
+        if len(self.message.reactions) >= 1:
+            if not isinstance(self.message.reactions[0].emoji, str):
+                self.emoji = self.message.reactions[0].emoji
         else:
             self.remove_item(item=self.copy_emoji)
             self.remove_item(item=self.emoji_to_file)
@@ -404,7 +412,7 @@ class GithubIssueSubmissionEmbed(discord.Embed):
         user: Union[discord.Member, discord.User],
         colour: discord.Color = discord.Color.og_blurple(),  # noqa: B008
         title: str = "__GitHub Issue Submission__",
-        timestamp: datetime = discord.utils.utcnow(),  # noqa: B008
+        timestamp: datetime.datetime = discord.utils.utcnow(),  # noqa: B008
     ) -> None:
         self.gh_response = gh_response
         self.user = user
@@ -473,6 +481,7 @@ class Utility(Cog):
         self.bot.tree.remove_command(self.yoink_menu.name, type=self.yoink_menu.type)
         self.bot.tree.remove_command(self.gh_issue.name, type=self.gh_issue.type)
 
+    # TODO: Take this Embed structure and drop in place over my default Embeds for a cleaner approach.
     @commands.command(help="Shows info about the bot", aliases=["botinfo", "info", "bi"])
     async def about(self, ctx: Context) -> None:
         """Tells you information about the bot itself."""
@@ -564,7 +573,7 @@ class Utility(Cog):
         msg: str = "\n".join(map(to_string, characters))
         if len(msg) > 2000:
             await context.reply(
-                content=f"Output too long to display.. {self.emoji_table.to_inline_emoji(self.emoji_table.kuma_head_clench)}",
+                content=f"Output too long to display.. {self.emoji_table.kuma_head_clench}",
                 delete_after=self.message_timeout,
             )
             return await context.send(content=f"{msg[:1995]} ....")
@@ -593,6 +602,7 @@ class Utility(Cog):
         channel_webhooks: str = "\n".join([f"**{webhook.name}** | ID: `{webhook.id}`" for webhook in await channel.webhooks()])
         return await context.reply(content=f"> {channel.mention} Webhooks \n{channel_webhooks}", delete_after=self.message_timeout)
 
+    # TODO(@k8thekat): Make a Choice using `lookup.keys() for *var*.`
     @commands.command(name="link", help="Access to useful URLs via lookup parameters")
     async def url_linking(self, context: Context, var: str = "") -> discord.Message:
         var = var.lower()
@@ -663,7 +673,9 @@ class Utility(Cog):
     @app_commands.checks.has_permissions(manage_emojis_and_stickers=True)
     async def yoink(self, interaction: discord.Interaction, message: discord.Message) -> None:
         await interaction.response.defer(ephemeral=True)
-        await interaction.edit_original_response(view=YoinkView(cog=self, message=message))
+        # for reaction in message.reactions:
+        # TODO: Consider making an array of all stickers/emojis from the message as a paginator for each "item" we may want.
+        await interaction.followup.send(content="...", view=YoinkView(cog=self, message=message))
 
     async def create_github_issue(self, interaction: discord.Interaction, message: discord.Message) -> None:
         """Create a github issue via a Discord Message."""
@@ -735,6 +747,13 @@ class Utility(Cog):
         """Reloads the application emojis from Discord."""
         self.bot._app_emojis = await self.bot.fetch_application_emojis()  # noqa: SLF001
         return await context.send(content=f"Reloaded application emojis {self.emoji_table.kuma_happy}", delete_after=self.message_timeout)
+
+    @commands.command(name="coin_flip", help="Flip a coin")
+    async def coin_flip(self, context: Context) -> None:
+        seed = datetime.datetime.now(datetime.UTC).timestamp()
+        random.seed(seed)
+        val = random.randint(0, 1)  # noqa: S311
+        await context.send(content="Heads" if val == 0 else "False")
 
 
 async def setup(bot: Kuma_Kuma) -> None:
