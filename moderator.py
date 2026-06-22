@@ -20,11 +20,11 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 """
 
 import asyncio
+import datetime
 import inspect
 import logging
 import re
 import sqlite3
-from datetime import datetime, timezone
 from hashlib import sha256
 from pkgutil import ModuleInfo
 from sqlite3 import Row
@@ -34,7 +34,7 @@ import discord
 from asqlite import Cursor
 from discord import Colour, Member, Message, User, app_commands
 from discord.app_commands import Choice
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from extensions import EXTENSIONS
 from kuma_kuma import Kuma_Kuma, _get_prefix, _get_trusted
@@ -67,18 +67,37 @@ CREATE TABLE IF NOT EXISTS moderator (
 
 
 class MessageRecords:
-    messages: list[discord.Message]
+    # messages: list[discord.Message]
     count: int
-    hashes: list[str]
+    _hashes: list[str]
     """We are only going to store ``16`` characters of the full hash."""
+    timestamp: datetime.datetime
 
-    def __init__(self, messages: list[discord.Message], count: int, hashes: list[str]) -> None:
-        self.messages = messages
+    def __init__(self, count: int, timestamp: Optional[datetime.datetime] = None) -> None:
+        # self.messages = messages
         self.count = count
-        self.hashes = hashes
+        self._hashes = []
+        # This is getting overwritten right after count == 1
+        # I didn't want to set it to None; as then that's another logic check.
+        if timestamp is None:
+            timestamp = datetime.datetime.now(tz=datetime.UTC)
+        self.timestamp = timestamp
 
     def __repr__(self) -> str:
-        return f"Count: {self.count} | Hashes Len: {len(self.hashes)} | Messages Len: {len(self.messages)}"
+        return f"Count: {self.count} | Hashes Len: {len(self.hashes)} | Timestamp: {self.timestamp}"
+
+    @property
+    def hashes(self) -> list[str]:
+        return self._hashes
+
+    @hashes.setter
+    def hashes(self, value: str) -> None:
+        if len(self.hashes) == 2:
+            self.hashes.pop(0)
+            self.hashes.append(value)
+        else:
+            self.hashes.append(value)
+
 
 class ModeratorSettings(TypedDict):
     id: int
@@ -184,7 +203,6 @@ class Moderator(Cog):
 
     def __init__(self, bot: Kuma_Kuma) -> None:
         super().__init__(bot=bot)
-
 
     async def cog_load(self) -> None:
         async with self.bot.pool.acquire() as conn:
@@ -400,14 +418,9 @@ class Moderator(Cog):
     async def _duplicate_attachment_check(self, message: discord.Message) -> None:
         """Checks an incoming message for duplicate attachments or URLs and bans the author if spam is detected.
 
-        Skips DM messages, messages outside a guild, and messages from guild administrators.
-        Inspects both file attachments and any HTTP URL found in the message content, hashing
-        each via `_hash_parse` and comparing against the author's `MessageRecords` entry in
-        `spam_messages`. Retains the last 10 messages and 20 hashes per user.
+        Uses sha256 to compare a shortened 16 char hash of recent attachments, after 2 different hashes the array is truncated.
 
-        If the author's spam count has reached SPAM_LIMIT or more, attempts to ban them from the guild
-        with the reason ``"Spam or Hacked account"`` and sends an embed to the bot owner.
-        Ban failures due to missing permissions are logged and silently ignored.
+        - After 3 minutes since the first duplicate, we reset the timestamp.
 
         Parameters
         ----------
@@ -437,7 +450,6 @@ class Moderator(Cog):
             check_content = True
             # LOGGER.info("User sent a Content URL. | URL: %s", url)
 
-
         LOGGER.debug(
             "<%s.%s> | Author Type: %s | Author Admin: %s | Message Guild: %s | Msg Attachment Count: %s",
             __class__.__name__,
@@ -448,25 +460,51 @@ class Moderator(Cog):
             len(message.attachments),
         )
 
-
-        record: MessageRecords = self.spam_messages.get(message.author.id, MessageRecords(messages=[message], count=0, hashes = []))
-        # First time object creation will only have one message, we don't want to add a duplicate of the same message.
-        # We could do a "not in" but this works too.
-        if len(record.messages) > 1:
-            record.messages.append(message)
-
+        record: MessageRecords = self.spam_messages.get(message.author.id, MessageRecords(count=0))
         # LOGGER.info("User: %s | Record: %s", message.author, record)
-        # Spam message limit holder
-        # Currently after 10 "different" messages truncate the remianing.
-        if len(record.messages) > 10:
-            record.messages = record.messages[len(record.messages) - 10 :]
 
-        # Truncate after 20 different hashes.
-        if len(record.hashes) > 20:
-            record.hashes = record.hashes[len(record.hashes) - 20 :]
+        if check_attachments:
+            for cur_attachment in message.attachments:
+                compare = await self._hash_parse(author=message.author, record=record, url=cur_attachment.url)
+                if compare:
+                    LOGGER.warning(
+                        "<%s.%s> | User sent a duplicate Attachment. | User: %s | Guild ID: %s | Attachment URL: %s",
+                        __class__.__name__,
+                        "_duplicate_attachment_check",
+                        message.author,
+                        message.guild.id,
+                        cur_attachment.url,
+                    )
+        if check_content and url is not None:
+            compare = await self._hash_parse(author=message.author, record=record, url=url)
+            if compare:
+                LOGGER.warning(
+                    "<%s.%s> | User sent duplicate Content URL. | User: %s | Guild ID: %s | URL: %s",
+                    __class__.__name__,
+                    "_duplicate_attachment_check",
+                    message.author,
+                    message.guild.id,
+                    url,
+                )
 
-         # If the users count breaks 3, we try to ban the user.
+        # self.spam_messages.update({message.author.id : record})
+        # If the users count breaks SPAM LIMIT, we try to ban the user.
         if record.count >= self.SPAM_LIMIT:
+            cur_time: datetime.datetime = datetime.datetime.now(tz=datetime.UTC)
+            # If they triggered the SPAM LIMIT and it's been over 3 minutes since the first "dupe";
+            # ignore the count, reset the counter to 1 (as it's still a "dupe") and adjust the timestamp for a new 3 minute window.
+            if cur_time - record.timestamp > datetime.timedelta(minutes=3):
+                LOGGER.info(
+                    "<%s.%s> | Reset Users Spam Record Count and Timestamp. | User: %s",
+                    __class__.__name__,
+                    "duplicate_attachment_check",
+                    message.author,
+                )
+                record.count = 1
+                record.timestamp = cur_time
+                self.spam_messages.update({message.author.id: record})
+                return
+
             user_guild: discord.Guild | None = self.bot.get_guild(message.guild.id)
             if user_guild is None:
                 LOGGER.warning(
@@ -499,51 +537,24 @@ class Moderator(Cog):
             # Only send a message if we don't trigger the except.
             embed = AutoModEmbed(cog=self, mod_action="Ban", user=message.author, guild=user_guild, reason="Spam/Duplicate messages.")
             await self.bot.owner.send(embed=embed, silent=True)
-
-        if check_attachments:
-            for cur_attachment in message.attachments:
-                compare = await self._hash_parse(record=record, url= cur_attachment.url)
-                if compare:
-                    LOGGER.warning(
-                        "<%s.%s> | User sent a duplicate Attachment. | User: %s | Guild ID: %s | Attachment URL: %s",
-                        __class__.__name__,
-                        "_duplicate_attachment_check",
-                        message.author,
-                        message.guild.id,
-                        cur_attachment.url,
-                    )
-        if check_content and url is not None:
-            compare = await self._hash_parse(record=record, url=url)
-            if compare:
-                LOGGER.warning(
-                    "<%s.%s> | User sent duplicate Content URL. | User: %s | Guild ID: %s | URL: %s",
-                    __class__.__name__,
-                    "_duplicate_attachment_check",
-                    message.author,
-                    message.guild.id,
-                    url,
-                )
-
-        self.spam_messages.update({message.author.id : record})
         # LOGGER.info("User Record: %s", record)
 
-
-    async def _hash_parse(self, record: MessageRecords, url: str) -> bool:
-        data: bytes | None = await self.get_request(url =url)
+    async def _hash_parse(self, author: discord.Member, record: MessageRecords, url: str) -> bool:
+        data: bytes | None = await self.get_request(url=url)
         if data is None:
             return False
         # Use the bytes from the get request, truncate to 16 chars and compare against existing hashes.
         res = sha256(data).hexdigest()[:16]
         if res not in record.hashes:
             # LOGGER.info("Added a Hash to the User")
-            record.hashes.append(res)
+            record.hashes = res
             return False
         # LOGGER.info("Found a duplicate Hash for the User")
         record.count += 1
-        self.spam_messages.update({record.messages[0].author.id : record})
+        if record.count == 1:
+            record.timestamp = datetime.datetime.now(tz=datetime.UTC)
+        self.spam_messages.update({author.id: record})
         return True
-
-
 
     @commands.command(name="reload", help="Reloads all extensions unless specified.")
     @commands.is_owner()
