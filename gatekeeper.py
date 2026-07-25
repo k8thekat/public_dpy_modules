@@ -367,9 +367,9 @@ class Gatekeeper(Cog):
                     action,
                     context.author,
                 )
-                return await context.send(content=f"Failed to get instance by ID: {server} || {instance}")
+                return await context.send(content=f"Failed to get instance by ID: `{server}` {self.emoji_table.kuma_sad}\n> {instance}")
         except Exception as e:  # noqa: BLE001
-            return await context.send(content=f"Failed to get instance by ID: {server} || {e}")
+            return await context.send(content=f"Failed to get instance by ID: `{server}` {self.emoji_table.kuma_sad}\n> {e}")
 
         # TODO(@k8theat): - The app_state check may cause problems in the future. Need to test.
         # if isinstance(instance, AMPMinecraftInstance) and instance.running is True and instance.app_state == AMPInstanceState.ready:
@@ -388,7 +388,7 @@ class Gatekeeper(Cog):
                     )
                 except IndexError:
                     pass
-            return await context.send(content="Failed to get console reply", ephemeral=True, delete_after=self.message_timeout)
+            return await context.send(content=f"Failed to get console reply. {self.emoji_table.kuma_hmm}", ephemeral=True, delete_after=self.message_timeout)
 
         return await context.send(
             content=f"It appears the Instance is having trouble...{self.emoji_table.to_inline_emoji('kuma_bleh')}",
@@ -409,13 +409,13 @@ class Gatekeeper(Cog):
             instance: InstanceTypeAliases | ActionResultError = await self.ADS.get_instance(instance_id=server)
             if isinstance(instance, ActionResultError):
                 return await context.send(
-                    content=f"Failed to get Instance by ID. | Server ID: {server}",
+                    content=f"Failed to get instance by ID: `{server}` {self.emoji_table.kuma_sad}",
                     ephemeral=True,
                     delete_after=self.message_timeout,
                 )
         except Exception as e:  # noqa: BLE001
             return await context.send(
-                content=f"Failed to get instance by ID: {server} || {e}",
+                content=f"Failed to get instance by ID: `{server}` {self.emoji_table.kuma_sad}\n> {e}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
@@ -460,7 +460,7 @@ class Gatekeeper(Cog):
 
         if source_role is None or new_role is None or isinstance(source_role, ActionResultError) or isinstance(new_role, ActionResultError):
             LOGGER.error("Failed to locate Role ID: %s . | Roles: %s", source, roles)
-            return await context.send(content=f"Failed to locate the Role ID: {source}", ephemeral=True, delete_after=self.message_timeout)
+            return await context.send(content=f"Failed to locate Role ID: `{source}` {self.emoji_table.kuma_hmm}", ephemeral=True, delete_after=self.message_timeout)
 
         temp: list[str] = []
         for perm in source_role.permissions:
@@ -472,7 +472,7 @@ class Gatekeeper(Cog):
                 temp.append(f"Set {perm}: **True**")
 
         return await context.send(
-            content=f"Duplicated {source_role.name} to {new_role.name}, with permissions:" + "\n".join(temp),
+            content=f"Duplicated **{source_role.name}** to **{new_role.name}** with permissions: {self.emoji_table.kuma_star_eye}\n" + "\n".join(temp),
             ephemeral=True,
             delete_after=self.message_timeout,
         )
@@ -502,14 +502,14 @@ class Gatekeeper(Cog):
             instance: InstanceTypeAliases | ActionResultError = await self.ADS.get_instance(instance_id=server)
         except Exception as e:  # noqa: BLE001
             return await context.send(
-                content=f"Failed to get instance by ID: {server} || {e}",
+                content=f"Failed to get instance by ID: `{server}` {self.emoji_table.kuma_sad}\n> {e}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
 
         if isinstance(instance, ActionResultError):
             return await context.send(
-                content=f"Failed to get instance by ID: {server} || {instance}",
+                content=f"Failed to get instance by ID: `{server}` {self.emoji_table.kuma_sad}\n> {instance}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
@@ -517,9 +517,6 @@ class Gatekeeper(Cog):
         failed = False
         res = None
         if isinstance(instance, InstanceTypeAliases) and instance.running is True:
-            # ? Suggestions
-            # Need to improve logic on checking app_state names to prevent errors.
-            # We can still get ActionResultErrors for other reasons outside of the app_state.
             if action == "start":
                 if instance.app_state.name in ("starting", "installing", "failed", "stopping", "preparing_for_sleep"):
                     failed = True
@@ -546,21 +543,20 @@ class Gatekeeper(Cog):
 
             if failed is True:
                 return await context.send(
-                    content=f"The application for **{instance.friendly_name}** Instance was already `{instance.app_state.name}`.",
+                    content=f"**{instance.friendly_name}** is already `{instance.app_state.name}`. {self.emoji_table.kuma_hmm}",
                     ephemeral=True,
                     delete_after=self.message_timeout,
                 )
-            # WE should only see this on errors such as failed connections or the Application is already running/etc.
             if isinstance(res, ActionResultError):
                 await context.send(
-                    content=f"It appears the application on **{instance.friendly_name}** Instance ran into an error.\n**Status**: {instance.app_state}\n**Error**:\t{res}",
+                    content=f"**{instance.friendly_name}** ran into an error. {self.emoji_table.kuma_crying}\n**Status**: {instance.app_state}\n**Error**:\t{res}",
                     ephemeral=True,
                     delete_after=self.message_timeout,
                 )
 
             elif isinstance(res, ActionResult) or res is None:
                 await context.send(
-                    content=f"The {instance.module_display_name} applcation on **{instance.friendly_name}** Instance was {self.string_inflection(action)}...",
+                    content=f"The {instance.module_display_name} application on **{instance.friendly_name}** was {self.string_inflection(action)}. {self.emoji_table.kuma_wow}",
                     ephemeral=True,
                     delete_after=self.message_timeout,
                 )

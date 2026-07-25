@@ -23,8 +23,15 @@ from pkgutil import ModuleInfo, iter_modules
 
 # Private Repo Cogs.
 __path__.append(Path(__file__).parent.joinpath("private").as_posix())
-_ext: list[ModuleInfo] = [
-    module for module in iter_modules(path=__path__, prefix=__name__ + ".") if not module.name.startswith(__name__ + "._")
-]
 
-EXTENSIONS: list[ModuleInfo] = _ext
+
+def discover_extensions() -> list[ModuleInfo]:
+    """Re-scan `__path__` for extension modules.
+
+    Re-runs `iter_modules` so files added to `extensions/` (or `extensions/private/`)
+    after import time are picked up, instead of relying on the stale snapshot below.
+    """
+    return [module for module in iter_modules(path=__path__, prefix=__name__ + ".") if not module.name.startswith(__name__ + "._")]
+
+
+EXTENSIONS: list[ModuleInfo] = discover_extensions()

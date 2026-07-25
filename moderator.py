@@ -22,10 +22,12 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 import asyncio
 import datetime
 import inspect
+import json
 import logging
 import re
 import sqlite3
 from hashlib import sha256
+from pathlib import Path
 from pkgutil import ModuleInfo
 from sqlite3 import Row
 from typing import TYPE_CHECKING, Literal, Optional, TypedDict, Union, Unpack, reveal_type
@@ -36,12 +38,13 @@ from discord import Colour, Member, Message, User, app_commands
 from discord.app_commands import Choice
 from discord.ext import commands, tasks
 
-from extensions import EXTENSIONS
+import extensions
 from kuma_kuma import Kuma_Kuma, _get_prefix, _get_trusted
 from utils import (
     KumaCog as Cog,  # need to replace with your own Cog class
     KumaContext as Context,
     KumaGuildContext as GuildContext,
+    reload_module_dependencies,
 )
 from utils._types import EmbedParams
 from utils.embeds import KumaEmbed
@@ -72,11 +75,13 @@ class MessageRecords:
     _hashes: list[str]
     """We are only going to store ``16`` characters of the full hash."""
     timestamp: datetime.datetime
+    _urls: list[str]
 
     def __init__(self, count: int, timestamp: Optional[datetime.datetime] = None) -> None:
         # self.messages = messages
         self.count = count
         self._hashes = []
+        self._urls = []
         # This is getting overwritten right after count == 1
         # I didn't want to set it to None; as then that's another logic check.
         if timestamp is None:
@@ -88,6 +93,21 @@ class MessageRecords:
 
     @property
     def hashes(self) -> list[str]:
+        """Users recent attachment hashes.
+
+        .. note::
+            The hashes are truncated to [:16] chars for efficiency.
+            - You can re-hash the ``URLs`` entry and cross validate if needed.
+
+        .. note::
+            Rotates only 2 recent entries.
+
+        Returns
+        -------
+        :class:`list[str]`
+            A list of hashes.
+
+        """
         return self._hashes
 
     @hashes.setter
@@ -97,6 +117,29 @@ class MessageRecords:
             self.hashes.append(value)
         else:
             self.hashes.append(value)
+
+    @property
+    def urls(self) -> list[str]:
+        """Users recent URL attachments.
+
+        .. note::
+            Rotates only 2 recent entries.
+
+        Returns
+        -------
+        :class:`list[str]`
+            A list of URL strings.
+
+        """
+        return self._urls
+
+    @urls.setter
+    def urls(self, value: str) -> None:
+        if len(self.urls) == 2:
+            self.urls.pop(0)
+            self.urls.append(value)
+        else:
+            self.urls.append(value)
 
 
 class ModeratorSettings(TypedDict):
@@ -121,7 +164,7 @@ class ModeratorSettingsEmbed(KumaEmbed):
     def __init__(self, cog: Cog, content: ModeratorSettings, guild: discord.Guild, **kwargs: Unpack[EmbedParams]) -> None:
 
         if kwargs.get("title") is None:
-            kwargs["title"] = f"{guild} Settings"
+            kwargs["title"] = f"{guild} Mod Settings"
 
         super().__init__(cog=cog, **kwargs)
 
@@ -201,6 +244,10 @@ class Moderator(Cog):
     SPAM_LIMIT: int = 3
     spam_messages: dict[int, MessageRecords]
 
+    # Global shorthand hash table — persisted across restarts.
+    _banned_hash_file: Path = Path(__file__).parent.joinpath("moderator_hashes.json")
+    banned_hashes: set[str]
+
     def __init__(self, bot: Kuma_Kuma) -> None:
         super().__init__(bot=bot)
 
@@ -208,8 +255,27 @@ class Moderator(Cog):
         async with self.bot.pool.acquire() as conn:
             await conn.execute(MODERATOR_SETUP_SQL)
         self.spam_messages = {}
+        self.banned_hashes = self._load_banned_hashes()
         # LOGGER.info(_mod_settings_choices())
         # LOGGER.info(ModeratorSettings.__annotations__)
+
+    def _load_banned_hashes(self) -> set[str]:
+        """Loads the global ban hash table from `moderator_hashes.json`."""
+        if not self._banned_hash_file.is_file():
+            return set()
+        try:
+            data: list[str] = json.loads(self._banned_hash_file.read_text())
+            return set(data)
+        except (json.JSONDecodeError, OSError):
+            LOGGER.exception("<%s.%s> | Failed to load banned hashes.", __class__.__name__, "_load_banned_hashes")
+            return set()
+
+    def _save_banned_hashes(self) -> None:
+        """Saves the global ban hash table to `moderator_hashes.json`."""
+        try:
+            self._banned_hash_file.write_text(json.dumps(list(self.banned_hashes)))
+        except OSError:
+            LOGGER.exception("<%s.%s> | Failed to save banned hashes.", __class__.__name__, "_save_banned_hashes")
 
     async def get_mod_settings(self, guild: discord.Guild) -> ModeratorSettings | None:
         """Retrieves the Moderator Settings for the provided Discord guild.
@@ -305,17 +371,20 @@ class Moderator(Cog):
                         guild.id,
                     )  # pyright: ignore[reportAssignmentType]
 
-                if data is None:
-                    LOGGER.error(
-                        "<%s.%s> | We encountered an error %s a row in the database. | GuildID: %s",
-                        __class__.__name__,
-                        "set_mod_settings",
-                        "inserting" if default else "updating",
-                        guild.id,
-                    )
-                    msg = f"Unable to {'insert' if default else 'update'} a row in the database."
-                    raise sqlite3.DatabaseError(msg)  # noqa: TRY301
+                # if data is None:
                 return data
+
+        except sqlite3.DatabaseError:
+            LOGGER.exception(
+                "<%s.%s> | We encountered an error %s a row in the database. | GuildID: %s",
+                __class__.__name__,
+                "set_mod_settings",
+                "inserting" if default else "updating",
+                guild.id,
+            )
+            msg = f"Unable to {'insert' if default else 'update'} a row in the database."
+            raise sqlite3.DatabaseError(msg) from None
+
         except Exception as e:
             LOGGER.exception("<%s.%s> | We encountered an error executing %s", __class__.__name__, "set_mod_settings", exc_info=e)
             msg = "Unable to connect to the database."
@@ -430,35 +499,58 @@ class Moderator(Cog):
         """
         # If we are in a Guild and the Guild member has admin, ignore.
         if isinstance(message.author, User) or message.guild is None:
-            # LOGGER.info("<%s.%s> | Duplicate Attachment Check Failed", __class__.__name__, "duplicate_attachment_check")
+            LOGGER.debug(
+                "<%s.%s> | Duplicate Attachment Check Failed | Author Type: %s | Guild: %s",
+                __class__.__name__,
+                "duplicate_attachment_check",
+                type(message.author),
+                message.guild,
+            )
+            return
+
+        if message.stickers:
+            LOGGER.debug(
+                "<%s.%s> | Duplicate Attachment Check Failed | User: %s | Stickers: %s",
+                __class__.__name__,
+                "duplicate_attachment_check",
+                message.author,
+                len(message.stickers),
+            )
             return
 
         if message.author.guild_permissions.administrator is True:
+            LOGGER.debug(
+                "<%s.%s> | Duplicate Attachment Check Failed | User: %s | Admin: %s",
+                __class__.__name__,
+                "duplicate_attachment_check",
+                message.author,
+                message.author.guild_permissions.administrator,
+            )
             return
 
         check_attachments: bool = False
         check_content: bool = False
-        url: str | None = None
 
         if len(message.attachments) != 0:
             # LOGGER.info("User sent an Attachment")
             check_attachments = True
 
-        match: re.Match[str] | None = re.search(HTTP_REGEX, message.content)
-        if match is not None:
-            url = match.group()
+        urls: list[str] = re.findall(HTTP_REGEX, message.content)
+        if urls:
             check_content = True
-            # LOGGER.info("User sent a Content URL. | URL: %s", url)
+            # LOGGER.info("User sent Content URL(s). | URLs: %s", urls)
 
-        LOGGER.debug(
-            "<%s.%s> | Author Type: %s | Author Admin: %s | Message Guild: %s | Msg Attachment Count: %s",
-            __class__.__name__,
-            "duplicate_attachment_check",
-            type(message.author),
-            message.author.guild_permissions.administrator,
-            message.guild,
-            len(message.attachments),
-        )
+        if check_attachments or check_content:
+            LOGGER.debug(
+                "<%s.%s> | Author: %s | Author Type: %s | Author Admin: %s | Message Guild: %s | Msg Attachment Count: %s",
+                __class__.__name__,
+                "duplicate_attachment_check",
+                message.author,
+                type(message.author),
+                message.author.guild_permissions.administrator,
+                message.guild,
+                len(message.attachments),
+            )
 
         record: MessageRecords = self.spam_messages.get(message.author.id, MessageRecords(count=0))
         # LOGGER.info("User: %s | Record: %s", message.author, record)
@@ -475,19 +567,19 @@ class Moderator(Cog):
                         message.guild.id,
                         cur_attachment.url,
                     )
-        if check_content and url is not None:
-            compare = await self._hash_parse(author=message.author, record=record, url=url)
-            if compare:
-                LOGGER.warning(
-                    "<%s.%s> | User sent duplicate Content URL. | User: %s | Guild ID: %s | URL: %s",
-                    __class__.__name__,
-                    "_duplicate_attachment_check",
-                    message.author,
-                    message.guild.id,
-                    url,
-                )
+        if check_content:
+            for url in urls:
+                compare = await self._hash_parse(author=message.author, record=record, url=url)
+                if compare:
+                    LOGGER.warning(
+                        "<%s.%s> | User sent duplicate Content URL. | User: %s | Guild ID: %s | URL: %s",
+                        __class__.__name__,
+                        "_duplicate_attachment_check",
+                        message.author,
+                        message.guild.id,
+                        url,
+                    )
 
-        # self.spam_messages.update({message.author.id : record})
         # If the users count breaks SPAM LIMIT, we try to ban the user.
         if record.count >= self.SPAM_LIMIT:
             cur_time: datetime.datetime = datetime.datetime.now(tz=datetime.UTC)
@@ -524,6 +616,9 @@ class Moderator(Cog):
                     "_duplicate_attachment_check",
                     message.author,
                 )
+                # Append the banned user's hashes to the global banned hash table.
+                self.banned_hashes.update(record.hashes)
+                await asyncio.to_thread(self._save_banned_hashes)
             # In case we do not have permissions in the server we are in.
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 LOGGER.exception(
@@ -536,6 +631,7 @@ class Moderator(Cog):
 
             # Only send a message if we don't trigger the except.
             embed = AutoModEmbed(cog=self, mod_action="Ban", user=message.author, guild=user_guild, reason="Spam/Duplicate messages.")
+            embed.add_field(name="__Attachments__", value="\n>".join(list(record.urls)))
             await self.bot.owner.send(embed=embed, silent=True)
         # LOGGER.info("User Record: %s", record)
 
@@ -545,16 +641,34 @@ class Moderator(Cog):
             return False
         # Use the bytes from the get request, truncate to 16 chars and compare against existing hashes.
         res = sha256(data).hexdigest()[:16]
-        if res not in record.hashes:
+
+        # Check against the global banned hash table first.
+        if res in self.banned_hashes:
+            LOGGER.warning(
+                "<%s.%s> | Hash matched a entry of our global banned hash table. | User: %s | Hash: %s",
+                __class__.__name__,
+                "_hash_parse",
+                author,
+                res,
+            )
+            record.count = self.SPAM_LIMIT
+            self.spam_messages.update({author.id: record})
+            return True
+
+        duplicate: bool = res in record.hashes
+        if not duplicate:
             # LOGGER.info("Added a Hash to the User")
             record.hashes = res
-            return False
-        # LOGGER.info("Found a duplicate Hash for the User")
-        record.count += 1
-        if record.count == 1:
-            record.timestamp = datetime.datetime.now(tz=datetime.UTC)
+            record.urls = url
+        else:
+            # LOGGER.info("Found a duplicate Hash for the User")
+            record.count += 1
+            if record.count == 1:
+                record.timestamp = datetime.datetime.now(tz=datetime.UTC)
+
+        # Always persist so new hashes survive to the next message.
         self.spam_messages.update({author.id: record})
-        return True
+        return duplicate
 
     @commands.command(name="reload", help="Reloads all extensions unless specified.")
     @commands.is_owner()
@@ -562,39 +676,63 @@ class Moderator(Cog):
         await context.typing(ephemeral=True)
         _flag = False
         try:
+            # Re-scan the extensions directory so new files are picked up without a restart.
+            current_extensions: list[ModuleInfo] = extensions.discover_extensions()
+            extensions.EXTENSIONS = current_extensions
+
             name = "UNK"
-            for extension in EXTENSIONS:
+            new_count = 0
+            for extension in current_extensions:
                 if isinstance(extension, ModuleInfo):
                     name = extension.name.split(".")[1]
+                    is_new = extension.name not in self.bot.extensions
 
                     # If any additional args; attempt to find a match.
                     if args is not None and args.lower() in extension.name.lower():
-                        await self.bot.reload_extension(name=extension.name)
+                        if is_new:
+                            await self.bot.load_extension(name=extension.name)
+                        else:
+                            # Refresh utils.* dependencies so the extension re-imports fresh code.
+                            reload_module_dependencies(extension.name)
+                            await self.bot.reload_extension(name=extension.name)
                         LOGGER.info("Loaded %sextension: %s", "module " if extension.ispkg else "", extension.name)
                         _flag = True
                         break
 
-                    # else we have no args; reload each module each iteration.
+                    # else we have no args; reload/load each module each iteration.
                     if args is None:
-                        await self.bot.reload_extension(name=extension.name)
+                        if is_new:
+                            await self.bot.load_extension(name=extension.name)
+                            new_count += 1
+                        else:
+                            # Refresh utils.* dependencies so the extension re-imports fresh code.
+                            reload_module_dependencies(extension.name)
+                            await self.bot.reload_extension(name=extension.name)
                         LOGGER.info("Loaded %sextension: %s", "module " if extension.ispkg else "", extension.name)
 
             if _flag:
                 await context.send(
-                    content=f"**SUCCESS** Reloading the `{name}` extension.",
+                    content=f"Reloaded the `{name}` extension. {self.emoji_table.kuma_happy}",
                     ephemeral=True,
                     delete_after=self.message_timeout,
                 )
                 return
 
             await context.send(
-                content=f"**SUCCESS** Reloading all {len(EXTENSIONS)} Extensions.",
+                content=(
+                    f"Reloaded all {len(current_extensions)} extensions. {self.emoji_table.kuma_star_eye}"
+                    + (f" ({new_count} newly loaded)" if new_count else "")
+                ),
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
         except Exception as e:
             LOGGER.exception("<%s.%s> | We encountered an error executing %s", __class__.__name__, context.command, exc_info=e)
-            await context.send(content=f"__We encountered an Error__ - \n{e}", ephemeral=True, delete_after=self.message_timeout)
+            await context.send(
+                content=f"We encountered an error reloading... {self.emoji_table.kuma_crying}\n{e}",
+                ephemeral=True,
+                delete_after=self.message_timeout,
+            )
 
     @commands.command(name="sync", help=f"Sync the {BOT_NAME} commands to the guild.")
     @commands.is_owner()
@@ -625,7 +763,7 @@ class Moderator(Cog):
             self.bot.tree.copy_global_to(guild=context.guild)
             LOGGER.info("%s Commands Sync'd Locally: %s", self.bot.user.name, await self.bot.tree.sync(guild=context.guild))
             return await context.send(
-                content=f"Successfully sync'd `{self.bot.user.name}s` commands to {context.guild}...",
+                content=f"Sync'd `{self.bot.user.name}s` commands to {context.guild}. {self.emoji_table.kuma_happy}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
@@ -639,9 +777,13 @@ class Moderator(Cog):
             res: list[Row] = await conn.fetchall("""SELECT prefix FROM prefix WHERE serverid = ?""", context.guild.id)
             if len(res) > 0:
                 prefixes = "\n".join([entry["prefix"] for entry in res])
-                return await context.send(content=f"**Current Prefixes:** \n{prefixes}", delete_after=self.message_timeout, ephemeral=True)
+                return await context.send(
+                    content=f"**Current Prefixes:** {self.emoji_table.kuma_peak}\n{prefixes}",
+                    delete_after=self.message_timeout,
+                    ephemeral=True,
+                )
             return await context.send(
-                content="It appears you do not have any prefix's set",
+                content=f"No prefixes set for this server. {self.emoji_table.kuma_shrug}",
                 delete_after=self.message_timeout,
                 ephemeral=True,
             )
@@ -653,7 +795,7 @@ class Moderator(Cog):
         async with self.bot.pool.acquire() as conn:
             await conn.execute("""INSERT INTO prefix(serverid, prefix) VALUES(?, ?)""", context.guild.id, prefix.lstrip())
             return await context.send(
-                content=f"Added the prefix `{prefix}` for {context.guild.name}",
+                content=f"Added the prefix `{prefix}` for {context.guild.name}. {self.emoji_table.kuma_happy}",
                 delete_after=self.message_timeout,
                 ephemeral=True,
             )
@@ -665,7 +807,10 @@ class Moderator(Cog):
         # assert context.guild is not None
         async with self.bot.pool.acquire() as conn:
             await conn.execute("""DELETE FROM prefix WHERE serverid = ? AND prefix = ?""", context.guild.id, prefix.lstrip())
-            return await context.send(content=f"Removed the prefix - `{prefix}`", delete_after=self.message_timeout)
+            return await context.send(
+                content=f"Removed the prefix `{prefix}`. {self.emoji_table.kuma_chuckle}",
+                delete_after=self.message_timeout,
+            )
 
     @prefix.command(name="clear", help=f"Clear all prefixes for {BOT_NAME}in a guild.", aliases=["prec", "pc"])
     @commands.is_owner()
@@ -674,7 +819,7 @@ class Moderator(Cog):
         async with self.bot.pool.acquire() as conn:
             await conn.execute("""DELETE FROM prefix WHERE serverid = ?""", context.guild.id)
             return await context.send(
-                content=f"Removed all prefix's for {context.guild.name}",
+                content=f"Cleared all prefixes for {context.guild.name}. {self.emoji_table.kuma_tea}",
                 delete_after=self.message_timeout,
                 ephemeral=True,
             )
@@ -699,19 +844,23 @@ class Moderator(Cog):
                     await conn.execute("""INSERT INTO owners(ownerid) VALUES(?)""", member.id)
                     self.bot.owner_ids.add(member.id)
                     return await context.send(
-                        content=f"Added {member.mention} to the owner list",
+                        content=f"Added {member.mention} to the owner list. {self.emoji_table.kuma_star_eye}",
                         ephemeral=True,
                         delete_after=self.message_timeout,
                     )
             else:
-                return await context.send(content=f"{member} are already an owner", ephemeral=True, delete_after=self.message_timeout)
+                return await context.send(
+                    content=f"{member} is already an owner. {self.emoji_table.kuma_hmm}",
+                    ephemeral=True,
+                    delete_after=self.message_timeout,
+                )
 
         elif option == "remove":
             async with self.bot.pool.acquire() as conn:
                 cur: Cursor = await conn.execute("""DELETE FROM owners WHERE ownerid = ?""", member.id)
                 self.bot.owner_ids.remove(member.id)
                 return await context.send(
-                    content=f"Removed {cur.get_cursor().rowcount} Users as an owner",
+                    content=f"Removed {cur.get_cursor().rowcount} user(s) from the owner list. {self.emoji_table.kuma_chuckle}",
                     ephemeral=True,
                     delete_after=self.message_timeout,
                 )
@@ -771,7 +920,7 @@ class Moderator(Cog):
 
     # @app_commands.guild_only()
     @commands.hybrid_group(name="settings")
-    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.default_permissions(administrator=True)
     async def settings(self, interaction: GuildContext) -> Message:
         settings: ModeratorSettings | None = await self.get_mod_settings(guild=interaction.guild)
         if settings is not None:
@@ -791,20 +940,25 @@ class Moderator(Cog):
 
     @settings.command(name="set")
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.default_permissions(administrator=True)
     @app_commands.choices(option=_mod_settings_choices())
-    async def set_setting(self, context: GuildContext, option: Choice[str], value: bool) -> Message:
-        updated: ModeratorSettings | None = await self.set_mod_settings(guild=context.guild, setting=option.value, value=value)
+    async def set_setting(self, interaction: GuildContext, option: Choice[str], value: bool) -> Message:
+        settings: ModeratorSettings | None = await self.get_mod_settings(guild=interaction.guild)
+        # Set the default settings for the new guild.
+        if settings is None:
+            await self.set_mod_settings(guild=interaction.guild, default=True)
 
+        updated: ModeratorSettings | None = await self.set_mod_settings(guild=interaction.guild, setting=option.value, value=value)
         if updated is not None:
-            embed = ModeratorSettingsEmbed(cog=self, content=updated, guild=context.guild)
-            return await context.send(
+            embed = ModeratorSettingsEmbed(cog=self, content=updated, guild=interaction.guild)
+            return await interaction.send(
                 embed=embed,
                 delete_after=self.message_timeout,
                 files=embed.attachments,
+                ephemeral=True,
             )
-        return await context.send(
-            content=self.emoji_table.kuma_crying,
+        return await interaction.send(
+            content=f"We encountered an error updating the database. {self.emoji_table.kuma_crying}",
             delete_after=self.message_timeout,
         )
 
@@ -815,8 +969,12 @@ class Moderator(Cog):
         res: User | None = self.bot.get_user(discord_id)
         if res is not None:
             embed = discord.Embed(color=res.color, title=res.global_name, description=f"**{res.id}**")
-            return await context.send(embed=embed)
-        return await context.send(content=f"Unable to find the Discord ID: {discord_id}")
+            return await context.send(embed=embed, ephemeral=True, delete_after=self.message_timeout)
+        return await context.send(
+            content=f"Unable to find Discord ID: `{discord_id}`. {self.emoji_table.kuma_hmm}",
+            ephemeral=True,
+            delete_after=self.message_timeout,
+        )
 
 
 async def setup(bot: Kuma_Kuma) -> None:  # noqa: D103 # docstring

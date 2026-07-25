@@ -82,7 +82,6 @@ from moogle_intuition.modules import (
     SpearFishing,
 )
 
-from kuma_kuma import KumaCommandTree
 from utils import FFXIVResources, KumaCog as Cog, KumaContext as Context, KumaEmbed as Embed
 from utils._types import Metrics
 
