@@ -43,7 +43,7 @@ from discord.ext import commands
 from git import Repo
 
 from kuma_kuma import Kuma_Kuma
-from utils import KumaCog as Cog, KumaEmbed, KumaView  # need to replace with your own Cog class
+from utils import CodeFormat, KumaCog as Cog, KumaEmbed, KumaView, code_block  # need to replace with your own Cog class
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -63,7 +63,7 @@ CUSTOM_EMOJI_PATTERN: re.Pattern[str] = re.compile(r"<a?:(\w+):(\d+)>")
 
 
 def get_latest_commits(url: str, repo: Repo, branch: str, max_count: int = 5) -> str:
-    """Retrieves a Github Repo's lastest commits.
+    """Retrieves a Github Repo's latest commits.
 
     Parameters
     ----------
@@ -79,7 +79,7 @@ def get_latest_commits(url: str, repo: Repo, branch: str, max_count: int = 5) ->
     Returns
     -------
     :class:`str`
-        A elongated string of github commit information seperated by new lines.
+        An elongated string of GitHub commit information separated by new lines.
 
     """
     reply = ""
@@ -161,7 +161,7 @@ class YoinkEmbed(KumaEmbed):
             kwargs["color"] = discord.Color.green()
 
         if emoji is None and sticker is None:
-            err = "You most provided either an Emoji or Sticker."
+            err = "You must provide either an Emoji or a Sticker."
             raise ValueError(err)
 
         if emoji is not None:
@@ -287,26 +287,31 @@ class YoinkView(KumaView):
         await interaction.response.defer()
         item.disabled = True
         self.reset_callback.disabled = False
-        sticker = self.embeds[self.indx].sticker
-        if sticker is not None:
+
+        # One embed carries either a sticker or an emoji, never both. The old shape ran the sticker
+        # branch and then fell into the emoji `else`, so copying a sticker always finished by trying
+        # to answer an interaction it had already deferred — an `InteractionResponded` every time,
+        # and the "Oops" branch could never be reached by an emoji embed either.
+        embed: YoinkEmbed = self.embeds[self.indx]
+        if embed.sticker is not None:
             self.add_item(
                 item=YoinkGuildSelect(
-                    sticker=await sticker.fetch(),
+                    sticker=await embed.sticker.fetch(),
                     placeholder="Which Guild...?",
                     options=self.options,
                 ),
             )
-            await interaction.edit_original_response(view=self)
-
-        emoji = self.embeds[self.indx].emoji
-        if emoji is not None:
-            self.add_item(item=YoinkGuildSelect(emoji=emoji, placeholder="Which Guild...?", options=self.options))
-            await interaction.edit_original_response(view=self)
+        elif embed.emoji is not None:
+            self.add_item(item=YoinkGuildSelect(emoji=embed.emoji, placeholder="Which Guild...?", options=self.options))
         else:
-            await interaction.response.send_message(
+            # Deferred already, so this has to be a followup rather than a response.
+            await interaction.followup.send(
                 content=f"Oops, looks like our Embed didn't have what we needed.. {self.cog.emoji_table.kuma_pout}",
                 ephemeral=True,
             )
+            return
+
+        await interaction.edit_original_response(view=self)
 
     @discord.ui.button(label="To App Emoji", style=discord.ButtonStyle.blurple, disabled=False, row=1)
     async def to_app_emoji(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:  # noqa: ARG002
@@ -339,138 +344,139 @@ class YoinkView(KumaView):
 
 
 class GithubIssueSubmissionModal(discord.ui.Modal):
+    """Opens a GitHub issue from a Discord message, in one modal.
+
+    The repository and the submission type used to be a :class:`discord.ui.View` of two selects whose
+    callbacks opened this modal once both had been answered. That two step existed only because a
+    modal could not hold a select; :class:`discord.ui.Label` (discord.py 2.6) can wrap one, so the
+    whole flow is a single dialog and there is no half answered state to carry between components.
+
+    .. warning::
+        A modal takes at most five children and every :class:`discord.ui.Label` counts as one, so
+        this is **full**. A sixth field means dropping one of these or folding it into the body.
+
+    """
+
     bot: Kuma_Kuma
     issue_msg: discord.Message
-    repo: str
-    submission_type: str
+    repos: ClassVar[list[str]] = ["AMPAPI_Python", "Kuma_Kuma", "public_dpy_modules", "GatekeeperV2", "ImageSorter"]
+    submission_types: ClassVar[list[str]] = ["Issue", "Feature"]
+    # A text input takes at most 4000 characters, so a long message has to be cut to fit the default.
+    body_size: ClassVar[int] = 4000
 
     def __init__(
         self,
         bot: Kuma_Kuma,
         issue_msg: discord.Message,
-        repo: str,
-        submission_type: str,
         title: str = "Create a Github Issue for Kuma Kuma.",
     ) -> None:
         self.issue_msg = issue_msg
         self.bot = bot
-        self.repo = repo
-        self.submission_type = submission_type
         super().__init__(title=title)
-        # TODO: Change formatting on Placeholder, looks odd...
-        self.issue_title = discord.ui.TextInput(
-            label=f"{self.repo} - Issue Title",
-            placeholder=f"{self.repo}...issue!",
-            required=True,
+
+        self.repo = discord.ui.Select(
+            placeholder="Please select a Repository...",
+            options=[discord.SelectOption(label=entry.replace("_", " "), value=entry) for entry in self.repos],
         )
-        # TODO: Validate default field is grabbing enough of the original message content to make it obvious what is going on.
-        # Maybe consider a larger text input? If possible?
-        # This needs addressing as the "label" parameter has been deprecated.
+        self.submission_type = discord.ui.Select(
+            placeholder="Type of Issue to submit...",
+            options=[discord.SelectOption(label=entry, value=entry) for entry in self.submission_types],
+        )
+        self.issue_title = discord.ui.TextInput(placeholder="A short summary of the issue.", required=True)
         self.issue_body = discord.ui.TextInput(
-            label=f"{self.repo} - Issue Body",
-            default=self.issue_msg.content,
+            default=self.issue_msg.content[: self.body_size],
             style=discord.TextStyle.long,
             required=True,
         )
-        # discord.ui.Label(text=f"{self.repo} - Issue Body", component=self.issue_body)
-        self.add_item(item=self.issue_title)
-        self.add_item(item=self.issue_body)
+
+        # Pre-filled rather than appended silently, so the link can be read before it is submitted
+        # and cleared when the issue has outgrown the message that started it.
+        self.source = discord.ui.TextInput(default=self.issue_msg.jump_url, required=False)
+
+        self.add_item(item=discord.ui.Label(text="Repository", description="Which repo the issue is opened against.", component=self.repo))
+        self.add_item(item=discord.ui.Label(text="Type", description="An issue or a feature request.", component=self.submission_type))
+        self.add_item(item=discord.ui.Label(text="Issue Title", component=self.issue_title))
+        self.add_item(
+            item=discord.ui.Label(
+                text="Issue Body", description="Pre-filled with the message; edit it however you like.", component=self.issue_body
+            ),
+        )
+        self.add_item(
+            item=discord.ui.Label(
+                text="Source", description="Jump link back to the Discord message. Clear it to leave it out.", component=self.source
+            ),
+        )
+
+    def build_body(self) -> str:
+        """Assembles the issue body from the body field and the source link.
+
+        Kept out of :meth:`on_submit` so the assembly can be read and tested without an interaction.
+        This is GitHub flavoured markdown, not Discord's, so a `---` rule renders here — the opposite
+        of everywhere else in this repo.
+
+        Returns
+        -------
+        :class:`str`
+            The issue body to POST.
+
+        """
+        if not self.source.value:
+            return self.issue_body.value
+        return f"{self.issue_body.value}\n\n---\n*Submitted from [Discord]({self.source.value}).*"
 
     async def on_submit(self, interaction: discord.Interaction) -> discord.InteractionCallbackResponse:
-        url: str = f"https://api.github.com/repos/{self.bot.config.github_owner}/{self.repo}/issues"
+        # A required select always answers with exactly one value, but reading `[0]` blind would turn
+        # any surprise into an IndexError inside `on_error` rather than a message anyone can act on.
+        if not self.repo.values or not self.submission_type.values:
+            return await interaction.response.send_message(
+                content=f"I didn't catch the repository or the type. {self.bot.emoji_table.kuma_hmm}",
+                ephemeral=True,
+            )
+
+        repo: str = self.repo.values[0]
+        url: str = f"https://api.github.com/repos/{self.bot.config.github_owner}/{repo}/issues"
         headers: dict[str, str] = {
             "Authorization": "token " + self.bot.config.github_token,
             "Accept": "application/vnd.github.raw+json",
         }
-        # We made need to truncate the "title" field eventually if they get too long. See `self.issue_title` and set `max_length`.
         # TODO: See about adding file attachments from the message to the Github issue.
-        modified_title: str = self.submission_type + " " + self.issue_title.value + " | submitted via Discord"
+        modified_title: str = f"[{self.submission_type.values[0]}] {self.issue_title.value} | submitted via Discord"
         data: dict[str, Union[str, list]] = {
             "title": modified_title,
-            "body": self.issue_body.value,
-            "assigness": ["k8thekat"],
+            "body": self.build_body(),
+            # `assignees`, not `assigness` — GitHub drops unknown fields without complaining, so
+            # every issue opened this way came out unassigned. Taken from the configured repo owner
+            # rather than a hardcoded name, since that is who the token belongs to.
+            "assignees": [self.bot.config.github_owner],
         }
 
-        res: ClientResponse = await self.bot.session.post(url=url, data=json.dumps(data), headers=headers)
-        if res.status == 201:
-            resp: GitHubIssueSubmissionResponse = await res.json()
-            return await interaction.response.send_message(embed=GithubIssueSubmissionEmbed(gh_response=resp, user=interaction.user))
-        return await interaction.response.send_message(
-            content=f"Failed to create an issue. {self.bot.emoji_table.kuma_sad} | Status: {res.status}\n> You can try manually [here](https://docs.github.com/en/rest/issues/issues?apiVersion=2022-11-28#create-an-issue).",
-        )
+        # `async with`, so a failed call releases the connection instead of holding it open.
+        async with self.bot.session.post(url=url, data=json.dumps(data), headers=headers) as res:
+            if res.status == 201:
+                resp: GitHubIssueSubmissionResponse = await res.json()
+                LOGGER.info(
+                    "<%s.%s> | Opened a GitHub issue. | Repo: %s | Number: %s | By: %s",
+                    __class__.__name__,
+                    "on_submit",
+                    repo,
+                    resp.get("number", "UNK"),
+                    interaction.user.name,
+                )
+                return await interaction.response.send_message(embed=GithubIssueSubmissionEmbed(gh_response=resp, user=interaction.user))
 
-
-class GithubIssueSubmissionResult(TypedDict):
-    submission: str
-    repo: str
-
-
-class GithubIssueSubmissionView(discord.ui.View):
-    bot: Kuma_Kuma
-    cog: Utility
-    issue_msg: discord.Message
-    repos: ClassVar[list[str]] = ["AMPAPI_Python", "Kuma_Kuma", "public_dpy_modules", "GatekeeperV2", "ImageSorter"]
-    submission_types: ClassVar[list[str]] = ["Issue", "Feature"]
-    repo: GithubIssueSubmissionSelect
-    submission_type: GithubIssueSubmissionSelect
-    interaction_user: Union[discord.Member, discord.User]
-
-    def __init__(
-        self,
-        bot: Kuma_Kuma,
-        cog: Utility,
-        issue_msg: discord.Message,
-        interaction_user: Union[discord.User, discord.Member],
-    ) -> None:
-        self.cog = cog
-        self.bot = bot
-        self.issue_msg = issue_msg
-        self.interaction_user = interaction_user
-        super().__init__()
-        choices: list[discord.SelectOption] = [discord.SelectOption(label=e.replace("_", " "), value=e) for e in self.repos]
-        self.repo = GithubIssueSubmissionSelect(
-            options=choices,
-            placeholder="Please select a Repository...",
-        )
-
-        choices = [discord.SelectOption(label=e, value=f"[{e}]") for e in self.submission_types]
-        self.submission_type = GithubIssueSubmissionSelect(
-            placeholder="Type of Issue to submit...",
-            options=choices,
-        )
-        self.add_item(item=self.submission_type)
-        self.add_item(item=self.repo)
-
-    async def check_results(self, interaction: discord.Interaction) -> bool:
-        if self.repo.is_done and self.submission_type.is_done:
-            await interaction.response.send_modal(
-                GithubIssueSubmissionModal(
-                    bot=self.bot,
-                    issue_msg=self.issue_msg,
-                    repo=self.repo.result,
-                    submission_type=self.submission_type.result,
-                ),
+            LOGGER.error(
+                "<%s.%s> | Failed to open a GitHub issue. | Repo: %s | Status: %s | By: %s",
+                __class__.__name__,
+                "on_submit",
+                repo,
+                res.status,
+                interaction.user.name,
             )
-            return True
-        return False
-
-
-class GithubIssueSubmissionSelect(discord.ui.Select):
-    view: GithubIssueSubmissionView
-    is_done: bool = False
-    result: str
-
-    def __init__(self, options: list[discord.SelectOption], placeholder: str) -> None:
-        super().__init__(options=options, placeholder=placeholder)
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user == self.view.interaction_user:
-            self.result = self.values[0]
-            self.is_done = True
-            if await self.view.check_results(interaction=interaction) is True:
-                return
-
-        await interaction.response.defer()
+            return await interaction.response.send_message(
+                content=f"Failed to create an issue. {self.bot.emoji_table.kuma_sad} | Status: {res.status}\n"
+                f"> You can try manually [here](https://docs.github.com/en/rest/issues/issues?apiVersion=2022-11-28#create-an-issue).",
+                ephemeral=True,
+            )
 
 
 class GithubIssueSubmissionEmbed(discord.Embed):
@@ -508,7 +514,7 @@ class URLref(TypedDict):
 
 
 class Utility(Cog):
-    """A class to house useful commands about the bot and it's code."""
+    """A class to house useful commands about the bot and its code."""
 
     repo_url: str = "https://github.com/k8thekat/public_dpy_modules"
     lookup: ClassVar[dict[str, URLref]] = {
@@ -587,14 +593,33 @@ class Utility(Cog):
             **CPU:** {cpu_usage:.2f}%
             **Load Avg:** 1m: `{load_avg[0]:.2f}%` | 5m: `{load_avg[1]:.2f}%` | 15m: `{load_avg[2]:.2f}%`
             **Threads:** {psutil.Process().num_threads()}
-            **Latency:** {self.bot.latency:.2f}ms""",
+            **Latency:** {self.bot.latency * 1000:.2f}ms""",
         )
+
+        # `len([self.bot.get_all_members()])` was measuring a one element list wrapped around the
+        # generator, so this always read 1. Counted two ways because they answer different questions:
+        # `bot.users` is unique people, and summing `member_count` is seats across every guild.
+        unique_users: int = len(self.bot.users)
+        total_members: int = sum(guild.member_count or 0 for guild in self.bot.guilds)
+
+        # An `Intents` object reprs as all ~20 flags, most of them False, which is a wall of noise in
+        # an embed. The three privileged ones are the only ones that have to be granted in the
+        # developer portal, so they are the useful thing to report — with the raw bitfield alongside,
+        # which is what the portal and `Intents._from_value()` actually speak.
+        privileged: dict[str, bool] = {
+            "members": self.bot.intents.members,
+            "message_content": self.bot.intents.message_content,
+            "presences": self.bot.intents.presences,
+        }
+        granted: str = ", ".join(f"`{name}`" for name, enabled in privileged.items() if enabled) or "`none`"
+
         embed.add_field(
             inline=False,
             name="__Discord__",
             value=f"""**Guilds:** {len(self.bot.guilds)}
-            **User/Members:** {len([self.bot.get_all_members()])}
-            **Intents:** {self.bot.intents}""",
+            **Users:** {unique_users:,} unique | {total_members:,} members
+            **Privileged Intents:** {granted}
+            **Intents Value:** `{self.bot.intents.value}`""",
         )
 
         try:
@@ -730,7 +755,7 @@ class Utility(Cog):
             filename = src.co_filename
             code_class = obj._cog  # noqa: SLF001
 
-            # Handles my seperate repo URLs. (Could store this as part of the cog class?)
+            # Handles my separate repo URLs. (Could store this as part of the cog class?)
             # This requires you do define `repo_url` per script for files in a different parent directory than your bot.py
             if code_class is not None and hasattr(obj._cog, "repo_url"):  # noqa: SLF001
                 source_url = obj._cog.repo_url  # pyright: ignore[reportAttributeAccessIssue]  # noqa: SLF001
@@ -789,29 +814,71 @@ class Utility(Cog):
 
     async def create_github_issue(self, interaction: discord.Interaction, message: discord.Message) -> None:
         """Create a github issue via a Discord Message."""
-        if interaction.user.id in self.bot.owner_ids or await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message(
-                content="Kuma Kuma Bear says please select a GitHub Repository to create an issue for:",
-                view=GithubIssueSubmissionView(bot=self.bot, cog=self, issue_msg=message, interaction_user=interaction.user),
-                ephemeral=True,
-                delete_after=self.message_timeout,
-            )
-        else:
+        if interaction.user.id not in self.bot.owner_ids and not await self.bot.is_owner(interaction.user):
             await interaction.response.send_message(
                 content=f"Kuma Kuma Bear says Creating GitHub Issues is only allowed for __Trusted Users__. {self.emoji_table.kuma_pout}",
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
+            return
 
-    @commands.command(name="logs", help="Retrieve the most recent log file.")
-    async def get_log_file(self, context: Context, as_file: bool = False) -> discord.Message:
+        # Straight to the modal. The repository and type are fields inside it now, so the message
+        # that used to ask for them first has nothing left to say.
+        await interaction.response.send_modal(GithubIssueSubmissionModal(bot=self.bot, issue_msg=message))
+
+    @commands.command(name="logs", help="Retrieve the most recent log file. eg. `logs false 25 true ERROR WARNING`")
+    async def get_log_file(
+        self,
+        context: Context,
+        as_file: bool = False,
+        entries: int = 15,
+        colour: bool = True,
+        *,
+        levels: Optional[str] = None,
+    ) -> discord.Message:
+        """Send the tail of the current log file.
+
+        Parameters
+        ----------
+        context: :class:`Context`
+            The invoking command context.
+        as_file: :class:`bool`, optional
+            Upload the whole log as an attachment instead, by default False.
+        entries: :class:`int`, optional
+            How many of the most recent records to show, by default 15.
+        colour: :class:`bool`, optional
+            Render level colours in an `ansi` block, by default True.
+        levels: :class:`str` | None, optional
+            Only show these levels, by default None (all). Space or comma
+            separated, e.g. `ERROR WARNING`.
+
+        """
         if as_file is True:
             log_f = discord.File(
                 fp=io.BytesIO(initial_bytes=self.bot.loghandler.cur_log.read_text().encode(encoding="utf-8")),
                 filename="log.txt",
             )
             return await context.send(file=log_f)
-        return await context.send(content=f"```ps\n{self.bot.loghandler.parse_log()}```", delete_after=self.message_timeout)
+
+        try:
+            excerpt: str = self.bot.loghandler.parse_log(entries=entries, levels=levels, colour=colour)
+        except ValueError as e:
+            return await context.send(
+                content=f"{self.emoji_table.kuma_hmm} {e}",
+                delete_after=self.message_timeout,
+            )
+
+        if not excerpt:
+            scope: str = f" matching `{levels}`" if levels else ""
+            return await context.send(
+                content=f"{self.emoji_table.kuma_shrug} No log entries{scope}.",
+                delete_after=self.message_timeout,
+            )
+
+        return await context.send(
+            content=code_block(excerpt, CodeFormat.ANSI if colour else CodeFormat.POWERSHELL),
+            delete_after=self.message_timeout,
+        )
 
     @commands.command(name="app_emojis", help="Displays a list of all application emojis.")
     async def app_emojis(self, context: Context, *, query: Optional[str], codefmt: bool = False) -> None:

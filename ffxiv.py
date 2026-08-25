@@ -1512,9 +1512,13 @@ class BaseView(discord.ui.View):
         """Index key for `Self.embeds[]`, by default is 0.
 
         You cannot set this value larger than the len(self.embeds)-1.
+
+        .. note::
+            Clamps to `len(self.embeds) - 1`, not `len(self.embeds)` — the latter is one past the end
+            and would raise an :class:`IndexError` on the very lookup this property exists to make safe.
         """
         if self.embeds is not None and self._indx > len(self.embeds) - 1:
-            return len(self.embeds)
+            return len(self.embeds) - 1
         return self._indx
 
     @indx.setter
@@ -1683,7 +1687,6 @@ class BaseView(discord.ui.View):
 
         item.disabled = True
         view = self.reset_view()
-        view.recent_interaction = interaction
         if self.dispatched_by is not None and isinstance(self.dispatched_by, ItemView):
             view = ItemView(
                 item=self.dispatched_by.item,
@@ -1693,6 +1696,13 @@ class BaseView(discord.ui.View):
                 embeds=self.dispatched_by.embeds,
                 dispatched_by=self,
             )
+            # A freshly built view starts at the Button class defaults, which leave "Next" enabled even
+            # when there is only a single embed to page through.
+            view.next_callback.disabled = not (view.embeds is not None and len(view.embeds) > 1)
+
+        # Assigned after the rebuild; the view we actually send is the one that needs the interaction
+        # for its on_timeout() cleanup.
+        view.recent_interaction = interaction
 
         if view.embeds is not None:
             await interaction.response.edit_message(view=view, embed=view.embeds[0], attachments=view.embeds[0].attachments)
@@ -1709,22 +1719,26 @@ class BaseView(discord.ui.View):
             return
 
         self.recent_interaction = interaction
-        # Sanity check (if somehow our indx get's too small?)
-        if self.indx >= 0:
+        # Guard against underflow: on the first page there is nothing to go back to, and decrementing
+        # would leave indx at -1, which silently renders `embeds[-1]` — the *last* page.
+        if self.indx > 0:
             self.indx -= 1
-            if self.indx < len(self.embeds) - 1:
-                self.next_callback.disabled = False
 
-            if self.indx == 0:
-                item.disabled = True
+        if self.indx < len(self.embeds) - 1:
+            self.next_callback.disabled = False
 
-            embed: EmbedTypeAlias = self.embeds[self.indx].set_footer(
-                text=f"{self.indx + 1} out of {len(self.embeds)} | Moogles Intuition",
-            )
-            if isinstance(embed, ItemEmbed):
-                await interaction.response.edit_message(embed=embed, view=self, attachments=embed.attachments)
-                return
-            await interaction.response.edit_message(embed=embed, view=self, attachments=[])
+        if self.indx == 0:
+            item.disabled = True
+
+        # The response is sent regardless of whether indx actually moved; bailing out without one
+        # leaves Discord showing "This interaction failed."
+        embed: EmbedTypeAlias = self.embeds[self.indx].set_footer(
+            text=f"{self.indx + 1} out of {len(self.embeds)} | Moogles Intuition",
+        )
+        if isinstance(embed, ItemEmbed):
+            await interaction.response.edit_message(embed=embed, view=self, attachments=embed.attachments)
+            return
+        await interaction.response.edit_message(embed=embed, view=self, attachments=[])
 
     @discord.ui.button(label="Next", style=discord.ButtonStyle.green, emoji=RESOURCES.emojis.right_arrow_icon, disabled=False, row=1)
     async def next_callback(self, interaction: discord.Interaction, item: discord.ui.Button[Self]) -> None:
@@ -1774,6 +1788,13 @@ class BaseView(discord.ui.View):
 
         self.indx = 0
         self.recent_interaction = None
+
+        # Reset the navigation buttons to their initial defaults; without this the view is back on
+        # page 1 while "Previous" is still enabled from wherever the user had paged to.
+        self.previous_callback.disabled = True
+        self.next_callback.disabled = not (self.embeds is not None and len(self.embeds) > 1)
+        self.reset_callback.disabled = True
+
         if self.components is None:
             return self
 

@@ -20,12 +20,13 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 """
 
 import asyncio
+import contextlib
 import inspect
 import io
 import logging
 import traceback
 from contextlib import redirect_stdout
-from typing import Any, Optional, TypedDict, reveal_type
+from typing import Any, Optional, TypedDict
 
 import discord
 from discord.ext import commands
@@ -38,11 +39,15 @@ from utils import (
 
 LOGGER = logging.getLogger()
 
+
 class Session(TypedDict):
     user: discord.User | discord.Member
     message: discord.Message
     channel: int
 
+
+# How long a session waits for its next line before closing itself.
+SESSION_TIMEOUT: float = 10 * 60
 
 
 class Repl(Cog):
@@ -52,16 +57,34 @@ class Repl(Cog):
         super().__init__(bot=bot)
 
     async def cog_load(self) -> None:
-        # TODO - Add support for multiple users in a single channel.
-        # self._sessions: set[int] = set()
+        # Keyed by user ID: a session belongs to a person, and one channel can hold several.
         self._sessions: dict[int, Session] = {}
-
-    async def on_message(self, message: discord.Message) -> None:
-        if message.channel.id == self._sessions.get(message.author.id):
-            return
 
     async def cog_unload(self) -> None:
         self._sessions = {}
+
+    async def end_session(self, context: Context, *, reason: str) -> None:
+        """Closes the caller's session and says why.
+
+        Every way out of the loop goes through here, so the session is dropped exactly once and the
+        goodbye is written exactly once. The old code repeated the pop and the send at each exit,
+        and one of them sent the same message twice.
+
+        Parameters
+        ----------
+        context: :class:`Context`
+            The context the session was started from.
+        reason: :class:`str`
+            Why the session is ending, as a fragment: "timed out", "you asked".
+
+        """
+        session: Optional[Session] = self._sessions.pop(context.author.id, None)
+        reference: Optional[discord.Message] = session["message"] if session is not None else None
+        with contextlib.suppress(discord.HTTPException):
+            await context.send(
+                content=f"Exiting the `REPL` session — {reason}. {self.emoji_table.kuma_shrug}",
+                reference=reference,
+            )
 
     # TODO: Replace ctx.message to reference the most recent edited or reply message
     # Check `pop` references were I remove an existing session. Validate reference messages and content in array.
@@ -82,15 +105,27 @@ class Repl(Cog):
             # "`_`": None, Unsure what this variable was being used for.
         }
 
-        if ctx.channel.id in self._sessions:
-            await ctx.send(content=f"Already running a `REPL` session in this channel for {ctx.author}. Exit it with `quit`.")
+        # Keyed by author, so this has to *check* by author too — it looked the channel ID up in a
+        # dict of user IDs, never matched, and a second `repl` quietly replaced the first session's
+        # bookkeeping while the first loop carried on running against it.
+        existing: Optional[Session] = self._sessions.get(ctx.author.id)
+        if existing is not None:
+            await ctx.send(
+                content=f"You already have a `REPL` session open in <#{existing['channel']}>. Exit it with `quit`. "
+                f"{self.emoji_table.kuma_hmm}",
+            )
             return
-        # if ctx.author.id not in self._sessions:
+
         self._sessions[ctx.author.id] = {"user": ctx.author, "channel": ctx.channel.id, "message": ctx.message}
 
         c_vars = "\n- ".join(variables)
         await ctx.send(
-            content=f"""Enter code to execute or evaluate wrapped in backticks. \nUse `exit()` or `quit` to exit. {self.emoji_table.kuma_wow}\n__Session Variables__\n- {c_vars}""", reference=self._sessions[ctx.author.id]["message"],  # noqa: E501
+            content=(
+                f"Enter code to execute or evaluate wrapped in backticks. {self.emoji_table.kuma_wow}\n"
+                f"Use `exit()` or `quit` to exit.\n"
+                f"__Session Variables__\n- {c_vars}"
+            ),
+            reference=self._sessions[ctx.author.id]["message"],
         )
 
         # def check(message: discord.Message) -> bool:
@@ -110,85 +145,51 @@ class Repl(Cog):
             return False
 
         while True:
-            tasks = [
+            waiters: list[asyncio.Task[Any]] = [
                 asyncio.create_task(self.bot.wait_for("message", check=on_msg_check), name="onmsg"),
                 asyncio.create_task(self.bot.wait_for("message_edit", check=on_msg_edit_check), name="editmsg"),
             ]
+            done, pending = await asyncio.wait(waiters, timeout=SESSION_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+
+            # Whatever did not win is cancelled on every path out of here. `wait_for` registers a
+            # listener on the bot and only drops it when its future resolves, so a task left pending
+            # goes on running its check against a session that has already been closed — and the
+            # check reaches into `_sessions` for an entry that is no longer there.
+            for task in pending:
+                task.cancel()
+
+            if not done:
+                # `asyncio.wait` *returns* on timeout rather than raising it, so the `except
+                # TimeoutError` this used to sit in was unreachable; a quiet session fell into the
+                # StopIteration branch instead, which blamed the wrong thing and left both listeners
+                # registered on the way out.
+                await self.end_session(ctx, reason="it went quiet for 10 minutes")
+                return
+
+            finished: asyncio.Task[Any] = next(iter(done))
             try:
-                done, pending = await asyncio.wait(
-                    tasks,
-                    timeout=10 * 60,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                # response = await self.bot.wait_for("message", check=self.check, timeout=10.0 * 60.0)
-                try:
-                    finished: asyncio.Task = next(iter(done))
-                except StopIteration:
-                    LOGGER.warning(
-                        "<%s.%s> | Failed to find a finished Task, <StopIteration> | Tasks: %s",
-                        __class__.__name__,
-                        "repl",
-                        tasks,
-                    )
-                    msg = f"Exiting `REPL` session due to **StopIteration Error**. | {self.emoji_table.kuma_shock}"
-                    try:
-                        await ctx.send(content=msg, reference=self._sessions[ctx.author.id]["message"])
-                    except discord.HTTPException:
-                        await ctx.send(content=msg, reference=self._sessions[ctx.author.id]["message"])
+                result: Any = finished.result()
+            except Exception:
+                LOGGER.exception("<%s.%s> | The REPL waiter raised. | Task: %s", __class__.__name__, "repl", finished.get_name())
+                await self.end_session(ctx, reason="something went wrong waiting for your next line")
+                return
 
-                    self._sessions.pop(ctx.author.id)
-                    return
-
-                for task in pending:
-                    try:
-                        task.cancel()
-                    except asyncio.CancelledError:
-                        LOGGER.warning("<%s.%s> | Failed to cancel Task. | Task: %s", __class__.__name__, "repl", task)
-                        continue
-
-                response = None
-                action = finished.get_name()
-                try:
-                    result = finished.result()
-                except TimeoutError:
-                    LOGGER.warning(
-                        "<%s.%s> | Failed to get Task results due to <TimeoutError> | Task: %s",
-                        __class__.__name__,
-                        "repl",
-                        finished,
-                    )
-                    await ctx.send(
-                        content=f"Exiting `REPL` session due to a TimeoutError. {self.emoji_table.kuma_shock}")
-                    self._sessions.pop(ctx.author.id)
-                    return
-
-                # Unsure if this scenario would actually occur
-                response: Optional[discord.Message] = result[1] if action == "editmsg" else result
-                if response is None:
-                    await ctx.send(
-                        content=f"Exiting `REPL` session due to failed result parsing. {self.emoji_table.kuma_shock}",
-                        reference=self._sessions[ctx.author.id]["message"],
-                    )
-                    self._sessions.pop(ctx.author.id)
-                    return
-
-            except TimeoutError:
-                await ctx.send(
-                    content=f"Exiting `REPL` session.{self.emoji_table.kuma_shock}",
-                    reference=self._sessions[ctx.author.id]["message"],
-                )
-                self._sessions.pop(ctx.author.id)
+            # `wait_for("message_edit")` resolves to a `(before, after)` pair; `message` resolves to
+            # the message itself.
+            response: Optional[discord.Message] = result[1] if finished.get_name() == "editmsg" else result
+            if response is None:
+                await self.end_session(ctx, reason="I couldn't read that result")
                 return
 
             cleaned = self.cleanup_code(response.content)
 
             if cleaned in ("quit", "exit", "exit()", "q"):
-                await ctx.send(content=f"Exiting. {self.emoji_table.kuma_shrug}", reference=self._sessions[ctx.author.id]["message"])
-                self._sessions.pop(ctx.author.id)
+                await self.end_session(ctx, reason="you asked")
                 return
 
-            if cleaned in ("?"):
-                await ctx.send(f"{variables.keys()}")
+            if cleaned == "?":
+                await ctx.send(content="__Session Variables__\n- " + "\n- ".join(variables))
+                continue
 
             executor = exec
             code = ""
