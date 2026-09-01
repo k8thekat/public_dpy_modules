@@ -33,7 +33,7 @@ import re
 import unicodedata
 from pathlib import Path
 from re import Match
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Self, TypedDict, Union, Unpack
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, Optional, Self, TypedDict, Union, Unpack
 
 import aiofiles
 import discord
@@ -42,8 +42,8 @@ from discord import app_commands
 from discord.ext import commands
 from git import Repo
 
-from kuma_kuma import Kuma_Kuma
-from utils import CodeFormat, KumaCog as Cog, KumaEmbed, KumaView, code_block  # need to replace with your own Cog class
+from kuma_kuma import LOG_TAIL_MAX_BYTES, Kuma_Kuma
+from utils import CodeFormat, KumaCog as Cog, KumaEmbed, KumaView, code_block, colourise_log, parse_levels
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -60,6 +60,72 @@ ErrorAliases = (discord.errors.HTTPException, discord.errors.NotFound, TypeError
 BOT_NAME = "Kuma Kuma"
 LOGGER = logging.getLogger()
 CUSTOM_EMOJI_PATTERN: re.Pattern[str] = re.compile(r"<a?:(\w+):(\d+)>")
+
+# Matches emoji and sticker CDN URLs from both hosts Discord uses.
+# Groups: (asset_type: "emojis"|"stickers"), (id), (extension), (query_string)
+CDN_ASSET_PATTERN: re.Pattern[str] = re.compile(
+    r"https?://(?:cdn\.discordapp\.com|media\.discordapp\.net)/(emojis|stickers)/(\d+)\.(png|gif|json|webp)(\?\S*)?",
+)
+
+
+class CDNAsset(NamedTuple):
+    """A single emoji or sticker parsed from a Discord CDN URL.
+
+    Attributes
+    ----------
+    kind: :class:`Literal["emoji", "sticker"]`
+        Whether this asset is an emoji or a sticker.
+    id: :class:`int`
+        The snowflake ID of the asset.
+    animated: :class:`bool`
+        Best-guess animation state. ``True`` when the query string contains
+        ``animated=true``, the extension is ``.gif``, or the extension is
+        ambiguous (``.webp`` without a query param) — the caller should probe
+        with :meth:`KumaCog.resolve_cdn_emoji` to confirm.
+
+    """
+
+    kind: Literal["emoji", "sticker"]
+    id: int
+    animated: bool
+
+
+def parse_cdn_assets(content: str) -> list[CDNAsset]:
+    """Extract emoji and sticker references from Discord CDN URLs in text.
+
+    Scans ``content`` for ``cdn.discordapp.com`` and ``media.discordapp.net`` links
+    pointing at ``/emojis/{id}`` or ``/stickers/{id}``. Each unique ID is returned
+    once, in the order it first appears.
+
+    Parameters
+    ----------
+    content: :class:`str`
+        The message text to scan.
+
+    Returns
+    -------
+    :class:`list[CDNAsset]`
+        Parsed assets, deduplicated by ID and ordered by first occurrence.
+
+    """
+    assets: list[CDNAsset] = []
+    seen: set[int] = set()
+    for match in CDN_ASSET_PATTERN.finditer(content):
+        asset_type: str = match.group(1)
+        asset_id: int = int(match.group(2))
+        extension: str = match.group(3)
+        query: str = match.group(4) or ""
+        if asset_id in seen:
+            continue
+        seen.add(asset_id)
+
+        kind: Literal["emoji", "sticker"] = "emoji" if asset_type == "emojis" else "sticker"
+        # Query param is authoritative; .gif is a certain yes; .webp is ambiguous so
+        # default to True — resolve_cdn_emoji will probe and fall back on a 415.
+        animated: bool = "animated=true" in query or extension != "png"
+        assets.append(CDNAsset(kind=kind, id=asset_id, animated=animated))
+
+    return assets
 
 
 def get_latest_commits(url: str, repo: Repo, branch: str, max_count: int = 5) -> str:
@@ -135,27 +201,33 @@ class YoinkEmbed(KumaEmbed):
         The parent Cog, passed through to :class:`KumaEmbed`.
     emoji: :class:`Optional[discord.PartialEmoji | discord.Emoji]`
         The emoji to display. Sets the title, image, ID, and animated fields.
-    sticker: :class:`Optional[discord.StickerItem]`
+    sticker: :class:`Optional[Union[discord.StickerItem, discord.Sticker]]`
         The sticker to display. Sets the title, image, ID, and description fields.
+    image_data: :class:`Optional[bytes]`
+        Pre-fetched image bytes from a CDN probe. When present the copy paths
+        skip a second ``emoji.read()`` call.
     **kwargs: :class:`Unpack[EmbedParams]`
         Any additional keyword arguments forwarded to :class:`KumaEmbed`.
 
     """
 
     emoji: Optional[discord.PartialEmoji | discord.Emoji] = None
-    sticker: Optional[discord.StickerItem] = None
+    sticker: Optional[Union[discord.StickerItem, discord.Sticker]] = None
+    image_data: Optional[bytes] = None
 
     def __init__(
         self,
         cog: Cog,
         *,
         emoji: Optional[discord.PartialEmoji | discord.Emoji] = None,
-        sticker: Optional[discord.StickerItem] = None,
+        sticker: Optional[Union[discord.StickerItem, discord.Sticker]] = None,
+        image_data: Optional[bytes] = None,
         **kwargs: Unpack[EmbedParams],
     ) -> None:
 
         self.emoji = emoji
         self.sticker = sticker
+        self.image_data = image_data
 
         if kwargs.get("color") is None:
             kwargs["color"] = discord.Color.green()
@@ -192,12 +264,14 @@ class YoinkGuildSelect(discord.ui.Select["YoinkView"]):
         *,
         emoji: Optional[discord.PartialEmoji | discord.Emoji] = None,
         sticker: Optional[Union[discord.Sticker, discord.StandardSticker, discord.GuildSticker]] = None,
+        image_data: Optional[bytes] = None,
         placeholder: str,
         options: list[discord.SelectOption],
     ) -> None:
         super().__init__(placeholder=placeholder, options=options)
         self.emoji = emoji
         self.sticker = sticker
+        self.image_data = image_data
 
     async def callback(self, interaction: discord.Interaction) -> None:
         if len(self.values) > 0 and self.view is not None:
@@ -235,7 +309,8 @@ class YoinkGuildSelect(discord.ui.Select["YoinkView"]):
 
             elif self.emoji is not None:
                 try:
-                    emoji = await to_guild.create_custom_emoji(name=self.emoji.name, image=await self.emoji.read(), reason="Yoinked")
+                    image: bytes = self.image_data or await self.emoji.read()
+                    emoji = await to_guild.create_custom_emoji(name=self.emoji.name, image=image, reason="Yoinked")
                     await interaction.response.send_message(content=f"Successfully copied the emoji. -> {emoji}", ephemeral=True)
                 except ErrorAliases as e:
                     LOGGER.exception(
@@ -294,15 +369,24 @@ class YoinkView(KumaView):
         # and the "Oops" branch could never be reached by an emoji embed either.
         embed: YoinkEmbed = self.embeds[self.indx]
         if embed.sticker is not None:
+            # StickerItem is a lightweight stub; fetch the full object. Sticker subclasses are already complete.
+            full_sticker = await embed.sticker.fetch() if isinstance(embed.sticker, discord.StickerItem) else embed.sticker
             self.add_item(
                 item=YoinkGuildSelect(
-                    sticker=await embed.sticker.fetch(),
+                    sticker=full_sticker,
                     placeholder="Which Guild...?",
                     options=self.options,
                 ),
             )
         elif embed.emoji is not None:
-            self.add_item(item=YoinkGuildSelect(emoji=embed.emoji, placeholder="Which Guild...?", options=self.options))
+            self.add_item(
+                item=YoinkGuildSelect(
+                    emoji=embed.emoji,
+                    image_data=embed.image_data,
+                    placeholder="Which Guild...?",
+                    options=self.options,
+                ),
+            )
         else:
             # Deferred already, so this has to be a followup rather than a response.
             await interaction.followup.send(
@@ -320,7 +404,7 @@ class YoinkView(KumaView):
 
         try:
             if embed.emoji is not None:
-                image = await embed.emoji.read()
+                image: bytes = embed.image_data or await embed.emoji.read()
                 name: str = re.sub(r"[^\w]", "_", embed.emoji.name or "yoinked")[:32]
                 app_emoji = await self.cog.bot.create_application_emoji(name=name, image=image)
                 await interaction.followup.send(content=f"Created your application emoji~ {name}\n{app_emoji}.", ephemeral=True)
@@ -511,6 +595,190 @@ class URLref(TypedDict):
 
     aliases: list[str]
     urls: list[str]
+
+
+#: Safe character budget for log text inside a single CV2 page, leaving room
+#: for heading, footer, code fence wrapper and breathing room.
+LOG_PAGE_BUDGET: int = 3800
+
+
+def _paginate_log_entries(entries: list[str], *, budget: int = LOG_PAGE_BUDGET) -> list[str]:
+    """Group coloured log entries into code-block pages fitting the CV2 character budget.
+
+    Parameters
+    ----------
+    entries: :class:`list[str]`
+        Coloured log entries, one string per record.
+    budget: :class:`int`, optional
+        Maximum characters of log text per page, by default :attr:`LOG_PAGE_BUDGET`.
+
+    Returns
+    -------
+    :class:`list[str]`
+        Code-blocked pages ready for a :class:`discord.ui.TextDisplay`.
+
+    """
+    # The code_block wrapper adds ~12 chars for the fence markers.
+    page_budget: int = budget - 12
+
+    pages: list[str] = []
+    current: list[str] = []
+    current_length: int = 0
+
+    for entry in entries:
+        cost: int = len(entry) + 1
+        if current and current_length + cost > page_budget:
+            pages.append(code_block("\n".join(current), CodeFormat.ANSI))
+            current = []
+            current_length = 0
+        current.append(entry)
+        current_length += cost
+
+    if current:
+        pages.append(code_block("\n".join(current), CodeFormat.ANSI))
+
+    return pages or [code_block("(empty)", CodeFormat.ANSI)]
+
+
+class LogPageButton(discord.ui.Button["LogPanel"]):
+    """Steps a :class:`LogPanel` one page in either direction."""
+
+    def __init__(self, *, step: int, label: str, emoji: str) -> None:
+        super().__init__(style=discord.ButtonStyle.blurple, label=label, emoji=emoji)
+        self.step: int = step
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        """Turn the panel; a dead view means the message outlived its handler."""
+        view: Optional[LogPanel] = self.view
+        if view is None:
+            return
+        await view.turn(interaction=interaction, step=self.step)
+
+
+class LogFileButton(discord.ui.Button["LogPanel"]):
+    """Sends the full log file as an ephemeral attachment."""
+
+    def __init__(self) -> None:
+        super().__init__(style=discord.ButtonStyle.secondary, label="Get File", emoji="\U0001f4c4")
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        """Read the log file and send it as an ephemeral attachment with context."""
+        view: Optional[LogPanel] = self.view
+        if view is None:
+            return
+
+        log_path: Path = view.log_path
+        if not log_path.exists():
+            await interaction.response.send_message(content="Log file no longer exists.", ephemeral=True)
+            return
+
+        try:
+            log_file = discord.File(
+                fp=io.BytesIO(initial_bytes=log_path.read_text().encode(encoding="utf-8")),
+                filename=f"kuma_log_{datetime.datetime.now(tz=datetime.UTC).strftime('%Y-%m-%d')}.txt",
+            )
+        except OSError:
+            await interaction.response.send_message(content="Could not read the log file.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            content=f"Full log — `{log_path.name}` · captured <t:{int(datetime.datetime.now(tz=datetime.UTC).timestamp())}:f>",
+            file=log_file,
+            ephemeral=True,
+        )
+
+
+class LogPanel(discord.ui.LayoutView):
+    """Paginated log viewer as a Components V2 panel.
+
+    Parameters
+    ----------
+    cog: :class:`KumaCog`
+        The parent cog.
+    owner_id: :class:`int`
+        Who may press the buttons.
+    pages: :class:`Sequence[str]`
+        Pre-formatted code-block pages of log content.
+    log_path: :class:`Path`
+        Path to the log file for the Get File button.
+    filter_label: :class:`Optional[str]`, optional
+        The active level filter shown in the heading, by default ``None``.
+    index: :class:`int`, optional
+        Which page to render, by default ``0``.
+    timeout: :class:`Optional[float]`, optional
+        View timeout, by default ``120.0``.
+
+    """
+
+    def __init__(
+        self,
+        *,
+        cog: Cog,
+        owner_id: int,
+        pages: Sequence[str],
+        log_path: Path,
+        filter_label: Optional[str] = None,
+        index: int = 0,
+        timeout: Optional[float] = 120.0,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.cog: Cog = cog
+        self.owner_id: int = owner_id
+        self.pages: Sequence[str] = pages
+        self.log_path: Path = log_path
+        self.filter_label: Optional[str] = filter_label
+        self.index: int = index
+        self.length: int = len(pages)
+
+        heading: str = "## Log Viewer"
+        if filter_label is not None:
+            heading += f" · `{filter_label}`"
+
+        container = discord.ui.Container(accent_colour=discord.Colour.og_blurple())
+        container.add_item(discord.ui.TextDisplay(heading))
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(pages[index]))
+
+        if self.length > 1:
+            container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.TextDisplay(self._page_footer()))
+
+        self.add_item(container)
+
+        nav_row: discord.ui.ActionRow[Self] = discord.ui.ActionRow()
+        if self.length > 1:
+            nav_row.add_item(LogPageButton(step=-1, label="Previous", emoji="\U00002b05"))
+            nav_row.add_item(LogPageButton(step=1, label="Next", emoji="\U000027a1"))
+        nav_row.add_item(LogFileButton())
+        self.add_item(nav_row)
+
+    def _page_footer(self) -> str:
+        """The page counter line."""
+        return f"-# Page {self.index + 1}/{self.length}"
+
+    def rebuild(self, index: int) -> LogPanel:
+        """Return the same panel showing ``index`` instead."""
+        return LogPanel(
+            cog=self.cog,
+            owner_id=self.owner_id,
+            pages=self.pages,
+            log_path=self.log_path,
+            filter_label=self.filter_label,
+            index=index,
+            timeout=self.timeout,
+        )
+
+    async def turn(self, *, interaction: discord.Interaction, step: int) -> None:
+        """Redraw the panel on a neighbouring page, wrapping at both ends."""
+        panel: LogPanel = self.rebuild((self.index + step) % self.length)
+        await interaction.response.edit_message(view=panel)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Rejects anyone but the owner."""
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(content="That panel isn't yours.", ephemeral=True)
+        return False
 
 
 class Utility(Cog):
@@ -793,11 +1061,39 @@ class Utility(Cog):
                 embeds.append(YoinkEmbed(cog=self, emoji=emoji))
 
         for match in CUSTOM_EMOJI_PATTERN.finditer(message.content):
-            partial = discord.PartialEmoji.from_str(match.group(0))
-            partial._state = self.bot._connection  # noqa: SLF001
-            if partial.id is not None and partial.id not in seen_ids:
-                seen_ids.add(partial.id)
-                embeds.append(YoinkEmbed(cog=self, emoji=partial))
+            parsed: discord.PartialEmoji = discord.PartialEmoji.from_str(match.group(0))
+            if parsed.id is None or parsed.id in seen_ids:
+                continue
+            # `with_state` wires the emoji to the bot's HTTP client so `.read()` works.
+            partial: discord.PartialEmoji = discord.PartialEmoji.with_state(
+                self.bot.connection_state,
+                name=parsed.name or "_",
+                animated=parsed.animated,
+                id=parsed.id,
+            )
+            seen_ids.add(parsed.id)
+            embeds.append(YoinkEmbed(cog=self, emoji=partial))
+
+        # Pick up bare CDN URLs (emoji/sticker links pasted without markup).
+        for asset in parse_cdn_assets(message.content):
+            if asset.id in seen_ids:
+                continue
+            seen_ids.add(asset.id)
+            if asset.kind == "emoji":
+                # Probe the CDN to confirm animation; caches the image bytes on success.
+                partial, image_data = await self.resolve_cdn_emoji(
+                    name="cdn_emoji",
+                    emoji_id=asset.id,
+                    animated=asset.animated,
+                )
+                embeds.append(YoinkEmbed(cog=self, emoji=partial, image_data=image_data))
+            else:
+                # Stickers require an API call to build a proper object.
+                try:
+                    sticker = await self.bot.fetch_sticker(asset.id)
+                    embeds.append(YoinkEmbed(cog=self, sticker=sticker))
+                except discord.NotFound:
+                    LOGGER.warning("<%s.%s> | CDN sticker not found | ID: %s", __class__.__name__, "yoink", asset.id)
 
         if not embeds:
             await interaction.followup.send(
@@ -826,59 +1122,69 @@ class Utility(Cog):
         # that used to ask for them first has nothing left to say.
         await interaction.response.send_modal(GithubIssueSubmissionModal(bot=self.bot, issue_msg=message))
 
-    @commands.command(name="logs", help="Retrieve the most recent log file. eg. `logs false 25 true ERROR WARNING`")
+    @commands.command(name="logs", help="Show the tail of the current log file. eg. `logs 25 ERROR WARNING`")
+    @commands.is_owner()
     async def get_log_file(
         self,
         context: Context,
-        as_file: bool = False,
         entries: int = 15,
-        colour: bool = True,
         *,
         levels: Optional[str] = None,
-    ) -> discord.Message:
-        """Send the tail of the current log file.
+    ) -> None:
+        """Show the tail of the current log file in a paginated viewer.
 
         Parameters
         ----------
         context: :class:`Context`
             The invoking command context.
-        as_file: :class:`bool`, optional
-            Upload the whole log as an attachment instead, by default False.
         entries: :class:`int`, optional
             How many of the most recent records to show, by default 15.
-        colour: :class:`bool`, optional
-            Render level colours in an `ansi` block, by default True.
-        levels: :class:`str` | None, optional
-            Only show these levels, by default None (all). Space or comma
-            separated, e.g. `ERROR WARNING`.
+        levels: :class:`Optional[str]`, optional
+            Only show these levels, by default ``None`` (all). Space or comma
+            separated, e.g. ``ERROR WARNING``.
 
         """
-        if as_file is True:
-            log_f = discord.File(
-                fp=io.BytesIO(initial_bytes=self.bot.loghandler.cur_log.read_text().encode(encoding="utf-8")),
-                filename="log.txt",
+        try:
+            wanted: Optional[frozenset[str]] = parse_levels(levels)
+        except ValueError:
+            await context.send(
+                content=f"Unknown log level. {self.emoji_table.kuma_hmm}",
+                delete_after=self.message_timeout,
             )
-            return await context.send(file=log_f)
+            return
 
         try:
-            excerpt: str = self.bot.loghandler.parse_log(entries=entries, levels=levels, colour=colour)
-        except ValueError as e:
-            return await context.send(
-                content=f"{self.emoji_table.kuma_hmm} {e}",
+            raw_entries: list[str] = self.bot.loghandler._tail_entries(  # noqa: SLF001
+                max(entries, 1),
+                levels=wanted,
+                max_bytes=LOG_TAIL_MAX_BYTES,
+            )
+        except (FileNotFoundError, OSError):
+            await context.send(
+                content=f"Could not read the log file. {self.emoji_table.kuma_sad}",
                 delete_after=self.message_timeout,
             )
+            return
 
-        if not excerpt:
+        if not raw_entries:
             scope: str = f" matching `{levels}`" if levels else ""
-            return await context.send(
-                content=f"{self.emoji_table.kuma_shrug} No log entries{scope}.",
+            await context.send(
+                content=f"No log entries{scope}. {self.emoji_table.kuma_shrug}",
                 delete_after=self.message_timeout,
             )
+            return
 
-        return await context.send(
-            content=code_block(excerpt, CodeFormat.ANSI if colour else CodeFormat.POWERSHELL),
-            delete_after=self.message_timeout,
+        # Colourise and paginate into code blocks that fit the CV2 budget.
+        pages: list[str] = _paginate_log_entries([colourise_log(entry) for entry in raw_entries])
+
+        panel: LogPanel = LogPanel(
+            cog=self,
+            owner_id=context.author.id,
+            pages=pages,
+            log_path=self.bot.loghandler.cur_log,
+            filter_label=levels,
         )
+        await context.send(view=panel, delete_after=self.message_timeout)
 
     @commands.command(name="app_emojis", help="Displays a list of all application emojis.")
     async def app_emojis(self, context: Context, *, query: Optional[str], codefmt: bool = False) -> None:

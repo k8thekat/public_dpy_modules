@@ -49,16 +49,8 @@ from typing import (
 import discord
 from async_garlandtools import GarlandToolsAsync, Language
 from async_garlandtools.modules import Object
-from async_universalis import (
-    DEFAULT_DATACENTER,
-    CurrentData,
-    CurrentDataEntries,
-    DataCenter,
-    DataCenterToWorlds,
-    HistoryDataEntries,
-    ItemQuality,
-    World,
-)
+from async_universalis import DEFAULT_DATACENTER
+from async_universalis._enums import DataCenter, DataCenterToWorlds, ItemQuality, World
 from async_universalis.errors import UniversalisError
 from discord import Color, Colour, app_commands
 from discord.app_commands.errors import CommandInvokeError
@@ -89,6 +81,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import asqlite
+    from async_universalis import CurrentData, CurrentDataEntries, HistoryDataEntries
     from discord.app_commands import AppCommandError
     from discord.ui.item import Item as uiItem
     from moogle_intuition._types import CurMarketBoardParams, CurrencySpender, GatheringNodeData, ShoppingCurrency, ShoppingItem, Vendor

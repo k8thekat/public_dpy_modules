@@ -19,22 +19,24 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 
 """
 
+from __future__ import annotations
+
 import logging
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple, Optional, TypedDict, Union
 
 import discord
-from asqlite import Connection
-from discord import Message, User, app_commands
-from discord.app_commands import Choice
-from discord.ext import commands
+from discord import User, app_commands
+from discord.app_commands import Choice  # noqa: TC002 - discord.py resolves command annotations at runtime.
 
-from kuma_kuma import Kuma_Kuma
-from utils import KumaCog as Cog, KumaContext as Context
+from utils import KumaCog as Cog
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from sqlite3 import Row
+
+    from asqlite import Connection
+
+    from kuma_kuma import Kuma_Kuma
 
 LOGGER = logging.getLogger()
 
@@ -60,13 +62,7 @@ class UserSettings(TypedDict):
     thread_rename: bool
 
 
-# Column -> what :meth:`Preferences.enabled` answers with when there is no row yet or the read
-# failed, mirrored from the `DEFAULT` clauses above. This is also the allowlist `set_user_settings`
-# validates against, so a new preference is declared in exactly two places: the schema and here.
-#
-# .. note::
-#     `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so a column added
-#     here is also added to a live table by :meth:`Preferences.migrate` on the next load.
+# What `enabled()` falls back to; also the allowlist `set_user_settings` validates against.
 USER_SETTING_DEFAULTS: dict[str, bool] = {
     "hints_enabled": True,
     "hint_style_block": False,
@@ -84,9 +80,7 @@ SETTING_SUMMARIES: dict[str, str] = {
 }
 
 
-# Cog-declared preferences live beside `user_settings` rather than inside it. One declared by a cog is
-# that cog's to name and to type; a column per declaration would put every extension's vocabulary into
-# core's schema and leave it there once the extension was gone.
+# Cog-declared preferences; one row per (user, key) rather than a column per preference.
 USER_PREFERENCES_SETUP_SQL: str = """
 CREATE TABLE IF NOT EXISTS user_preferences (
     userid INTEGER NOT NULL,
@@ -95,13 +89,12 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     PRIMARY KEY (userid, pref_key))
 """
 
-# Discord's ceiling on a select option's label and description. A declaration longer than this is cut
-# rather than refused; a panel that will not render is a worse answer than a summary that stops short.
+# Discord's ceiling on a select option's label and description; longer values are truncated.
 SELECT_TEXT_SIZE: int = 100
 
 
 def setting_label(key: str) -> str:
-    """Turns a column name into the name the panel shows (`hint_style_block` -> `Hint Style Block`)."""
+    """Turns a column name into the name the panel shows (``hint_style_block`` -> ``Hint Style Block``)."""
     return key.replace("_", " ").title()
 
 
@@ -111,11 +104,11 @@ class PreferenceChoice(NamedTuple):
     Attributes
     ----------
     value: :class:`str`
-        What is stored, and what the owning cog compares against.
+        What is stored and what the owning cog compares against.
     label: :class:`str`
         The name shown on the select.
     summary: :class:`str`
-        The line beneath the name, saying what picking it does.
+        The line beneath the name.
 
     """
 
@@ -124,57 +117,39 @@ class PreferenceChoice(NamedTuple):
     summary: str = ""
 
 
-@dataclass(frozen=True)
-class Preference:
-    """One setting a cog offers, declared in that cog's `__preferences__`.
+class Preference(NamedTuple):
+    """One setting a cog offers, declared in ``__preferences__``.
 
-    The switches on `user_settings` are core's own and are declared in :data:`USER_SETTING_DEFAULTS`.
-    This is the other kind: a setting that belongs to one cog, has more than two states, and should
-    arrive and leave with the extension that owns it::
-
-        class ClaudeCog(Cog):
-            __preferences__ = (
-                Preference(
-                    key="claude.verbosity",
-                    label="Session verbosity",
-                    default="default",
-                    choices=(PreferenceChoice(value="silent", label="Silent"), ...),
-                ),
-            )
+    Belongs to one cog, has more than two states, and arrives with its extension.
 
     Attributes
     ----------
     key: :class:`str`
-        Stable identifier, stored in the database. Namespace it by cog (`claude.verbosity`); changing
-        it puts everyone back on the default.
+        Stable identifier stored in the database; namespace by cog (``claude.verbosity``).
     label: :class:`str`
-        Short name for the `/preferences` panel.
+        Short name for the ``/preferences`` panel.
     summary: :class:`str`
-        The line beneath the name.
+        Line beneath the name.
     default: :class:`str`
-        What :meth:`Preferences.value` answers with when nothing is stored.
+        What :meth:`Preferences.value` answers when nothing is stored.
     choices: :class:`tuple[PreferenceChoice, ...]`
-        The values on offer, in the order the select lists them.
+        The values on offer, in select list order.
 
     """
 
     key: str
     label: str
-    summary: str = field(default="")
-    default: str = field(default="")
-    choices: tuple[PreferenceChoice, ...] = field(default=())
+    summary: str = ""
+    default: str = ""
+    choices: tuple[PreferenceChoice, ...] = ()
 
     def choice(self, value: str) -> Optional[PreferenceChoice]:
-        """Returns the choice `value` names, or `None` when it is not one this preference offers."""
+        """Returns the choice matching ``value``, or ``None``."""
         return next((entry for entry in self.choices if entry.value == value), None)
 
 
-class PreferenceButton(discord.ui.Button):
-    """A button that hands its press to the panel that built it, via `action`.
-
-    The panel is built imperatively — a row per column the database hands back — so there is no fixed
-    layout to declare with `@discord.ui.button`, and a plain Button has a no-op callback.
-    """
+class PreferenceButton(discord.ui.Button["PreferencesPanel"]):
+    """A button that hands its press to the panel via ``action``."""
 
     def __init__(
         self,
@@ -189,20 +164,17 @@ class PreferenceButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         """Hands the press to the owning panel."""
-        # `self.view` is set by discord.py when the item is added, at any nesting depth.
-        view: Optional[PreferencesPanel] = self.view  # type: ignore[assignment]
+        view: Optional[PreferencesPanel] = self.view
         if view is None:
             return
         await view._dispatch(interaction=interaction, action=self.action)  # noqa: SLF001 - the panel owns this button.
 
 
-class PreferenceSelect(discord.ui.Select):
-    """The picker for one cog-declared preference, handing its choice to the panel that built it.
+class PreferenceSelect(discord.ui.Select["PreferencesPanel"]):
+    """The picker for one cog-declared preference, handing its choice to the panel.
 
     .. note::
-        A select cannot be a `Section` accessory — the API takes only a button or a thumbnail there —
-        so a choice preference is a text display with this on the row beneath it, rather than the one
-        line a switch gets.
+        A select cannot be a ``Section`` accessory, so a choice shows as text with this beneath it.
 
     """
 
@@ -214,8 +186,7 @@ class PreferenceSelect(discord.ui.Select):
                     label=choice.label[:SELECT_TEXT_SIZE],
                     value=choice.value,
                     description=choice.summary[:SELECT_TEXT_SIZE] or None,
-                    # What marks the stored value on screen; Discord shows the defaulted option in
-                    # place of the placeholder, so the panel needs no separate "currently" line.
+                    # Discord shows the defaulted option in place of the placeholder.
                     default=choice.value == current,
                 )
                 for choice in preference.choices
@@ -225,7 +196,7 @@ class PreferenceSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         """Hands the choice to the owning panel."""
-        view: Optional[PreferencesPanel] = self.view  # type: ignore[assignment]
+        view: Optional[PreferencesPanel] = self.view
         if view is None:
             return
         action: str = f"choose:{self.preference.key}:{self.values[0]}"
@@ -233,40 +204,27 @@ class PreferenceSelect(discord.ui.Select):
 
 
 class PreferencesPanel(discord.ui.LayoutView):
-    """A Discord user's own preferences, a `Section` per column with its on/off button beside it.
+    """A user's preferences panel — a ``Section`` per column with its toggle beside it.
 
-    The rows come from the row the database handed back rather than a list kept here, so a column
-    added to `user_settings` shows up on its own; `SETTING_SUMMARIES` only decides whether it gets a
-    line of explanation under its name.
-
-    Not persistent, like `HintsPanel` and unlike `SessionPanel` in `claude.py` — `/preferences` is
-    cheap to re-run.
+    Not persistent; ``/preferences`` is cheap to re-run.
 
     .. warning::
-        A Components V2 message cannot carry `content` or `embeds`.
+        A Components V2 message cannot carry ``content`` or ``embeds``.
 
     """
 
-    # The `Preferences` and `PreferencesPanel` annotations are quoted throughout because the cog is
-    # defined below this and the file has no `from __future__ import annotations` — nor can it take
-    # one, as discord.py resolves a hybrid command's annotations against the module at runtime and a
-    # `Choice` hidden in a type-checking block would not be there to resolve. A body annotation never
-    # evaluates, so those are left bare.
     @classmethod
-    async def build(cls, *, cog: "Preferences", user: Union[User, discord.Member], settings: UserSettings) -> "PreferencesPanel":
-        """Reads the cog-declared values a panel needs, then builds it.
-
-        A constructor cannot await and those values live in their own table; this is what keeps every
-        call site from having to know that.
+    async def build(cls, *, cog: Preferences, user: Union[User, discord.Member], settings: UserSettings) -> PreferencesPanel:
+        """Reads cog-declared values, then builds the panel.
 
         Parameters
         ----------
         cog: :class:`Preferences`
-            The owning cog, for the reads and for whatever a press calls back into.
+            The owning cog.
         user: :class:`Union[User, discord.Member]`
-            Whose preferences are shown, and the only person the panel answers.
+            Whose preferences are shown.
         settings: :class:`UserSettings`
-            The switch row, already read by whatever is opening the panel.
+            The switch row, already read.
 
         Returns
         -------
@@ -279,23 +237,18 @@ class PreferencesPanel(discord.ui.LayoutView):
     def __init__(
         self,
         *,
-        cog: "Preferences",
+        cog: Preferences,
         user: Union[User, discord.Member],
         settings: UserSettings,
         values: Optional[dict[str, str]] = None,
     ) -> None:
-        # The panel dies with the message that carries it: every reply is sent with
-        # `delete_after=self.message_timeout`, so taking the timeout from the same place means the
-        # buttons never sit dead on a message still on screen, nor outlive one that is gone.
+        # Panel timeout matches `delete_after`; buttons die with the message.
         super().__init__(timeout=cog.message_timeout)
         self.cog: Preferences = cog
         self.user: Union[User, discord.Member] = user
         self.settings: UserSettings = settings
-        # `settings_excluded_keys` drops the bookkeeping columns (`id`, `userid`); they are stored on
-        # a person but they are not one of their preferences.
-        self.options: list[str] = [key for key in settings.keys() if key not in Cog.settings_excluded_keys]  # noqa: SIM118 - It thinks it's a dict; when it's a sqlite3.Row Tuple object.
-        # Read off the loaded cogs rather than held, so a preference arrives with its extension and
-        # leaves with it. Empty when :meth:`build` was bypassed, which only the switches then show.
+        self.options: list[str] = [key for key in settings.keys() if key not in Cog.settings_excluded_keys]  # noqa: SIM118 - sqlite3.Row, not a dict.
+        # Read off loaded cogs; a preference arrives with its extension and leaves with it.
         self.preferences: list[Preference] = list(cog.registry())
         self.values: dict[str, str] = values if values is not None else {}
 
@@ -317,8 +270,7 @@ class PreferencesPanel(discord.ui.LayoutView):
                 ),
             )
 
-        # The cog-declared half, under the same heading — they are all one person's settings and
-        # splitting them by where they happen to be stored would be an implementation detail on screen.
+        # Cog-declared preferences, under the same heading.
         for preference in self.preferences:
             body: str = f"**{preference.label}**" + (f"\n-# {preference.summary}" if preference.summary else "")
             container.add_item(discord.ui.TextDisplay(body))
@@ -332,8 +284,7 @@ class PreferencesPanel(discord.ui.LayoutView):
         container.add_item(discord.ui.TextDisplay(f"-# {self._summary()}"))
         self.add_item(container)
 
-        # Outside the container: Reset acts *on* the panel rather than being a setting of it, and the
-        # container's border is what makes that read.
+        # Outside the container — Reset acts on the panel, not a setting in it.
         self.add_item(
             discord.ui.ActionRow().add_item(
                 PreferenceButton(action="reset", label="Reset", emoji="🔄", style=discord.ButtonStyle.danger),
@@ -352,9 +303,9 @@ class PreferencesPanel(discord.ui.LayoutView):
         """Returns the on/off accessory for one setting."""
         return PreferenceButton(
             action=f"toggle:{key}",
-            label="On" if on else "Off",
-            emoji="✔️" if on else "✖️",
-            style=discord.ButtonStyle.success if on else discord.ButtonStyle.secondary,
+            label="On" if on is True else "Off",
+            emoji="✔️" if on is True else "✖️",
+            style=discord.ButtonStyle.success if on is True else discord.ButtonStyle.secondary,
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -372,16 +323,14 @@ class PreferencesPanel(discord.ui.LayoutView):
         try:
             if action.startswith("toggle:"):
                 key: str = action.removeprefix("toggle:")
-                # The key came off our own row, but it travels through a custom ID to get back here,
-                # so `set_user_settings` validating it against the column list still earns its keep.
+                # The key travels through a custom ID; `set_user_settings` still validates it.
                 updated: Optional[UserSettings] = await self.cog.set_user_settings(
                     user=self.user,
                     setting=key,
-                    value=not bool(self.settings[key]),  # type: ignore - see above.
+                    value=not bool(self.settings[key]),  # type: ignore - the key came off the row.
                 )
             elif action.startswith("choose:"):
-                # A choice is stored in `user_preferences`, so the switch row is untouched; it is
-                # passed straight back so the rebuilt panel still shows the switches beside it.
+                # Choice goes to `user_preferences`; pass the switch row back unchanged.
                 chosen, _, value = action.removeprefix("choose:").partition(":")
                 updated = self.settings if await self.cog.set_value(user=self.user, key=chosen, value=value) else None
             elif action == "reset":
@@ -392,7 +341,6 @@ class PreferencesPanel(discord.ui.LayoutView):
             updated = None
 
         if updated is None:
-            # The panel on screen still shows what is stored, so leave it be and say so alongside.
             await interaction.response.send_message(
                 content=f"We encountered an error saving that. {self.cog.emoji_table.kuma_crying}",
                 ephemeral=True,
@@ -405,39 +353,33 @@ class PreferencesPanel(discord.ui.LayoutView):
 class Preferences(Cog):
     """A Discord user's own settings, as opposed to a guild's.
 
-    The split from `moderator`'s `settings` is not a matter of taste. Discord applies
-    `default_permissions` per *top level* command and it cannot vary by subcommand, so guild settings
-    (admin, guild only) and user settings (open to everyone, usable in DMs) cannot live under one
-    command no matter how they are nested.
+    ``settings`` is about a place, ``preferences`` is about a person.
 
-    The rule that keeps them apart when reading: `settings` is about a place, `preferences` is about
-    a person.
     """
 
     # Allowed column names for UPDATE — guards against SQL injection via the setting parameter.
-    # Taken from `USER_SETTING_DEFAULTS` so the two can never disagree about what a setting is.
     _USER_SETTING_COLUMNS: frozenset[str] = frozenset(USER_SETTING_DEFAULTS)
+
+    preferences = app_commands.Group(
+        name="preferences",
+        description="See your own settings. These are yours, not a server's.",
+        guild_only=True,
+    )
 
     async def cog_load(self) -> None:
         async with self.bot.pool.acquire() as conn:
             await conn.execute(USER_SETTINGS_SETUP_SQL)
             await conn.execute(USER_PREFERENCES_SETUP_SQL)
-            await self.migrate(conn=conn)
+            # await self.migrate(conn=conn)
 
     @staticmethod
     async def migrate(*, conn: Connection) -> None:
-        """Adds any preference declared in `USER_SETTING_DEFAULTS` that the live table is missing.
-
-        `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already exists, so a column
-        added to the schema above would never reach a database that predates it — every read of it
-        would raise and take `/preferences` down with it. Reconciling here means adding a preference
-        is still a one line change.
+        """Adds any column declared in ``USER_SETTING_DEFAULTS`` that the live table is missing.
 
         Parameters
         ----------
         conn: :class:`Connection`
-            The connection to migrate on; taken rather than acquired so this runs inside the
-            caller's transaction.
+            The connection to migrate on; taken so this runs inside the caller's transaction.
 
         """
         rows: list[Row] = await conn.fetchall("""PRAGMA table_info(user_settings)""")
@@ -446,36 +388,35 @@ class Preferences(Cog):
         for column, default in USER_SETTING_DEFAULTS.items():
             if column in existing:
                 continue
-            # The column name is one of our own keys, never user input; the value is an int literal
-            # we built from a bool. SQLite cannot parameterise DDL, so this has to be interpolated.
+            # The column name is one of our own keys, never user input; SQLite cannot parameterise DDL.
             await conn.execute(f"""ALTER TABLE user_settings ADD COLUMN {column} INT NOT NULL DEFAULT {int(default)}""")
             LOGGER.info("<%s.%s> | Added the missing preference column. | Column: %s", __class__.__name__, "migrate", column)
 
-    async def get_user_settings(self, user: User | discord.Member) -> UserSettings | None:
+    async def get_user_settings(self, user: Union[User, discord.Member]) -> Optional[UserSettings]:
         """Get the preferences belonging to a Discord user, creating them on first look.
 
         Parameters
         ----------
-        user: :class:`User | discord.Member`
+        user: :class:`Union[User, discord.Member]`
             The Discord user object.
 
         Returns
         -------
-        :class:`UserSettings | None`
+        :class:`Optional[UserSettings]`
             The user's preferences.
 
         Raises
         ------
         :exc:`ConnectionError`
-            Raises a connection error if unable to connect to the Database for any reason.
+            Unable to connect to the database.
 
         """
         try:
             async with self.bot.pool.acquire() as conn:
-                res: UserSettings | None = await conn.fetchone("""SELECT * FROM user_settings WHERE userid = ?""", user.id)  # type: ignore - I know the dataset because of above.
-                if res is None:
+                result: Optional[UserSettings] = await conn.fetchone("""SELECT * FROM user_settings WHERE userid = ?""", user.id)  # type: ignore - I know the dataset because of above.
+                if result is None:
                     return await self.set_user_settings(user=user, default=True)
-                return res
+                return result
         except Exception as e:
             LOGGER.exception(
                 "<%s.%s> | We encountered an error connecting to the database. | UserID: %s",
@@ -489,62 +430,60 @@ class Preferences(Cog):
 
     async def set_user_settings(
         self,
-        user: User | discord.Member,
-        setting: str | None = None,
+        user: Union[User, discord.Member],
+        setting: Optional[str] = None,
         value: bool = False,
         default: bool = False,
-    ) -> UserSettings | None:
+    ) -> Optional[UserSettings]:
         """Set or update the preferences of the provided Discord user.
 
         Parameters
         ----------
-        user: :class:`User | discord.Member`
+        user: :class:`Union[User, discord.Member]`
             The Discord user object.
-        setting: :class:`str`, optional
-            The column name in the user_settings table to update (e.g. ``"hints_enabled"``).
-            Must be one of :attr:`_USER_SETTING_COLUMNS`. Required when ``default`` is False.
+        setting: :class:`Optional[str]`, optional
+            Column name to update; must be in :attr:`_USER_SETTING_COLUMNS`, by default None.
         value: :class:`bool`, optional
-            The value to write to ``setting``, by default False.
+            The value to write, by default False.
         default: :class:`bool`, optional
-            When True, inserts a new row with default values for the user instead of updating an
-            existing one. Use this for the first time we see someone.
+            Insert a default row instead of updating, by default False.
 
         Returns
         -------
-        :class:`UserSettings | None`
-            The Discord user's preferences.
+        :class:`Optional[UserSettings]`
+            The user's preferences.
 
         Raises
         ------
         :exc:`ValueError`
-            If ``default`` is False and ``setting`` is None or not a valid column name.
+            ``setting`` is not a valid column name.
         :exc:`ConnectionError`
-            If we are unable to connect to the Database.
+            Unable to connect to the database.
 
         """
-        if not default and (setting is None or setting not in self._USER_SETTING_COLUMNS):
+        if default is False and (setting is None or setting not in self._USER_SETTING_COLUMNS):
             msg = f"setting must be one of {self._USER_SETTING_COLUMNS!r}, got {setting!r}."
             raise ValueError(msg)
 
         try:
             async with self.bot.pool.acquire() as conn:
-                if default:
-                    # `DO NOTHING` rather than a bare INSERT. Two commands racing on someone's very
+                if default is True:
+                    # `DO NOTHING` rather than a bare INSERT; two commands racing on someone's
                     # first use would otherwise have the loser raise on the UNIQUE constraint.
-                    data: UserSettings | None = await conn.fetchone(
+                    result: Optional[UserSettings] = await conn.fetchone(
                         """INSERT INTO user_settings(userid) VALUES(?)
                            ON CONFLICT (userid) DO NOTHING RETURNING *""",
                         user.id,
                     )  # pyright: ignore[reportAssignmentType]
-                    if data is None:
-                        data = await conn.fetchone("""SELECT * FROM user_settings WHERE userid = ?""", user.id)  # pyright: ignore[reportAssignmentType]
+                    if result is None:
+                        result = await conn.fetchone("""SELECT * FROM user_settings WHERE userid = ?""", user.id)  # pyright: ignore[reportAssignmentType]
                 else:
-                    data = await conn.fetchone(
+                    result = await conn.fetchone(
                         f"""UPDATE user_settings SET {setting} = ? WHERE userid = ? RETURNING *""",  # noqa: S608 - column name validated above
                         value,
                         user.id,
                     )  # pyright: ignore[reportAssignmentType]
-                return data
+                return result
         except Exception as e:
             LOGGER.exception(
                 "<%s.%s> | We encountered an error connecting to the database. | UserID: %s",
@@ -556,44 +495,47 @@ class Preferences(Cog):
             msg = "Unable to connect to the database."
             raise ConnectionError(msg) from None
 
-    async def reset_user_settings(self, user: User | discord.Member) -> UserSettings | None:
-        """Drop the Discord user's rows, then let :meth:`get_user_settings` re-create the switches.
-
-        Deleting rather than writing each column back by hand means a column added to `user_settings`
-        later comes back at whatever default it declares, with nothing to keep in step here. The
-        cog-declared preferences go the same way and for the same reason: an absent row *is* the
-        default, so there is nothing to write back.
+    async def reset_user_settings(self, user: Union[User, discord.Member]) -> Optional[UserSettings]:
+        """Drop the Discord user's rows, then re-create the switches at their defaults.
 
         Parameters
         ----------
-        user: :class:`User | discord.Member`
+        user: :class:`Union[User, discord.Member]`
             The Discord user object.
 
         Returns
         -------
-        :class:`UserSettings | None`
-            The Discord user's preferences, back at their defaults.
+        :class:`Optional[UserSettings]`
+            The user's preferences, back at their defaults.
 
         Raises
         ------
         :exc:`ConnectionError`
-            If we are unable to connect to the Database.
+            Unable to connect to the database.
 
         """
-        async with self.bot.pool.acquire() as conn:
-            await conn.execute("""DELETE FROM user_settings WHERE userid = ?""", user.id)
-            await conn.execute("""DELETE FROM user_preferences WHERE userid = ?""", user.id)
+        try:
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute("""DELETE FROM user_settings WHERE userid = ?""", user.id)
+                await conn.execute("""DELETE FROM user_preferences WHERE userid = ?""", user.id)
+        except Exception as e:
+            LOGGER.exception(
+                "<%s.%s> | We encountered an error connecting to the database. | UserID: %s",
+                __class__.__name__,
+                "reset_user_settings",
+                user.id,
+                exc_info=e,
+            )
+            msg = "Unable to connect to the database."
+            raise ConnectionError(msg) from None
         return await self.get_user_settings(user=user)
 
-    async def enabled(self, user: User | discord.Member, setting: str) -> bool:
+    async def enabled(self, user: Union[User, discord.Member], setting: str) -> bool:
         """Returns one preference as a bool, falling back to the column default when anything fails.
-
-        This is what other cogs call. A preference lookup must never be the reason another cog's
-        command fails, so a database error answers with the default rather than raising.
 
         Parameters
         ----------
-        user: :class:`User | discord.Member`
+        user: :class:`Union[User, discord.Member]`
             The Discord user object.
         setting: :class:`str`
             The column name to read.
@@ -604,31 +546,24 @@ class Preferences(Cog):
             The stored value, or the column's default when there is no row or the read failed.
 
         """
-        # From the table rather than a hardcoded comparison. The old `setting == "hints_enabled"`
-        # answered False for every other preference, so anything defaulting to on would have read
-        # as off the moment the database hiccuped.
         default: bool = USER_SETTING_DEFAULTS.get(setting, False)
         try:
-            res: UserSettings | None = await self.get_user_settings(user=user)
+            result: Optional[UserSettings] = await self.get_user_settings(user=user)
         except ConnectionError:
             return default
-        if res is None:
+        if result is None:
             return default
-        return bool(res[setting])  # type: ignore - the caller passes a column name.
+        return bool(result[setting])  # type: ignore - the caller passes a column name.
 
-    def registry(self) -> "Iterator[Preference]":
-        """Yields every preference declared by a currently loaded cog.
-
-        Walked from the loaded cogs on each call, as `HintsCog.registry` is, so a preference arrives
-        with its extension and leaves with it and there is nothing to keep in step.
-        """
+    def registry(self) -> Iterator[Preference]:
+        """Yields every preference declared by a currently loaded cog."""
         for cog in self.bot.cogs.values():
             for preference in getattr(cog, "__preferences__", ()):
                 if isinstance(preference, Preference):
                     yield preference
 
     def find(self, key: str) -> Optional[Preference]:
-        """Returns the preference registered under `key`, or `None` when no loaded cog declares it."""
+        """Returns the preference registered under ``key``, or ``None``."""
         return next((entry for entry in self.registry() if entry.key == key), None)
 
     async def declared_values(self, *, user: discord.abc.Snowflake) -> dict[str, str]:
@@ -637,8 +572,7 @@ class Preferences(Cog):
         Parameters
         ----------
         user: :class:`discord.abc.Snowflake`
-            Anything carrying the Discord ID. Wider than :meth:`enabled` takes on purpose — a cog
-            reading a preference for a session it owns has the ID and not always the user object.
+            Anything carrying the Discord ID.
 
         Returns
         -------
@@ -654,16 +588,12 @@ class Preferences(Cog):
             LOGGER.warning("<%s.%s> | Could not read the stored preferences. | Error: %s", __class__.__name__, "declared_values", e)
             return values
 
-        # Only keys a loaded cog still declares. A row left behind by an unloaded extension stays in
-        # the table — it is that extension's, not ours to drop — but nothing here can render it.
+        # Only keys a loaded cog still declares; unloaded extension rows stay in the table.
         values.update({row["pref_key"]: str(row["value"]) for row in rows if row["pref_key"] in values})
         return values
 
     async def value(self, *, user: discord.abc.Snowflake, key: str) -> str:
         """Reads one cog-declared preference, answering its declared default when nothing is stored.
-
-        What other cogs call, and it never raises for the same reason :meth:`enabled` does not: a
-        preference lookup must not be why another cog's command fails.
 
         Parameters
         ----------
@@ -675,8 +605,7 @@ class Preferences(Cog):
         Returns
         -------
         :class:`str`
-            The stored value, or the declared default when there is none, the read failed, or the
-            declaration no longer offers what was stored.
+            The stored value, or the declared default.
 
         """
         declared: Optional[Preference] = self.find(key)
@@ -695,18 +624,13 @@ class Preferences(Cog):
         if row is None:
             return default
         stored: str = str(row["value"])
-        # A cog that has changed its choices since this was written should not be handed back a value
-        # it no longer has a path for; the default is the one value it must always be able to take.
+        # A cog that changed its choices should not get back a value it no longer offers.
         if declared is not None and declared.choices and declared.choice(stored) is None:
             return default
         return stored
 
     async def set_value(self, *, user: discord.abc.Snowflake, key: str, value: str) -> bool:
         """Stores one cog-declared preference, refusing a value the declaration does not offer.
-
-        Validated against the registry for the reason :meth:`set_user_settings` validates against the
-        column list: both arrive through a component's custom ID, which is not ours by the time it
-        comes back.
 
         Parameters
         ----------
@@ -748,63 +672,61 @@ class Preferences(Cog):
             return False
         return True
 
-    @commands.hybrid_group(name="preferences", invoke_without_command=True)
-    async def preferences(self, context: Context) -> Message:
+    @preferences.command(name="view")
+    async def view_preference(self, interaction: discord.Interaction) -> None:
         """See your own settings. These are yours, not a server's."""
-        res: UserSettings | None = await self.get_user_settings(user=context.author)
-        if res is not None:
-            return await context.send(
-                view=await PreferencesPanel.build(cog=self, user=context.author, settings=res),
+        result: Optional[UserSettings] = await self.get_user_settings(user=interaction.user)
+        if result is not None:
+            await interaction.response.send_message(
+                view=await PreferencesPanel.build(cog=self, user=interaction.user, settings=result),
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
+            return
 
-        return await context.send(
+        await interaction.response.send_message(
             content=f"We encountered an error reading your preferences. {self.emoji_table.kuma_crying}",
             ephemeral=True,
             delete_after=self.message_timeout,
         )
 
-    @preferences.command(name="view")
-    async def view_preference(self, context: Context) -> Message:
-        """See your own settings. These are yours, not a server's."""
-        return await self.preferences(context)
-
     @preferences.command(name="set")
     @app_commands.choices(option=Cog.settings_choices(UserSettings))
-    async def set_preference(self, context: Context, option: Choice[str], value: bool) -> Message:
+    async def set_preference(self, interaction: discord.Interaction, option: Choice[str], value: bool) -> None:
         """Change one of your settings."""
-        updated: UserSettings | None = await self.set_user_settings(user=context.author, setting=option.value, value=value)
+        updated: Optional[UserSettings] = await self.set_user_settings(user=interaction.user, setting=option.value, value=value)
         if updated is not None:
-            return await context.send(
-                view=await PreferencesPanel.build(cog=self, user=context.author, settings=updated),
+            await interaction.response.send_message(
+                view=await PreferencesPanel.build(cog=self, user=interaction.user, settings=updated),
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
+            return
 
-        return await context.send(
+        await interaction.response.send_message(
             content=f"We encountered an error updating the database. {self.emoji_table.kuma_crying}",
             ephemeral=True,
             delete_after=self.message_timeout,
         )
 
     @preferences.command(name="reset")
-    async def reset_preferences(self, context: Context) -> Message:
+    async def reset_preferences(self, interaction: discord.Interaction) -> None:
         """Put all of your settings back to their defaults."""
-        res: UserSettings | None = await self.reset_user_settings(user=context.author)
-        if res is not None:
-            return await context.send(
-                view=await PreferencesPanel.build(cog=self, user=context.author, settings=res),
+        result: Optional[UserSettings] = await self.reset_user_settings(user=interaction.user)
+        if result is not None:
+            await interaction.response.send_message(
+                view=await PreferencesPanel.build(cog=self, user=interaction.user, settings=result),
                 ephemeral=True,
                 delete_after=self.message_timeout,
             )
+            return
 
-        return await context.send(
-            content=f"Reset your preferences. {self.emoji_table.kuma_star_eye}",
+        await interaction.response.send_message(
+            content=f"Could not reset your preferences. {self.emoji_table.kuma_crying}",
             ephemeral=True,
             delete_after=self.message_timeout,
         )
 
 
-async def setup(bot: Kuma_Kuma) -> None:  # noqa: D103 # docstring
+async def setup(bot: Kuma_Kuma) -> None:  # noqa: D103
     await bot.add_cog(Preferences(bot=bot))

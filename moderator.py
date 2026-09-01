@@ -384,6 +384,8 @@ class Moderator(Cog):
         flags=re.DOTALL | re.MULTILINE,
     )
     SPAM_LIMIT: int = 3
+    # Allowed column names for UPDATE — guards against SQL injection via the setting parameter.
+    _MOD_SETTING_COLUMNS: frozenset[str] = frozenset({"use_mystbin", "spam_filter"})
     spam_messages: dict[int, MessageRecords]
 
     # Global shorthand hash table — persisted across restarts.
@@ -396,58 +398,9 @@ class Moderator(Cog):
     async def cog_load(self) -> None:
         async with self.bot.pool.acquire() as conn:
             await conn.execute(MODERATOR_SETUP_SQL)
-            await self.migrate(conn=conn)
+            # await self.migrate(conn=conn)
         self.spam_messages = {}
         self.banned_hashes = self._load_banned_hashes()
-
-    @staticmethod
-    async def migrate(*, conn: Connection) -> None:
-        """Collapses duplicate `moderator` rows and adds the UNIQUE index that stops more appearing.
-
-        `set_mod_settings(default=True)` was a bare INSERT against a table with no constraint on
-        `serverid`, so a guild whose first `/settings` raced with itself ended up with two rows.
-        `get_mod_settings` uses `fetchone`, which then answers with whichever SQLite reaches first,
-        and an UPDATE writes to every one of them. One live guild had two rows when this was written.
-
-        Fails safe: rows that *disagree* are reported and left alone, because picking a winner would
-        silently discard whichever setting lost, and the index is only added once nothing conflicts.
-
-        Parameters
-        ----------
-        conn: :class:`Connection`
-            The connection to migrate on; taken rather than acquired so this runs inside the
-            caller's transaction.
-
-        """
-        duplicates: list[Row] = await conn.fetchall(
-            """SELECT serverid FROM moderator GROUP BY serverid HAVING COUNT(*) > 1""",
-        )
-        for entry in duplicates:
-            rows: list[Row] = await conn.fetchall("""SELECT * FROM moderator WHERE serverid = ? ORDER BY id""", entry["serverid"])
-            settled: set[tuple[int, int]] = {(row["use_mystbin"], row["spam_filter"]) for row in rows}
-            if len(settled) > 1:
-                LOGGER.warning(
-                    "<%s.%s> | A guild has conflicting Moderator rows; leaving them for a person. | Guild ID: %s | Rows: %s",
-                    __class__.__name__,
-                    "migrate",
-                    entry["serverid"],
-                    len(rows),
-                )
-                continue
-
-            await conn.execute("""DELETE FROM moderator WHERE serverid = ? AND id > ?""", entry["serverid"], rows[0]["id"])
-            LOGGER.info(
-                "<%s.%s> | Collapsed duplicate Moderator rows. | Guild ID: %s | Removed: %s",
-                __class__.__name__,
-                "migrate",
-                entry["serverid"],
-                len(rows) - 1,
-            )
-
-        # Suppressed rather than guarded: creating this fails while conflicting rows survive above,
-        # and that is exactly the case where it should be skipped and tried again next load.
-        with contextlib.suppress(sqlite3.DatabaseError):
-            await conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS moderator_serverid_idx ON moderator(serverid)""")
 
     def _load_banned_hashes(self) -> set[str]:
         """Loads the global ban hash table from `moderator_hashes.json`."""
@@ -506,8 +459,7 @@ class Moderator(Cog):
             msg = "Unable to connect to the database."
             raise ConnectionError(msg) from None
 
-    # Allowed column names for UPDATE — guards against SQL injection via the setting parameter.
-    _MOD_SETTING_COLUMNS: frozenset[str] = frozenset({"use_mystbin", "spam_filter"})
+
 
     async def set_mod_settings(
         self,
@@ -667,12 +619,7 @@ class Moderator(Cog):
         if res is None:
             return
 
-        # `bool(...)`, not `is True`. SQLite hands an INT column back as a 1, and `1 is True` is
-        # False, so this half of the listener had never once fired.
-        #
-        # Two switches have to agree: the guild turns the feature on at all, and the author decides
-        # whether their own messages get moved out from under them. The preference read comes last so
-        # it only costs a lookup on a message that would actually be moved.
+        # Logic check for auto_mystbin.
         if (
             bool(res["use_mystbin"])
             and message.channel.type is not discord.ChannelType.news
@@ -713,12 +660,8 @@ class Moderator(Cog):
     async def mod_on_thread_update(self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel) -> None:
         """Marks a thread's title with `[LOCKED]` or `[CLOSED]` when it becomes either.
 
-        .. warning::
-            Threads Kuma Kuma owns are skipped outright. A Claude session post is opened *by* the bot
-            and retires itself by archiving and locking in one edit under its own `[CLOSED] ` marker;
-            renaming on top of that both fights `claude.py` and corrupts the session state it parses
-            back out of the title. The `locked` branch guarded against this and the `archived` branch
-            did not — and a session close is exactly an archive.
+        .. note::
+            Threads Kuma Kuma owns are skipped outright.
 
         Parameters
         ----------
@@ -1088,8 +1031,7 @@ class Moderator(Cog):
         owner_user_id: Optional[int] = getattr(self.bot, "owner_user_id", None)
         if owner_user_id is None:
             await context.send(
-                content=f"This build predates `owner_user_id`, so I cannot verify you own me. "
-                f"Restart me from the shell to pick up the newer `kuma_kuma.py`. {self.emoji_table.kuma_hmm}",
+                content=f"Unable to find a `owner_user_id`. {self.emoji_table.kuma_hmm}",
                 delete_after=self.message_timeout,
             )
             return
@@ -1116,7 +1058,7 @@ class Moderator(Cog):
 
         # No `delete_after` — the task that would do the deleting dies with the event loop. This is
         # the last thing said before the process is replaced, so it stays up.
-        await context.send(content=f"Be right back... {self.emoji_table.kuma_tea}")
+        await context.send(content=f"Be right back... {self.emoji_table.kuma_tea}", track=True)
         await self.bot.restart()
 
     @commands.command(name="sync", help=f"Sync the {BOT_NAME} commands to the guild.")
@@ -1137,17 +1079,11 @@ class Moderator(Cog):
 
         """
         await context.typing(ephemeral=True)
-        # The scope is decided once, up front. Every branch below used to re-derive it, and the
-        # `local=False, reset=False` combination fell through all of them and returned `None` --
-        # a global sync was unreachable and the command answered with nothing at all.
         scope: Optional[discord.Guild] = context.guild if local is True else None
         where: str = f"to {context.guild.name}" if local is True else "globally"
 
         if reset is True:
             self.bot.tree.clear_commands(guild=scope)
-            # Hoisted out of the logging call. It was previously an *argument* to `LOGGER.info`,
-            # which reads as though it only runs when the log line does; it always ran, but the next
-            # person to move that line around would have found out the hard way.
             synced: list[app_commands.AppCommand] = await self.bot.tree.sync(guild=scope)
             LOGGER.info(
                 "<%s.%s> | Commands reset and sync'd. Clear your client cache (ctrl+F5). | Where: %s | Count: %s | By: %s",
@@ -1302,11 +1238,11 @@ class Moderator(Cog):
                 choices.append(app_commands.Choice(name=label[:100], value=str(owner_id)))
         return choices[:25]
 
-    @commands.hybrid_group(name="trusted", invoke_without_command=True, aliases=["trust"])
+    @commands.group(name="trusted", invoke_without_command=True, aliases=["trust"])
     @commands.is_owner()
     @app_commands.default_permissions(administrator=True)
     async def trusted(self, context: Context) -> Message:
-        """See everyone trusted with my owner only commands."""
+        """See everyone trusted with owner only commands."""
         return await self.trusted_list(context)
 
     @trusted.command(name="list", aliases=["ls"])
@@ -1444,32 +1380,25 @@ class Moderator(Cog):
 
     @commands.command(
         name="clear",
-        help="Removes all messages, or just the bot's. Reply to a message to clear everything after it.",
+        help="Removes the bot's messages, or everyone's. Reply to a message to clear everything after it.",
     )
     @app_commands.default_permissions(manage_messages=True)
     @commands.guild_only()
-    @app_commands.describe(bot_only=f"Only remove messages {BOT_NAME} sent. Defaults to False, which removes everyone's.")
+    @app_commands.describe(all_messages=f"Remove everyone's messages, not just {BOT_NAME}'s. Defaults to False.")
     async def clear(
         self,
         context: GuildContext,
         amount: int = 15,
-        bot_only: bool = False,
+        all_messages: bool = False,
     ) -> Message:
         """Delete messages in this channel.
+
+        By default only removes messages sent by the bot. Pass ``all_messages=True`` to remove
+        everyone's — requires owner or ``manage_messages``.
 
         Three ways to say how far back, in order of precedence: reply to a message and everything
         after it goes; pass a message ID as ``amount``, which behaves the same; or pass a count. In
         both anchored forms the anchor itself is the marker, and survives.
-
-        Parameters
-        ----------
-        context: :class:`GuildContext`
-            The invoking command context.
-        amount: :class:`int`, optional
-            How many messages to remove, or a message ID to clear back to. Ignored when replying.
-        bot_only: :class:`bool`, optional
-            Only remove messages the bot sent, by default False.
-
         """
         messages: list[discord.Message] = []
         anchor: Union[discord.abc.Snowflake, None] = None
@@ -1488,8 +1417,8 @@ class Moderator(Cog):
             # below, so both ways of saying "clear back to here" leave the same thing standing.
             anchor = discord.Object(id=reference.message_id)
 
+        # A Discord Message ID passed in as our amount.
         elif len(str(amount)) > 12:
-            # A Discord Message ID passed in as our amount.
             try:
                 til_message: discord.Message = await context.channel.fetch_message(amount)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
@@ -1503,27 +1432,37 @@ class Moderator(Cog):
 
         limit: Union[int, None] = None if anchor is not None else amount
 
-        if bot_only:
-            messages = await context.channel.purge(limit=limit, check=self.bot.is_me, bulk=False, after=anchor)
-        elif context.author.id in self.bot.owner_ids or context.channel.permissions_for(context.author).manage_messages:
+        if all_messages:
+            # Clearing everyone's messages requires elevated permissions.
+            if context.author.id not in self.bot.owner_ids and not context.channel.permissions_for(context.author).manage_messages:
+                return await context.reply(
+                    content=f"I don't have the permissions to do that... {self.emoji_table.kuma_pout}",
+                    delete_after=self.message_timeout,
+                )
             try:
-                messages = await context.channel.purge(limit=limit, bulk=False, after=anchor)
+                messages = await context.channel.purge(
+                    limit=limit,
+                    check=lambda m: m.id != context.message.id,
+                    bulk=False,
+                    after=anchor,
+                )
             except discord.errors.Forbidden:
                 return await context.reply(
                     content=f"I don't have the permissions to do that... {self.emoji_table.kuma_pout}",
                     delete_after=self.message_timeout,
                 )
+        else:
+            # Default: only remove bot messages.
+            messages = await context.channel.purge(limit=limit, check=self.bot.is_me, bulk=False, after=anchor)
 
         tmp: str = f" of {self.bot.user.name} "
         return await context.channel.send(
-            content=f"I ate **{len(messages)}**{tmp if bot_only else ' '}{'messages' if len(messages) > 1 else 'message'}. *nom.. nom..* {self.emoji_table.kuma_rawr}",  # noqa: E501
+            content=f"I ate **{len(messages)}**{tmp if not all_messages else ' '}{'messages' if len(messages) > 1 else 'message'}. *nom.. nom..* {self.emoji_table.kuma_rawr}",  # noqa: E501
             delete_after=10,
         )
 
-    # @app_commands.guild_only()
-    # `invoke_without_command` or the group callback runs *as well as* the subcommand, so
-    # `?settings set use_mystbin true` would send the settings embed and the update embed.
-    @commands.hybrid_group(name="settings", invoke_without_command=True)
+    @commands.group(name="settings", invoke_without_command=True)
+    @commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def settings(self, interaction: GuildContext) -> Message:
         """See this server's Moderator settings. These are the server's, not yours."""

@@ -1,3 +1,0 @@
-cc_ampapi @ git+https://github.com/k8thekat/AMPAPI_Python.git@developer
-garlandtools==2.0.1
-moogle_intuition @ git+https://github.com/k8thekat/moogles_intuition@development

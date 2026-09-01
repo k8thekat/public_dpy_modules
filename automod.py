@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
     from kuma_kuma import Kuma_Kuma
 
-LOGGER = logging.getLogger()
+LOGGER: logging.Logger = logging.getLogger(__name__)
 
 # How long a member is considered "new" after joining the guild.
 NEW_MEMBER_THRESHOLD = datetime.timedelta(days=7)
@@ -135,7 +135,7 @@ class AutoMod(Cog):
             return
 
         guild: discord.Guild = execution.guild
-        member: discord.Member | None = execution.member or guild.get_member(execution.user_id)
+        member: Optional[discord.Member] = execution.member or guild.get_member(execution.user_id)
         if member is None:
             try:
                 member = await guild.fetch_member(execution.user_id)
@@ -270,6 +270,7 @@ class AutoMod(Cog):
     @app_commands.describe(rule="The AutoMod rule to delete.")
     @app_commands.autocomplete(rule=autocomplete_automod_rules)
     async def delete_mention_rule(self, interaction: discord.Interaction, rule: str) -> None:
+        """Delete an AutoMod rule from this server and stop tracking it."""
         if interaction.guild is None:
             await interaction.response.send_message(
                 content=f"This command must be used in a server. {self.emoji_table.kuma_hmm}",
@@ -286,7 +287,7 @@ class AutoMod(Cog):
             )
             return
 
-        target: discord.AutoModRule | None = next((r for r in rules if str(r.id) == rule), None)
+        target: Optional[discord.AutoModRule] = next((r for r in rules if str(r.id) == rule), None)
         if target is None:
             await interaction.response.send_message(
                 content=f"Couldn't find that AutoMod rule. {self.emoji_table.kuma_shrug}",

@@ -123,7 +123,7 @@ class Gatekeeper(Cog):
     ADS: AMPControllerInstance
     servers_dict: dict[str, InstanceTypeAliases]
     servers_chat_dict: dict[str, GuildChannel]
-    _servers: set[InstanceTypeAliases] | ActionResultError
+    _servers: set[InstanceTypeAliases]
 
     # Server Status Emojis
     stopped_emoji = "\U0001f6d1"  # Octagonal Sign
@@ -133,7 +133,7 @@ class Gatekeeper(Cog):
         super().__init__(bot=bot)
 
     @property
-    def servers(self) -> set[InstanceTypeAliases] | ActionResultError:
+    def servers(self) -> set[InstanceTypeAliases]:
         return self._servers
 
     async def cog_load(self) -> None:
@@ -141,18 +141,19 @@ class Gatekeeper(Cog):
         self.ADS = AMPControllerInstance(session=self.bot.session)
 
         # Easier lookup to get AMP Instance objects.
-        self._servers = await self.ADS.get_instances()
+        result: set[InstanceTypeAliases] | ActionResultError = await self.ADS.get_instances()
         self.servers_dict = {}
 
         self.servers_chat_dict = {}
 
-        if isinstance(self._servers, ActionResultError) or isinstance(self.servers, ActionResultError):
+        if isinstance(result, ActionResultError):
             LOGGER.error(
                 "Failed to retrieve AMP Instances via `AMPControllerInstance.get_instances()`. | Error: %s",
-                ActionResultError,
+                result,
             )
             return
 
+        self._servers = result
         for server in self.servers:
             self.servers_dict[server.friendly_name] = server
 
@@ -271,9 +272,10 @@ class Gatekeeper(Cog):
 
     @tasks.loop(minutes=1, reconnect=True)
     async def update_server_list(self) -> None:
-        res: set[AMPInstance | AMPMinecraftInstance | AMPADSInstance] = await self.ADS.get_instances()
+        res: set[InstanceTypeAliases] | ActionResultError = await self.ADS.get_instances()
         if isinstance(res, ActionResultError):
-            return LOGGER.error("Failed to retrieve AMP Instances via `get_instances()`. | Error: %s", ActionResultError)
+            LOGGER.error("Failed to retrieve AMP Instances via `get_instances()`. | Error: %s", res)
+            return
         if res != self.servers:
             # Update the attribute with the new Instance set.
             self._servers = res

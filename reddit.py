@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     from utils import KumaContext as Context
     from utils._types import EmbedParams
 
-LOGGER = logging.getLogger()
+LOGGER: logging.Logger = logging.getLogger(__name__)
 
 REDDIT_BASE_URL = "https://www.reddit.com"
 WEBHOOK_CACHE_TTL: int = 180  # Seconds to cache guild webhook fetches for autocomplete.
@@ -328,7 +328,7 @@ class ImageComparison:
         sampling: Resampling = Resampling.BICUBIC,
         scale_percent: int = 50,
         image_size: Optional[tuple[int, int]] = (500, 500),
-    ) -> tuple[Image.Image, Image.Image | None]:
+    ) -> tuple[Image.Image, Optional[Image.Image]]:
         """Resizes the source image and resizes the comparison image to the same resolution as the source.
 
         `**THIS MUST BE BEFORE _filter or it will saturate the white.**`
@@ -350,7 +350,7 @@ class ImageComparison:
 
         Returns
         -------
-        :class:`tuple[Image.Image, Image.Image | None]`
+        :class:`tuple[Image.Image, Optional[Image.Image]]`
             Resized PIL Images.
 
         """
@@ -742,7 +742,7 @@ class RedditPagedView(discord.ui.LayoutView):
         """Return the same panel showing ``index`` instead."""
         raise NotImplementedError
 
-    def nav_row(self) -> discord.ui.ActionRow[Self]:
+    def nav_row(self) -> discord.ui.ActionRow[RedditPagedView]:
         """The previous/next row.
 
         Kept outside the container, matching :class:`KumaHelpPanel` — navigation acts *on* the panel
@@ -775,8 +775,7 @@ class RedditPagedView(discord.ui.LayoutView):
 
         """
         panel: Self = self.rebuild((self.index + step) % self.length)
-        # Anything already on the message belongs to the page being replaced, so it is dropped rather
-        # than left behind as an orphan upload nothing points at.
+        # Replace the old page's attachments so no orphan uploads linger.
         await interaction.response.edit_message(view=panel, attachments=panel.files)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -1000,7 +999,7 @@ class RedditImageCrawler(Cog):
         # Edge Detection comparison.
         self.array_bin: Path = self.file_dir.joinpath("reddit_array.bin")
         self.pixel_cords_array: list[bytes] = []
-        self.IMAGE_COMP = ImageComparison()
+        self.image_comp = ImageComparison()
 
         # This is how many posts in each subreddit the script will look back.
         # By default the subreddit script looks at subreddits in `NEW` listing order.
@@ -1094,7 +1093,7 @@ class RedditImageCrawler(Cog):
         if len(user_urls) >= 2:
             await self._compare_urls(url_one=user_urls[0], url_two=user_urls[1])
             await reaction.message.channel.send(
-                content=f"{user.mention}\n**URL One**: {user_urls[0]}\n**URL Two**: {user_urls[1]}\n**Results:** {self.IMAGE_COMP.results}",
+                content=f"{user.mention}\n**URL One**: {user_urls[0]}\n**URL Two**: {user_urls[1]}\n**Results:** {self.image_comp.results}",
                 delete_after=15,
             )
             del self.reaction_compare_urls[user.id]
@@ -1255,6 +1254,7 @@ class RedditImageCrawler(Cog):
             json.dump(data, jfile)
 
     async def autocomplete_subreddit(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:  # noqa: ARG002
+        """Autocomplete for the subreddit name from the database."""
         return [
             app_commands.Choice(name=subreddit["subreddit"], value=subreddit["subreddit"])
             for subreddit in self.subreddits
@@ -1262,6 +1262,7 @@ class RedditImageCrawler(Cog):
         ][:25]
 
     async def autocomplete_webhook(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:  # noqa: ARG002
+        """Autocomplete for the webhook name from the database."""
         return [
             app_commands.Choice(name=webhook["name"], value=webhook["name"])
             for webhook in self.webhooks
@@ -1288,6 +1289,7 @@ class RedditImageCrawler(Cog):
 
     @tasks.loop(minutes=5, reconnect=True)
     async def check_loop(self) -> None:
+        """Crawl subreddits for new images and refresh autocomplete data."""
         # Helps keep our Autocomplete up to date. Beats calling it every time the slash command runs.
         if self.recent_edit:
             self.subreddits = await self._get_all_subreddits()
@@ -1316,9 +1318,10 @@ class RedditImageCrawler(Cog):
 
     @check_loop.before_loop
     async def before_check_loop(self) -> None:
+        """Wait for the bot to be ready before starting the crawler."""
         await self.bot.wait_until_ready()
 
-    async def _get_subreddit(self, name: str) -> Row | None:
+    async def _get_subreddit(self, name: str) -> Optional[Row]:
         """Get a Row from the Subreddit Table.
 
         Parameters
@@ -1328,14 +1331,14 @@ class RedditImageCrawler(Cog):
 
         Returns
         -------
-        :class:`Row | None`
+        :class:`Optional[Row]`
             Row['id', 'name', 'webhook_id'], otherwise `None`.
 
         """
         async with self.bot.pool.acquire() as conn:
             return await conn.fetchone("""SELECT id, name, webhook_id FROM subreddit WHERE name = ?""", name)
 
-    async def _add_subreddit(self, name: str) -> Row | None:
+    async def _add_subreddit(self, name: str) -> Optional[Row]:
         """Add a Row to the Subreddit Table.
 
         Parameters
@@ -1345,17 +1348,17 @@ class RedditImageCrawler(Cog):
 
         Returns
         -------
-        :class:`Row | None`
+        :class:`Optional[Row]`
             Row['id', 'name', 'webhook_id'], otherwise `None` if the Subreddit already exists.
 
         """
-        res: Row | None = await self._get_subreddit(name=name)
+        res: Optional[Row] = await self._get_subreddit(name=name)
         if res is not None:
             return None
         async with self.bot.pool.acquire() as conn:
             return await conn.fetchone("""INSERT INTO subreddit(name) VALUES(?) ON CONFLICT(name) DO NOTHING RETURNING *""", name)
 
-    async def _del_subreddit(self, name: str) -> int | None:
+    async def _del_subreddit(self, name: str) -> Optional[int]:
         """Delete a Row from the Subreddit Table.
 
         Parameters
@@ -1365,11 +1368,11 @@ class RedditImageCrawler(Cog):
 
         Returns
         -------
-        :class:`int | None`
+        :class:`Optional[int]`
             Row count, otherwise `None` if the Subreddit does not exist.
 
         """
-        res: Row | None = await self._get_subreddit(name=name)
+        res: Optional[Row] = await self._get_subreddit(name=name)
         if res is None:
             return None
         async with self.bot.pool.acquire() as conn:
@@ -1405,7 +1408,7 @@ class RedditImageCrawler(Cog):
             )
         return [SubRedditTable(subreddit=row["subreddit"], webhook_url=row["webhook_url"], webhook_name=row["webhook_name"]) for row in res]
 
-    async def _update_subreddit(self, name: str, webhook: Union[int, str]) -> Row | None:
+    async def _update_subreddit(self, name: str, webhook: Union[int, str]) -> Optional[Row]:
         """Update a Subreddit Row `webhook_id` value.
 
         Parameters
@@ -1417,17 +1420,17 @@ class RedditImageCrawler(Cog):
 
         Returns
         -------
-        :class:`Row | None`
+        :class:`Optional[Row]`
             Row['id', 'name', 'webhook_id'], otherwise `None`.
 
         """
-        res: Row | None = await self._get_subreddit(name=name)
+        res: Optional[Row] = await self._get_subreddit(name=name)
         if res is None:
             return None
 
         webhook_id: Optional[int] = None
         if not (isinstance(webhook, str) and webhook.lower() == "none"):
-            wh_res: Row | None = await self._get_webhook(arg=webhook)
+            wh_res: Optional[Row] = await self._get_webhook(arg=webhook)
             if wh_res is None:
                 return None
             webhook_id = wh_res["id"]
@@ -1435,7 +1438,7 @@ class RedditImageCrawler(Cog):
         async with self.bot.pool.acquire() as conn:
             return await conn.fetchone("""UPDATE subreddit SET webhook_id = ? WHERE name = ? RETURNING *""", webhook_id, name)
 
-    async def _get_webhook(self, arg: Union[str, int, None]) -> Row | None:
+    async def _get_webhook(self, arg: Union[str, int, None]) -> Optional[Row]:
         """Lookup a Row in the Webhook Table.
 
         Parameters
@@ -1445,7 +1448,7 @@ class RedditImageCrawler(Cog):
 
         Returns
         -------
-        :class:`Row | None`
+        :class:`Optional[Row]`
             Row['name', 'id', 'url'], otherwise `None`.
 
         """
@@ -1458,7 +1461,7 @@ class RedditImageCrawler(Cog):
                 return await conn.fetchone("""SELECT name, id, url FROM webhook WHERE url = ?""", arg)
             return await conn.fetchone("""SELECT name, id, url FROM webhook WHERE name = ?""", arg)
 
-    async def _add_webhook(self, name: str, url: str) -> Row | None:
+    async def _add_webhook(self, name: str, url: str) -> Optional[Row]:
         """Add a Row to the Webhook Table.
 
         Parameters
@@ -1470,17 +1473,17 @@ class RedditImageCrawler(Cog):
 
         Returns
         -------
-        :class:`Row | None`
+        :class:`Optional[Row]`
             Row['id', 'name', 'url'], otherwise `None` if the Webhook already exists.
 
         """
-        res: Row | None = await self._get_webhook(arg=url)
+        res: Optional[Row] = await self._get_webhook(arg=url)
         if res is not None:
             return None
         async with self.bot.pool.acquire() as conn:
             return await conn.fetchone("""INSERT INTO webhook(name, url) VALUES(?, ?) ON CONFLICT(url) DO NOTHING RETURNING *""", name, url)
 
-    async def _del_webhook(self, arg: Union[int, str]) -> int | None:
+    async def _del_webhook(self, arg: Union[int, str]) -> Optional[int]:
         """Delete a Row matching the arg from the Webhook Table.
 
         Converts string numbers into `ints` if they are digits and
@@ -1493,13 +1496,13 @@ class RedditImageCrawler(Cog):
 
         Returns
         -------
-        :class:`int | None`
+        :class:`Optional[int]`
             Row count, otherwise `None` if the Webhook does not exist.
 
         """
         if isinstance(arg, str) and arg.isdigit():
             arg = int(arg)
-        res: Row | None = await self._get_webhook(arg=arg)
+        res: Optional[Row] = await self._get_webhook(arg=arg)
         if res is None:
             return None
         async with self.bot.pool.acquire() as conn:
@@ -1738,8 +1741,7 @@ class RedditImageCrawler(Cog):
 
             if self.interrupt_loop:
                 self.interrupt_loop = False
-                # Two placeholders and no arguments raised inside logging on every interrupt, so the
-                # one line that explains why the crawler stopped was itself a traceback.
+                # Fixed: two placeholders with no arguments caused a traceback in logging.
                 LOGGER.warning(
                     "<%s.%s> | The Media Handler loop was interrupted. | Subreddit: %s | Images sent: %s",
                     __class__.__name__,
@@ -1794,7 +1796,7 @@ class RedditImageCrawler(Cog):
                     LOGGER.debug("<%s.%s> | Found a gif URL -> %s", __class__.__name__, "subreddit_media_handler", img_url)
                     continue
 
-                img_res: ClientResponse | Literal[False] = await self.get_url_req(img_url=img_url)
+                img_res: Union[ClientResponse, Literal[False]] = await self.get_url_req(img_url=img_url)
                 if img_res is False:
                     continue
                 img_data: bytes = await img_res.read()
@@ -1840,7 +1842,7 @@ class RedditImageCrawler(Cog):
                     img_info=img_info,
                 ).set_image(img=discord.File(fp=io.BytesIO(img_data), filename="image"))
 
-                msg: discord.WebhookMessage | None = await self.webhook_send(url=webhook_url, embed=embed)
+                msg: Optional[discord.WebhookMessage] = await self.webhook_send(url=webhook_url, embed=embed)
                 if msg is not None:
                     today: date = datetime.now(tz=UTC).date()
                     self.last_message_jump[sub] = msg.jump_url
@@ -1904,10 +1906,10 @@ class RedditImageCrawler(Cog):
             img_info.edge_res = False
             return img_info
 
-        source = self.IMAGE_COMP._convert(image=source)  # noqa: SLF001
-        res_image: tuple[Image.Image, Image.Image | None] = self.IMAGE_COMP._image_resize(source=source)  # noqa: SLF001
-        source = self.IMAGE_COMP._filter(image=res_image[0])  # noqa: SLF001
-        edges: list[tuple[int, int]] | None = self.IMAGE_COMP._edge_detect(image=source)  # noqa: SLF001
+        source = self.image_comp._convert(image=source)  # noqa: SLF001
+        res_image: tuple[Image.Image, Optional[Image.Image]] = self.image_comp._image_resize(source=source)  # noqa: SLF001
+        source = self.image_comp._filter(image=res_image[0])  # noqa: SLF001
+        edges: Optional[list[tuple[int, int]]] = self.image_comp._edge_detect(image=source)  # noqa: SLF001
         if edges is None or len(edges) == 0:
             LOGGER.warning("<%s.%s> | Found no edges for url -> %s", __class__.__name__, "partial_edge_comparison", img_url)
             img_info.edge_res = False
@@ -1918,8 +1920,8 @@ class RedditImageCrawler(Cog):
         # 4-byte uint32 count of uint16 values; 2 values (x, y) make one coordinate pair.
         # eg. 500 coords * 10% sample = 50 to check; 90% of 50 = 45 must match; failcount = 5
         num_coords: int = struct.unpack("<I", b_edges[:4])[0] // 2
-        match_req: int = int(num_coords / self.IMAGE_COMP.sample_percent)
-        min_match_req: int = int((match_req * self.IMAGE_COMP.match_percent) / 100)
+        match_req: int = int(num_coords / self.image_comp.sample_percent)
+        min_match_req: int = int((match_req * self.image_comp.match_percent) / 100)
         for array in self.pixel_cords_array:
             sample: int = xy_binfind.find(haystack=array, needles=b_edges, skip=40, failcount=(match_req - min_match_req))
             if sample == -1:
@@ -1967,7 +1969,7 @@ class RedditImageCrawler(Cog):
         # Allow (100 - match_percent)% of coordinate pairs to fail before aborting.
         # Threshold is in coordinate units via the 4-byte uint32 prefix (2 uint16 values per pair).
         num_coords: int = struct.unpack("<I", edges[:4])[0] // 2
-        allowed_fail: int = int(num_coords * (100 - self.IMAGE_COMP.match_percent) / 100)
+        allowed_fail: int = int(num_coords * (100 - self.image_comp.match_percent) / 100)
         return xy_binfind.find(haystack=array, needles=edges, failcount=allowed_fail) != -1
 
     async def get_media_metadata_urls(self, submission: Submission) -> list[str]:
@@ -2031,7 +2033,7 @@ class RedditImageCrawler(Cog):
                 _urls = await self.get_media_metadata_urls(submission=submission)
         return _urls
 
-    async def get_url_req(self, img_url: str, ignore_validation: bool = False) -> ClientResponse | Literal[False]:
+    async def get_url_req(self, img_url: str, ignore_validation: bool = False) -> Union[ClientResponse, Literal[False]]:
         """Calls a `.get()` method to get the image data.
 
         Parameters
@@ -2043,11 +2045,13 @@ class RedditImageCrawler(Cog):
 
         Returns
         -------
-        :class:`ClientResponse | Literal[False]`
+        :class:`Union[ClientResponse, Literal[False]]`
             Returns a `ClientResponse` if the url returns a status code between `200-299`. Otherwise `False`.
 
         """
-        req: ClientResponse = await self.bot.session.get(url=img_url)
+        # Bypass the response cache; image blobs bloat the SQLite backend.
+        async with self.bot.session.disabled():
+            req: ClientResponse = await self.bot.session.get(url=img_url)
 
         if not 200 <= req.status < 300:
             LOGGER.error("<%s.%s> | Unable to handle %s || status code: %s", __class__.__name__, "get_url_req", img_url, req.status)
@@ -2156,7 +2160,7 @@ class RedditImageCrawler(Cog):
         url: str,
         content: Optional[str] = None,
         embed: Optional[RedditEmbed] = None,
-    ) -> discord.WebhookMessage | None:
+    ) -> Optional[discord.WebhookMessage]:
         """Sends the content or embed to the Discord Webhook url provided.
 
         Parameters
@@ -2170,7 +2174,7 @@ class RedditImageCrawler(Cog):
 
         Returns
         -------
-        :class:`discord.WebhookMessage | None`
+        :class:`Optional[discord.WebhookMessage]`
             The sent message if the webhook was sent successfully, otherwise `None`.
 
         """
@@ -2298,7 +2302,7 @@ class RedditImageCrawler(Cog):
     async def _compare_urls(self, url_one: str, url_two: str) -> None:
         """Takes two Image URLs and turns them into PIL Images for comparison.
 
-        See `self.IMAGE_COMP`.
+        See `self.image_comp`.
 
         Parameters
         ----------
@@ -2308,12 +2312,12 @@ class RedditImageCrawler(Cog):
             Image url.
 
         """
-        res_one: ClientResponse | Literal[False] = await self.get_url_req(img_url=url_one)
-        res_two: ClientResponse | Literal[False] = await self.get_url_req(img_url=url_two)
+        res_one: Union[ClientResponse, Literal[False]] = await self.get_url_req(img_url=url_one)
+        res_two: Union[ClientResponse, Literal[False]] = await self.get_url_req(img_url=url_two)
         if res_one is not False and res_two is not False:
             img_one: Image.Image = Image.open(fp=io.BytesIO(await res_one.read()))
             img_two: Image.Image = Image.open(fp=io.BytesIO(await res_two.read()))
-            self.IMAGE_COMP.compare(source=img_one, comparison=img_two)
+            self.image_comp.compare(source=img_one, comparison=img_two)
 
     async def _send_paginated_list(self, context: Context, title: str, entries: list[str], per_page: int = 15) -> discord.Message:
         """Sends the entries as :class:`KumaEmbed` pages, using a :class:`KumaView` to navigate when there is more than one page.
@@ -2358,6 +2362,7 @@ class RedditImageCrawler(Cog):
         order_type: Literal["New", "Hot", "Top"] = "New",
         count: app_commands.Range[int, 0, 100] = 5,
     ) -> discord.Message:
+        """Retrieve and paginate a subreddit's recent submissions."""
         status: int = await self.check_subreddit(subreddit=sub)
         if status != 200:
             return await context.send(
@@ -2386,6 +2391,7 @@ class RedditImageCrawler(Cog):
     @app_commands.autocomplete(webhook=autocomplete_webhook_with_guild)
     @app_commands.default_permissions(manage_guild=True)
     async def add_subreddit(self, context: Context, sub: str, webhook: Optional[str] = None) -> discord.Message:
+        """Add a subreddit to the database, optionally linking a webhook on creation."""
         # A pasted URL is advertised as acceptable, so it is reduced to a name before anything else
         # touches it — the whole URL used to be handed to the API and stored in the table verbatim.
         sub = self.normalize_subreddit(sub)
@@ -2397,7 +2403,7 @@ class RedditImageCrawler(Cog):
                 delete_after=self.message_timeout,
             )
 
-        res: Row | None = await self._add_subreddit(name=sub)
+        res: Optional[Row] = await self._add_subreddit(name=sub)
         if res is None:
             return await context.send(
                 content=f"Unable to add `{display_sub}` to the database. {self.emoji_table.kuma_head_clench}",
@@ -2413,7 +2419,7 @@ class RedditImageCrawler(Cog):
             )
 
         # Try linking the webhook — reuse the same resolution logic as update_subreddit.
-        update_res: Row | None = await self._update_subreddit(name=sub, webhook=webhook)
+        update_res: Optional[Row] = await self._update_subreddit(name=sub, webhook=webhook)
         if update_res is not None:
             return await context.send(
                 content=f"Added `{display_sub}` and linked it to **{webhook}**. {self.emoji_table.kuma_star_eye}",
@@ -2429,7 +2435,7 @@ class RedditImageCrawler(Cog):
             )
             if match is not None:
                 db_name: str = str(match.name)
-                existing: Row | None = await self._get_webhook(arg=db_name)
+                existing: Optional[Row] = await self._get_webhook(arg=db_name)
                 if existing is not None and existing["url"] != match.url:
                     db_name = f"{db_name}-{match.id}"
                 await self._add_webhook(name=db_name, url=match.url)
@@ -2450,7 +2456,8 @@ class RedditImageCrawler(Cog):
     @app_commands.autocomplete(sub=autocomplete_subreddit)
     @app_commands.default_permissions(manage_guild=True)
     async def del_subreddit(self, context: Context, sub: str) -> None:
-        row: Row | None = await self._get_subreddit(name=sub)
+        """Remove a subreddit from the database."""
+        row: Optional[Row] = await self._get_subreddit(name=sub)
         if row is None:
             await context.send(
                 content=f"I couldn't find `/r/{sub}` in the database. {self.emoji_table.kuma_shrug}",
@@ -2458,7 +2465,7 @@ class RedditImageCrawler(Cog):
             )
             return
 
-        webhook: Row | None = await self._get_webhook(arg=row["webhook_id"]) if row["webhook_id"] else None
+        webhook: Optional[Row] = await self._get_webhook(arg=row["webhook_id"]) if row["webhook_id"] else None
 
         await self._del_subreddit(name=sub)
         self.recent_edit = True
@@ -2476,13 +2483,14 @@ class RedditImageCrawler(Cog):
     @app_commands.autocomplete(webhook=autocomplete_webhook_with_guild)
     @app_commands.default_permissions(manage_guild=True)
     async def update_subreddit(self, context: Context, sub: str, webhook: str) -> discord.Message:
+        """Link a subreddit to a webhook from the database or the server."""
         if await self._get_subreddit(name=sub) is None:
             return await context.send(
                 content=f"I don't have `/r/{sub}` in my database; add it with `/add_subreddit` first. {self.emoji_table.kuma_hmm}",
                 delete_after=self.message_timeout,
             )
 
-        res: Row | None = await self._update_subreddit(name=sub, webhook=webhook)
+        res: Optional[Row] = await self._update_subreddit(name=sub, webhook=webhook)
         if res is not None:
             self.recent_edit = True
             return await context.send(
@@ -2525,7 +2533,7 @@ class RedditImageCrawler(Cog):
 
         # The webhook table has a UNIQUE name column; de-collide with the webhook id if needed.
         db_name: str = str(match.name)
-        existing: Row | None = await self._get_webhook(arg=db_name)
+        existing: Optional[Row] = await self._get_webhook(arg=db_name)
         if existing is not None and existing["url"] != match.url:
             db_name = f"{db_name}-{match.id}"
         await self._add_webhook(name=db_name, url=match.url)
@@ -2544,6 +2552,7 @@ class RedditImageCrawler(Cog):
 
     @commands.hybrid_command(help="List of subreddits", aliases=["rslist", "rsl"])
     async def list_subreddit(self, context: Context) -> discord.Message:
+        """List all subreddits and their linked webhooks."""
         res: list[SubRedditTable] = await self._get_all_subreddits()
         temp_list: list[str] = []
         for entry in res:
@@ -2567,14 +2576,15 @@ class RedditImageCrawler(Cog):
     @app_commands.describe(sub="The sub Reddit name.")
     @app_commands.autocomplete(sub=autocomplete_subreddit)
     async def info_subreddit(self, context: Context, sub: str) -> discord.Message:
-        res: Row | None = await self._get_subreddit(name=sub)
+        """Show the webhook info for a subreddit."""
+        res: Optional[Row] = await self._get_subreddit(name=sub)
         if res is None:
             return await context.send(
                 content=f"I couldn't find `/r/{sub}` in the database. {self.emoji_table.kuma_hmm}",
                 delete_after=self.message_timeout,
             )
 
-        wh_res: Row | None = await self._get_webhook(arg=res["webhook_id"])
+        wh_res: Optional[Row] = await self._get_webhook(arg=res["webhook_id"])
         if wh_res is not None:
             return await context.send(
                 content=f"**Info on /r/`{sub}`** {self.emoji_table.kuma_peak}\n> __Webhook Name__: {wh_res['name']}\n> __Webhook ID__: {wh_res['id']}\n> {wh_res['url']}",  # noqa: E501
@@ -2599,6 +2609,7 @@ class RedditImageCrawler(Cog):
         webhook_url: Optional[str] = None,
         channel: Optional[discord.TextChannel] = None,
     ) -> discord.Message:
+        """Add a webhook to the database via URL, or create one in a channel."""
         if webhook_url is None and channel is None:
             return await context.send(
                 content=f"You need to give me either a webhook URL or a channel to make one in. {self.emoji_table.kuma_bleh}",
@@ -2627,7 +2638,7 @@ class RedditImageCrawler(Cog):
             self._guild_webhook_cache.pop(channel.guild.id, None)
         else:
             assert webhook_url is not None  # noqa: S101 # Both-None case handled above; narrows the type.
-            success: discord.WebhookMessage | None = await self.webhook_send(
+            success: Optional[discord.WebhookMessage] = await self.webhook_send(
                 url=webhook_url,
                 content=f"Testing webhook {webhook_name}",
             )
@@ -2637,7 +2648,7 @@ class RedditImageCrawler(Cog):
                     delete_after=self.message_timeout,
                 )
 
-        res: Row | None = await self._add_webhook(name=webhook_name, url=webhook_url)
+        res: Optional[Row] = await self._add_webhook(name=webhook_name, url=webhook_url)
         if res is not None:
             self.recent_edit = True
             return await context.send(
@@ -2653,7 +2664,8 @@ class RedditImageCrawler(Cog):
     @app_commands.autocomplete(webhook=autocomplete_webhook)
     @app_commands.default_permissions(manage_webhooks=True)
     async def del_webhook(self, context: Context, webhook: str) -> None:
-        res: int | None = await self._del_webhook(arg=webhook)
+        """Remove a webhook from the database."""
+        res: Optional[int] = await self._del_webhook(arg=webhook)
         self.recent_edit = True
         if res:
             await context.send(
@@ -2669,6 +2681,7 @@ class RedditImageCrawler(Cog):
     @commands.hybrid_command(help="List all webhook in the database.", aliases=["rswhlist", "rswhl"])
     @app_commands.default_permissions(manage_webhooks=True)
     async def list_webhook(self, context: Context) -> discord.Message:
+        """List all webhooks in the database."""
         if len(self.webhooks) == 0:
             return await context.send(
                 content=f"No webhooks in the database yet. {self.emoji_table.kuma_tear}",
@@ -2680,6 +2693,7 @@ class RedditImageCrawler(Cog):
     @commands.hybrid_command(help="Start/Stop the Crawler loop", aliases=["rsloop"])
     @app_commands.default_permissions(administrator=True)
     async def scrape_loop(self, context: Context, util: Literal["start", "stop", "restart"]) -> discord.Message:
+        """Start, stop or restart the crawler loop."""
         if util == "start":
             if self.check_loop.is_running():
                 status = f"already running. {self.emoji_table.kuma_chuckle}"
@@ -2704,7 +2718,8 @@ class RedditImageCrawler(Cog):
 
     @commands.hybrid_command(help="Sha256 comparison of two URLs", aliases=["sha256", "hash"])
     async def hash_comparison(self, context: Context, url_one: str, url_two: Optional[str] = None) -> discord.Message:
-        res: ClientResponse | Literal[False] = await self.get_url_req(img_url=url_one)
+        """Compare two image URLs by their SHA-256 hash, or show the hash of one."""
+        res: Union[ClientResponse, Literal[False]] = await self.get_url_req(img_url=url_one)
         if res is False:
             return await context.send(
                 content=f"Unable to hash the URL provided. {self.emoji_table.kuma_sad}",
@@ -2715,7 +2730,7 @@ class RedditImageCrawler(Cog):
         if url_two is None:
             return await context.send(content=f"Hash: `{hash_one}` {self.emoji_table.kuma_peak}", delete_after=self.message_timeout)
 
-        res_two: ClientResponse | Literal[False] = await self.get_url_req(img_url=url_two)
+        res_two: Union[ClientResponse, Literal[False]] = await self.get_url_req(img_url=url_two)
         if res_two is False:
             return await context.send(
                 content=f"Unable to hash the second URL provided. {self.emoji_table.kuma_sad}",
@@ -2732,9 +2747,10 @@ class RedditImageCrawler(Cog):
 
     @commands.hybrid_command(help="Edge comparison of two URLs", aliases=["edge"])
     async def edge_comparison(self, context: Context, url_one: str, url_two: str) -> discord.Message:
+        """Compare two image URLs by pixel edge detection."""
         await self._compare_urls(url_one=url_one, url_two=url_two)
         return await context.send(
-            content=f"**URL One**: {url_one}\n**URL Two**: {url_two}\n**Results:** {self.IMAGE_COMP.results} {self.emoji_table.kuma_wow}",
+            content=f"**URL One**: {url_one}\n**URL Two**: {url_two}\n**Results:** {self.image_comp.results} {self.emoji_table.kuma_wow}",
             delete_after=self.message_timeout,
         )
 
@@ -2742,6 +2758,7 @@ class RedditImageCrawler(Cog):
     @app_commands.describe(sub="Filter to a specific subreddit (optional).")
     @app_commands.autocomplete(sub=autocomplete_subreddit)
     async def crawler_stats(self, context: Context, sub: Optional[str] = None) -> discord.Message:
+        """Show crawler metrics, optionally filtered to one subreddit."""
         async with self.bot.pool.acquire() as conn:
             if sub:
                 rows: list[Row] = await conn.fetchall(
