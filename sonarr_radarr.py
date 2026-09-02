@@ -19,6 +19,10 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 
 """
 
+__author__ = "k8thekat"
+__license__ = "GNU"
+__version__ = "2.0.0"
+
 from __future__ import annotations
 
 import logging
@@ -123,6 +127,7 @@ MOVIE_STATUS_DISPLAY: dict[str, str] = {
 UNADDED_ACCENT: discord.Colour = discord.Colour.from_str("#5865F2")
 
 
+# TODO: Move to KumaCog.
 async def _owner_only(interaction: discord.Interaction) -> bool:
     """Restrict a command to the bot owner; writes to disk and starts downloads."""
     bot: Kuma_Kuma = interaction.client  # type: ignore[assignment]
@@ -216,6 +221,7 @@ def truncate(text: Optional[str], limit: int = OVERVIEW_LIMIT) -> str:
     return f"{body[:limit].rsplit(' ', 1)[0]}…"
 
 
+# TODO: Moved to the Panel.
 def progress_bar(percent: float, width: int = PROGRESS_WIDTH) -> str:
     """Returns a filled bar for a percentage.
 
@@ -337,22 +343,51 @@ class SettledPanel(discord.ui.LayoutView):
 # endregion
 
 
-# region --- Sonarr panels ---
+# region --- Panels ---
 
 
-class SonarrPanel(discord.ui.LayoutView):
-    """Shared plumbing for every Sonarr panel in this cog.
+class ArrPanel(discord.ui.LayoutView):
+    """Shared plumbing for every Sonarr and Radarr panel in this cog.
+
+    Stores the cog and user id, gates interactions to the owner, and provides helpers that branch
+    on the service type so each concrete panel reads the same regardless of which *arr it drives.
 
     .. warning::
-        A Components V2 message cannot carry `content` or `embeds`, so anything a reader needs has to
-        be a `TextDisplay` inside the layout.
+        A Components V2 message cannot carry ``content`` or ``embeds``, so anything a reader needs
+        has to be a ``TextDisplay`` inside the layout.
 
     """
 
-    def __init__(self, *, cog: SonarrCog, user_id: int) -> None:
+    def __init__(self, *, cog: Union[SonarrCog, RadarrCog], user_id: int) -> None:
         super().__init__(timeout=PANEL_TIMEOUT)
-        self.cog: SonarrCog = cog
+        self.cog: Union[SonarrCog, RadarrCog] = cog
         self.user_id: int = user_id
+
+    # -- properties ----------------------------------------------------------
+
+    @property
+    def is_sonarr(self) -> bool:
+        """Whether this panel is driving a Sonarr instance."""
+        return isinstance(self.cog, SonarrCog)
+
+    @property
+    def service_name(self) -> str:
+        """``'Sonarr'`` or ``'Radarr'``, for labels and messages."""
+        return "Sonarr" if self.is_sonarr else "Radarr"
+
+    @property
+    def api(self) -> Union[SonarrAPI, RadarrAPI]:
+        """The active API client, narrowed from whichever cog owns us."""
+        if isinstance(self.cog, SonarrCog):
+            return self.cog.sonarr
+        return self.cog.radarr
+
+    @property
+    def external_name(self) -> str:
+        """The external database name — ``'TVDB'`` for Sonarr, ``'TMDB'`` for Radarr."""
+        return "TVDB" if self.is_sonarr else "TMDB"
+
+    # -- interaction ---------------------------------------------------------
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Rejects anyone but the person the panel was opened for."""
@@ -368,64 +403,137 @@ class SonarrPanel(discord.ui.LayoutView):
         """Handle one press or choice; overridden by every panel."""
         raise NotImplementedError
 
-    def art(self, series: Series) -> Optional[discord.ui.MediaGallery]:
-        """Returns the wide backdrop for a series, when TVDB has one.
+    # -- media display helpers -----------------------------------------------
 
-        Only `remoteUrl` art is usable — the sibling path on the Sonarr host needs the API key, and
-        Discord fetches these itself with no way to attach one.
+    def accent(self, media: Series) -> discord.Colour:
+        """Returns the container accent for a library item or lookup result."""
+        if self.is_sonarr:
+            return accent_for_series(media)
+        return accent_for_movie(media)
+
+    def status_label(self, media: Series) -> str:
+        """Returns the human-readable status string for a media item."""
+        if self.is_sonarr:
+            return str(media.status).title() or "Unknown"
+        return movie_status_label(media) or "Unknown"
+
+    def web_url(self, media: Series) -> Optional[str]:
+        """Returns the URL to this item's page inside the *arr web UI."""
+        if self.is_sonarr:
+            return media.web_url(self.cog.base_url)
+        return movie_web_url(media, self.cog.base_url)
+
+    def external_url(self, media: Series) -> Optional[str]:
+        """Returns the TVDB or TMDB page for this item."""
+        if self.is_sonarr:
+            return media.tvdb_url
+        return movie_tmdb_url(media)
+
+    def studio_or_network(self, media: Series) -> Optional[str]:
+        """Returns the network (Sonarr) or studio (Radarr) for a media item."""
+        if self.is_sonarr:
+            return media.network
+        return movie_studio(media)
+
+    # -- layout helpers ------------------------------------------------------
+
+    def art(self, media: Series) -> Optional[discord.ui.MediaGallery]:
+        """Returns the wide backdrop, when the external database has one.
+
+        Only ``remoteUrl`` art is usable — the sibling path on the *arr host needs the API key,
+        and Discord fetches these itself with no way to attach one.
         """
-        backdrop: Optional[str] = series.fanart or series.banner
+        backdrop: Optional[str] = media.fanart or media.banner
         if backdrop is None:
             return None
-        return discord.ui.MediaGallery(discord.MediaGalleryItem(media=backdrop, description=f"{series.title} artwork"))
+        return discord.ui.MediaGallery(discord.MediaGalleryItem(media=backdrop, description=f"{media.title} artwork"))
 
-    def accessory(self, series: Series, *, action: str = "") -> discord.ui.Item:
-        """Returns a section accessory: the poster when there is one, otherwise a button that does something.
+    def accessory(self, media: Series, *, action: str = "") -> discord.ui.Item:
+        """Returns a section accessory: the poster when there is one, otherwise a button.
 
         .. note::
-            A `Section` accessory may only be a button or a thumbnail; discord.py enforces neither, so
-            the fallback stays inside that pair deliberately.
+            A ``Section`` accessory may only be a button or a thumbnail; discord.py enforces
+            neither, so the fallback stays inside that pair deliberately.
 
         """
-        poster: Optional[str] = series.poster
+        poster: Optional[str] = media.poster
         if poster is not None:
-            return discord.ui.Thumbnail(media=poster, description=f"{series.title} poster")
+            return discord.ui.Thumbnail(media=poster, description=f"{media.title} poster")
         return ArrButton(action=action or "noop", label="Details", disabled=not action)
 
-    def links(self, series: Series) -> str:
-        """Returns the external id line that goes under a series."""
+    def links(self, media: Series) -> str:
+        """Returns the external-id markdown line that goes under a media item."""
+        dot: str = self.cog.unicode.middle_dot
         parts: list[str] = []
-        web: Optional[str] = series.web_url(self.cog.base_url)
+        web: Optional[str] = self.web_url(media)
         if web is not None:
-            parts.append(f"[Sonarr]({web})")
-        if series.tvdb_url is not None:
-            parts.append(f"[TVDB]({series.tvdb_url})")
-        if series.imdb_url is not None:
-            parts.append(f"[IMDb]({series.imdb_url})")
-        return f"-# {f' {self.cog.unicode.middle_dot} '.join(parts)}" if parts else ""
+            parts.append(f"[{self.service_name}]({web})")
+        ext: Optional[str] = self.external_url(media)
+        if ext is not None:
+            parts.append(f"[{self.external_name}]({ext})")
+        if media.imdb_url is not None:
+            parts.append(f"[IMDb]({media.imdb_url})")
+        return f"-# {f' {dot} '.join(parts)}" if parts else ""
+
+    # -- API helpers ---------------------------------------------------------
+
+    async def search_media(self, media_id: int) -> None:
+        """Ask the *arr to search for a media item."""
+        if isinstance(self.cog, SonarrCog):
+            await self.cog.sonarr.search_series(series_id=media_id)
+        else:
+            await self.cog.radarr.search_movie(movie_id=media_id)
+
+    async def refresh_media(self, media_id: int) -> None:
+        """Ask the *arr to refresh a media item's metadata and rescan its folder."""
+        if isinstance(self.cog, SonarrCog):
+            await self.cog.sonarr.refresh_series(series_id=media_id)
+        else:
+            await self.cog.radarr.refresh_movie(movie_id=media_id)
+
+    # -- transition helpers --------------------------------------------------
+
+    def _build_detail(self, media: Series, *, note: Optional[str] = None) -> DetailPanel:
+        """Construct the right :class:`DetailPanel` subclass for this panel's service."""
+        cls = SeriesDetailPanel if self.is_sonarr else MovieDetailPanel
+        return cls(cog=self.cog, user_id=self.user_id, media=media, note=note)
 
 
-class SeriesPanel(SonarrPanel):
-    """One series in full: its artwork, its numbers, and the actions that apply to it."""
+# -- Detail panels -----------------------------------------------------------
 
-    def __init__(self, *, cog: SonarrCog, user_id: int, series: Series, note: Optional[str] = None) -> None:
+
+class DetailPanel(ArrPanel):
+    """One media item in full: its artwork, its numbers, and the actions that apply to it.
+
+    The layout is shared; :meth:`details` differs enough between episode-based and file-based media
+    that each service overrides it.
+    """
+
+    def __init__(
+        self,
+        *,
+        cog: Union[SonarrCog, RadarrCog],
+        user_id: int,
+        media: Series,
+        note: Optional[str] = None,
+    ) -> None:
         super().__init__(cog=cog, user_id=user_id)
-        self.series: Series = series
+        self.media: Series = media
 
-        container = discord.ui.Container(accent_colour=accent_for_series(series))
-        backdrop: Optional[discord.ui.MediaGallery] = self.art(series=series)
+        container = discord.ui.Container(accent_colour=self.accent(media))
+        backdrop: Optional[discord.ui.MediaGallery] = self.art(media)
         if backdrop is not None:
             container.add_item(backdrop)
 
-        container.add_item(discord.ui.TextDisplay(f"## {series.display_title}\n-# {self.headline()}"))
-        container.add_item(discord.ui.Section(truncate(series.overview), accessory=self.accessory(series=series)))
+        container.add_item(discord.ui.TextDisplay(f"## {media.display_title}\n-# {self.headline()}"))
+        container.add_item(discord.ui.Section(truncate(media.overview), accessory=self.accessory(media)))
         container.add_item(discord.ui.Separator())
         container.add_item(discord.ui.TextDisplay(self.details()))
 
-        links: str = self.links(series=series)
-        if links:
+        link_line: str = self.links(media)
+        if link_line:
             container.add_item(discord.ui.Separator())
-            container.add_item(discord.ui.TextDisplay(links))
+            container.add_item(discord.ui.TextDisplay(link_line))
 
         if note is not None:
             container.add_item(discord.ui.TextDisplay(f"-# {note}"))
@@ -435,79 +543,56 @@ class SeriesPanel(SonarrPanel):
 
     def headline(self) -> str:
         """Returns the status line that sits under the title."""
-        series: Series = self.series
+        media: Series = self.media
         dot: str = self.cog.unicode.middle_dot
-        parts: list[str] = [str(series.status).title() or "Unknown"]
-        if series.network:
-            parts.append(series.network)
-        if series.certification:
-            parts.append(series.certification)
-        if series.runtime:
-            parts.append(f"{series.runtime}m")
-        if not series.in_library:
+        parts: list[str] = [self.status_label(media)]
+        source: Optional[str] = self.studio_or_network(media)
+        if source:
+            parts.append(source)
+        if media.certification:
+            parts.append(media.certification)
+        if media.runtime:
+            parts.append(f"{media.runtime}m")
+        if not media.in_library:
             parts.append("**not in your library**")
-        elif not series.monitored:
+        elif not media.monitored:
             parts.append("unmonitored")
         return f" {dot} ".join(parts)
 
     def details(self) -> str:
         """Returns the bullet block of numbers.
 
-        A bullet list rather than a table: Discord renders no tables at all, and a code fence would
-        cost the bold and the timestamp.
+        .. note::
+            Override per service — episode progress for Sonarr, file presence for Radarr.
+
         """
-        series: Series = self.series
-        dot: str = self.cog.unicode.middle_dot
-        lines: list[str] = []
-
-        if series.in_library:
-            lines.append(
-                f"- **Episodes** — {progress_bar(series.percent_of_episodes)} "
-                f"{series.episode_file_count}/{series.episode_count} ({series.percent_of_episodes:.0f}%)",
-            )
-            lines.append(f"- **On disk** — {series.size_display} across {series.season_count} seasons")
-            if series.missing_episode_count:
-                lines.append(f"- **Missing** — {series.missing_episode_count} episodes {self.cog.emoji_table.kuma_hmm}")
-        else:
-            lines.append(f"- **Seasons** — {series.season_count}")
-
-        if series.next_airing is not None:
-            lines.append(f"- **Next episode** — {self.cog.to_discord_timestamp(time=series.next_airing, style='R')}")
-        elif series.previous_airing is not None:
-            lines.append(f"- **Last aired** — {self.cog.to_discord_timestamp(time=series.previous_airing, style='R')}")
-
-        if series.rating is not None:
-            lines.append(f"- **Rating** — {series.rating:.1f} {self.cog.unicode.star} ({series.rating_votes:,} votes)")
-        if series.genres:
-            lines.append(f"- **Genres** — {f' {dot} '.join(series.genres[:5])}")
-        return "\n".join(lines)
+        raise NotImplementedError
 
     def actions(self) -> discord.ui.ActionRow:
-        """Returns the row of things that can be done to this series."""
+        """Returns the row of things that can be done to this item."""
         row = discord.ui.ActionRow()
-        if self.series.in_library:
+        if self.media.in_library:
             row.add_item(ArrButton(action="search", label="Search", emoji="🔍"))
             row.add_item(ArrButton(action="refresh", label="Refresh", emoji="🔄"))
             row.add_item(ArrButton(action="remove", label="Remove", emoji="🗑️", style=discord.ButtonStyle.danger))
-        web: Optional[str] = self.series.web_url(self.cog.base_url)
+        web: Optional[str] = self.web_url(self.media)
         if web is not None:
-            # A link button fires no interaction, so it needs no handler.
-            row.add_item(discord.ui.Button(label="Open in Sonarr", style=discord.ButtonStyle.link, url=web))
+            row.add_item(discord.ui.Button(label=f"Open in {self.service_name}", style=discord.ButtonStyle.link, url=web))
         return row
 
     async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # noqa: ARG002 # signature is the base's
-        """Runs a command against the series, or hands over to the remove confirmation."""
+        """Runs a command against the item, or hands over to the remove confirmation."""
         if action == "remove":
-            await interaction.response.edit_message(view=RemovePanel(cog=self.cog, user_id=self.user_id, series=self.series))
+            await interaction.response.edit_message(view=RemovePanel(cog=self.cog, user_id=self.user_id, media=self.media))
             return
 
         note: str
         try:
             if action == "search":
-                await self.cog.sonarr.search_series(series_id=self.series.id)
+                await self.search_media(media_id=self.media.id)
                 note = f"Search queued {self.cog.emoji_table.kuma_tea}"
             elif action == "refresh":
-                await self.cog.sonarr.refresh_series(series_id=self.series.id)
+                await self.refresh_media(media_id=self.media.id)
                 note = f"Refresh queued {self.cog.emoji_table.kuma_tea}"
             else:
                 return
@@ -515,14 +600,82 @@ class SeriesPanel(SonarrPanel):
             await self.cog.report(interaction=interaction, error=error)
             return
 
-        fresh: Series = await self.cog.sonarr.get_series(series_id=self.series.id) or self.series
-        await interaction.response.edit_message(view=SeriesPanel(cog=self.cog, user_id=self.user_id, series=fresh, note=note))
+        fresh: Series = await self.api.get_series(series_id=self.media.id) or self.media
+        await interaction.response.edit_message(view=self._build_detail(media=fresh, note=note))
 
 
-class LibraryPanel(SonarrPanel):
+class SeriesDetailPanel(DetailPanel):
+    """Sonarr detail — episode progress, seasons, airing schedule."""
+
+    def details(self) -> str:
+        """Returns episode-based numbers: progress bar, file counts, airing dates.
+
+        A bullet list rather than a table: Discord renders no tables at all, and a code fence
+        would cost the bold and the timestamp.
+        """
+        media: Series = self.media
+        dot: str = self.cog.unicode.middle_dot
+        lines: list[str] = []
+
+        if media.in_library:
+            lines.append(
+                f"- **Episodes** — {progress_bar(media.percent_of_episodes)} "
+                f"{media.episode_file_count}/{media.episode_count} ({media.percent_of_episodes:.0f}%)",
+            )
+            lines.append(f"- **On disk** — {media.size_display} across {media.season_count} seasons")
+            if media.missing_episode_count:
+                lines.append(f"- **Missing** — {media.missing_episode_count} episodes {self.cog.emoji_table.kuma_hmm}")
+        else:
+            lines.append(f"- **Seasons** — {media.season_count}")
+
+        if media.next_airing is not None:
+            lines.append(f"- **Next episode** — {self.cog.to_discord_timestamp(time=media.next_airing, style='R')}")
+        elif media.previous_airing is not None:
+            lines.append(f"- **Last aired** — {self.cog.to_discord_timestamp(time=media.previous_airing, style='R')}")
+
+        if media.rating is not None:
+            lines.append(f"- **Rating** — {media.rating:.1f} {self.cog.unicode.star} ({media.rating_votes:,} votes)")
+        if media.genres:
+            lines.append(f"- **Genres** — {f' {dot} '.join(media.genres[:5])}")
+        return "\n".join(lines)
+
+
+class MovieDetailPanel(DetailPanel):
+    """Radarr detail — file presence, release date, added date."""
+
+    def details(self) -> str:
+        """Returns file-based numbers: download status, release and added dates.
+
+        A bullet list rather than a table: Discord renders no tables at all, and a code fence
+        would cost the bold and the timestamp.
+        """
+        media: Series = self.media
+        dot: str = self.cog.unicode.middle_dot
+        lines: list[str] = []
+
+        if media.in_library:
+            if movie_has_file(media):
+                lines.append(f"- **File** — {self.cog.emoji_table.kuma_happy} {media.size_display}")
+            else:
+                lines.append(f"- **File** — {self.cog.emoji_table.kuma_hmm} Not downloaded")
+        if media.added is not None and media.in_library:
+            lines.append(f"- **Added** — {self.cog.to_discord_timestamp(time=media.added, style='R')}")
+        if media.first_aired is not None:
+            lines.append(f"- **Released** — {self.cog.to_discord_timestamp(time=media.first_aired, style='D')}")
+        if media.rating is not None:
+            lines.append(f"- **Rating** — {media.rating:.1f} {self.cog.unicode.star} ({media.rating_votes:,} votes)")
+        if media.genres:
+            lines.append(f"- **Genres** — {f' {dot} '.join(media.genres[:5])}")
+        return "\n".join(lines)
+
+
+# -- Listing panels ----------------------------------------------------------
+
+
+class ListingPanel(ArrPanel):
     """The library, a page at a time, each row carrying its own poster."""
 
-    def __init__(self, *, cog: SonarrCog, user_id: int, entries: list[Series], page: int = 0) -> None:
+    def __init__(self, *, cog: Union[SonarrCog, RadarrCog], user_id: int, entries: list[Series], page: int = 0) -> None:
         super().__init__(cog=cog, user_id=user_id)
         self.entries: list[Series] = entries
         self.pages: int = max(1, -(-len(entries) // LIBRARY_PER_PAGE))
@@ -532,13 +685,13 @@ class LibraryPanel(SonarrPanel):
         self.window: list[Series] = entries[start : start + LIBRARY_PER_PAGE]
 
         container = discord.ui.Container(accent_colour=discord.Colour.blurple())
-        container.add_item(discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_peak} Sonarr Library"))
+        container.add_item(discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_peak} {self.service_name} Library"))
         container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
 
         if not self.window:
             container.add_item(discord.ui.TextDisplay("-# Nothing in the library yet."))
-        for series in self.window:
-            container.add_item(discord.ui.Section(self.row(series=series), accessory=self.accessory(series=series)))
+        for media in self.window:
+            container.add_item(discord.ui.Section(self.row(media), accessory=self.accessory(media)))
 
         container.add_item(discord.ui.Separator())
         container.add_item(discord.ui.TextDisplay(f"-# {self.summary()}"))
@@ -548,41 +701,48 @@ class LibraryPanel(SonarrPanel):
             picker.add_item(
                 ArrSelect(
                     action="open",
-                    placeholder="Open a series…",
+                    placeholder=f"Open a {'series' if self.is_sonarr else 'movie'}…",
                     options=[
                         discord.SelectOption(
-                            label=series.display_title[:100],
-                            value=str(series.id),
-                            description=f"{str(series.status).title()} {self.cog.unicode.middle_dot} {series.size_display}"[:100],
+                            label=media.display_title[:100],
+                            value=str(media.id),
+                            description=f"{self.status_label(media)} {self.cog.unicode.middle_dot} {media.size_display}"[:100],
                         )
-                        for series in self.window
+                        for media in self.window
                     ],
                 ),
             )
             container.add_item(picker)
 
         self.add_item(container)
-        # Outside the container: these act *on* the panel rather than being part of the listing, and the
-        # container's border is what makes that read.
+        # Outside the container: these act *on* the panel rather than being part of the listing,
+        # and the container's border is what makes that read.
         self.add_item(self.navigation())
 
-    def row(self, series: Series) -> str:
-        """Returns the two lines shown beside a series' poster."""
+    def row(self, media: Series) -> str:
+        """Returns the two lines shown beside a media item's poster."""
         dot: str = self.cog.unicode.middle_dot
-        state: str = "" if series.monitored else " (unmonitored)"
-        detail: str = (
-            f"{progress_bar(series.percent_of_episodes, width=8)} {series.episode_file_count}/{series.episode_count} "
-            f"{dot} {series.size_display} {dot} {str(series.status).title()}{state}"
-        )
-        return f"**{series.display_title}**\n-# {detail}"
+        state: str = "" if media.monitored else " (unmonitored)"
+        if self.is_sonarr:
+            detail: str = (
+                f"{progress_bar(media.percent_of_episodes, width=8)} {media.episode_file_count}/{media.episode_count} "
+                f"{dot} {media.size_display} {dot} {self.status_label(media)}{state}"
+            )
+        else:
+            file_marker: str = self.cog.emoji_table.kuma_happy if movie_has_file(media) else self.cog.emoji_table.kuma_hmm
+            detail = f"{file_marker} {media.size_display} {dot} {self.status_label(media)}{state}"
+        return f"**{media.display_title}**\n-# {detail}"
 
     def summary(self) -> str:
         """Returns the counts line under the listing."""
         dot: str = self.cog.unicode.middle_dot
-        total_size: int = sum(series.size_on_disk for series in self.entries)
-        missing: int = sum(series.missing_episode_count for series in self.entries)
+        total_size: int = sum(entry.size_on_disk for entry in self.entries)
         page: str = f" {dot} page {self.page + 1} of {self.pages}" if self.pages > 1 else ""
-        return f"{len(self.entries)} series {dot} {to_size(total_size)} {dot} {missing} episodes missing{page}"
+        if self.is_sonarr:
+            missing: int = sum(entry.missing_episode_count for entry in self.entries)
+            return f"{len(self.entries)} series {dot} {to_size(total_size)} {dot} {missing} episodes missing{page}"
+        missing = sum(1 for entry in self.entries if entry.monitored and not movie_has_file(entry))
+        return f"{len(self.entries)} movies {dot} {to_size(total_size)} {dot} {missing} missing{page}"
 
     def navigation(self) -> discord.ui.ActionRow:
         """Returns the paging and refresh row."""
@@ -593,17 +753,17 @@ class LibraryPanel(SonarrPanel):
         row.add_item(ArrButton(action="reload", label="Reload", emoji="🔄"))
         return row
 
-    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # signature is the base's
-        """Pages the listing, reloads it, or opens one series."""
+    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:
+        """Pages the listing, reloads it, or opens one item."""
         if action == "open" and value is not None:
-            series: Optional[Series] = await self.cog.sonarr.get_series(series_id=int(value))
-            if series is None:
+            media: Optional[Series] = await self.api.get_series(series_id=int(value))
+            if media is None:
                 await interaction.response.send_message(
-                    content=f"Sonarr no longer has that one. {self.cog.emoji_table.kuma_shrug}",
+                    content=f"{self.service_name} no longer has that one. {self.cog.emoji_table.kuma_shrug}",
                     ephemeral=True,
                 )
                 return
-            await interaction.response.edit_message(view=SeriesPanel(cog=self.cog, user_id=self.user_id, series=series))
+            await interaction.response.edit_message(view=self._build_detail(media))
             return
 
         page: int = self.page
@@ -614,58 +774,67 @@ class LibraryPanel(SonarrPanel):
             page += 1
         elif action == "reload":
             try:
-                entries = await self.cog.sonarr.library(force=True)
+                entries = await self.api.library(force=True)
             except SonarrError as error:
                 await self.cog.report(interaction=interaction, error=error)
                 return
         else:
             return
 
-        await interaction.response.edit_message(view=LibraryPanel(cog=self.cog, user_id=self.user_id, entries=entries, page=page))
+        await interaction.response.edit_message(
+            view=ListingPanel(cog=self.cog, user_id=self.user_id, entries=entries, page=page),
+        )
 
 
-class AddPanel(SonarrPanel):
+# -- Add panels --------------------------------------------------------------
+
+
+class AddPanel(ArrPanel):
     """Search results, then the one being added with its artwork and its settings.
 
-    The panel has two states rather than two views: nothing is chosen yet, or something is, and picking
-    a different result simply rebuilds it.
+    The panel has two states rather than two views: nothing is chosen yet, or something is, and
+    picking a different result simply rebuilds it.
+
+    .. note::
+        Subclasses set their service-specific setting attribute (``monitor`` or ``availability``)
+        **before** calling ``super().__init__``, because the layout calls :meth:`setting_row`.
+
     """
 
     def __init__(
         self,
         *,
-        cog: SonarrCog,
+        cog: Union[SonarrCog, RadarrCog],
         user_id: int,
         term: str,
         results: list[Series],
         chosen: Optional[Series] = None,
         profile_id: Optional[int] = None,
         folder_path: Optional[str] = None,
-        monitor: MonitorType = MonitorType.all,
     ) -> None:
         super().__init__(cog=cog, user_id=user_id)
         self.term: str = term
         self.results: list[Series] = results
         self.chosen: Optional[Series] = chosen
-        self.monitor: MonitorType = monitor
         self.profile_id: int = profile_id if profile_id is not None else cog.default_profile_id
         self.folder_path: str = folder_path if folder_path is not None else cog.default_folder_path
 
-        accent: discord.Colour = accent_for_series(chosen) if chosen is not None else UNADDED_ACCENT
-        container = discord.ui.Container(accent_colour=accent)
+        accent_colour: discord.Colour = self.accent(chosen) if chosen is not None else UNADDED_ACCENT
+        container = discord.ui.Container(accent_colour=accent_colour)
 
         if chosen is not None:
-            backdrop: Optional[discord.ui.MediaGallery] = self.art(series=chosen)
+            backdrop: Optional[discord.ui.MediaGallery] = self.art(chosen)
             if backdrop is not None:
                 container.add_item(backdrop)
-            container.add_item(discord.ui.TextDisplay(f"## {chosen.display_title}\n-# {self.headline(series=chosen)}"))
-            container.add_item(discord.ui.Section(truncate(chosen.overview), accessory=self.accessory(series=chosen)))
-            links: str = self.links(series=chosen)
-            if links:
-                container.add_item(discord.ui.TextDisplay(links))
+            container.add_item(discord.ui.TextDisplay(f"## {chosen.display_title}\n-# {self.headline(chosen)}"))
+            container.add_item(discord.ui.Section(truncate(chosen.overview), accessory=self.accessory(chosen)))
+            link_line: str = self.links(chosen)
+            if link_line:
+                container.add_item(discord.ui.TextDisplay(link_line))
         else:
+            noun: str = "series" if self.is_sonarr else "movie"
             container.add_item(
-                discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_peak} Add a series\n-# {len(results)} results for `{term}`")
+                discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_peak} Add a {noun}\n-# {len(results)} results for `{term}`")
             )
 
         container.add_item(discord.ui.Separator())
@@ -674,42 +843,53 @@ class AddPanel(SonarrPanel):
         if chosen is not None and not chosen.in_library:
             container.add_item(self.profile_row())
             container.add_item(self.folder_row())
-            container.add_item(self.monitor_row())
+            container.add_item(self.setting_row())
 
         container.add_item(self.actions())
         self.add_item(container)
 
-    def headline(self, series: Series) -> str:
+    def headline(self, media: Series) -> str:
         """Returns the status line under a chosen result."""
         dot: str = self.cog.unicode.middle_dot
-        parts: list[str] = [str(series.status).title() or "Unknown"]
-        if series.network:
-            parts.append(series.network)
-        parts.append(f"{series.season_count} seasons")
-        if series.rating is not None:
-            parts.append(f"{series.rating:.1f} {self.cog.unicode.star}")
-        if series.in_library:
+        parts: list[str] = [self.status_label(media)]
+        source: Optional[str] = self.studio_or_network(media)
+        if source:
+            parts.append(source)
+        if self.is_sonarr:
+            parts.append(f"{media.season_count} seasons")
+        elif media.year:
+            parts.append(str(media.year))
+        if media.rating is not None:
+            parts.append(f"{media.rating:.1f} {self.cog.unicode.star}")
+        if media.in_library:
             parts.append(f"**already in your library** {self.cog.emoji_table.kuma_hmm}")
         return f" {dot} ".join(parts)
 
     def results_row(self) -> discord.ui.ActionRow:
         """Returns the row holding the results select."""
         row = discord.ui.ActionRow()
-        row.add_item(
-            ArrSelect(
-                action="choose",
-                placeholder="Pick a result…",
-                options=[
-                    discord.SelectOption(
-                        label=series.display_title[:100],
-                        value=str(index),
-                        description=("Already added" if series.in_library else f"TVDB {series.tvdb_id}")[:100],
-                        default=self.chosen is not None and series.tvdb_id == self.chosen.tvdb_id,
-                    )
-                    for index, series in enumerate(self.results)
-                ],
-            ),
-        )
+        if self.is_sonarr:
+            options: list[discord.SelectOption] = [
+                discord.SelectOption(
+                    label=media.display_title[:100],
+                    value=str(index),
+                    description=("Already added" if media.in_library else f"TVDB {media.tvdb_id}")[:100],
+                    default=self.chosen is not None and media.tvdb_id == self.chosen.tvdb_id,
+                )
+                for index, media in enumerate(self.results)
+            ]
+        else:
+            tmdb_key: str = "tmdbId"
+            options = [
+                discord.SelectOption(
+                    label=media.display_title[:100],
+                    value=str(index),
+                    description=("Already added" if media.in_library else f"TMDB {media._raw.get(tmdb_key, 'N/A')}")[:100],  # noqa: SLF001
+                    default=self.chosen is not None and media._raw.get(tmdb_key, 0) == self.chosen._raw.get(tmdb_key, -1),  # noqa: SLF001
+                )
+                for index, media in enumerate(self.results)
+            ]
+        row.add_item(ArrSelect(action="choose", placeholder="Pick a result…", options=options))
         return row
 
     def profile_row(self) -> discord.ui.ActionRow:
@@ -747,7 +927,90 @@ class AddPanel(SonarrPanel):
         )
         return row
 
-    def monitor_row(self) -> discord.ui.ActionRow:
+    def setting_row(self) -> discord.ui.ActionRow:
+        """Returns the service-specific setting select (monitor type or availability).
+
+        .. note::
+            Override in each subclass — the setting type and choices differ between services.
+
+        """
+        raise NotImplementedError
+
+    def actions(self) -> discord.ui.ActionRow:
+        """Returns the confirm and cancel row."""
+        row = discord.ui.ActionRow()
+        addable: bool = self.chosen is not None and not self.chosen.in_library
+        row.add_item(ArrButton(action="add", label="Add", emoji="➕", style=discord.ButtonStyle.success, disabled=not addable))
+        if self.chosen is not None and self.chosen.in_library:
+            row.add_item(ArrButton(action="open", label="Open it", emoji="🔍"))
+        row.add_item(ArrButton(action="cancel", label="Cancel"))
+        return row
+
+    def _handle_setting(self, action: str, value: str) -> bool:
+        """Apply a service-specific setting change.
+
+        Returns
+        -------
+        :class:`bool`
+            ``True`` if the action was handled, ``False`` otherwise.
+
+        """
+        raise NotImplementedError
+
+    def _rebuild(self, *, chosen: Optional[Series], profile_id: int, folder_path: str) -> AddPanel:
+        """Reconstruct this panel with updated values; subclass adds its own setting kwarg."""
+        raise NotImplementedError
+
+    async def perform_add(self, interaction: discord.Interaction) -> None:
+        """POST the chosen result; subclass calls the right API and builds the note."""
+        raise NotImplementedError
+
+    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:
+        """Applies a choice and re-renders, or performs the add."""
+        if action == "cancel":
+            self.stop()
+            await interaction.response.edit_message(view=SettledPanel(note=f"Nothing added. {self.cog.emoji_table.kuma_shrug}"))
+            return
+
+        if action == "open" and self.chosen is not None:
+            media: Optional[Series] = await self.api.get_series(series_id=self.chosen.id)
+            if media is not None:
+                await interaction.response.edit_message(view=self._build_detail(media))
+            return
+
+        if action == "add":
+            await self.perform_add(interaction=interaction)
+            return
+
+        # Shared value changes.
+        chosen: Optional[Series] = self.chosen
+        profile_id: int = self.profile_id
+        folder_path: str = self.folder_path
+
+        if action == "choose" and value is not None:
+            chosen = self.results[int(value)]
+        elif action == "profile" and value is not None:
+            profile_id = int(value)
+        elif action == "folder" and value is not None:
+            folder_path = value
+        elif value is not None and self._handle_setting(action, value):
+            pass
+        else:
+            return
+
+        await interaction.response.edit_message(
+            view=self._rebuild(chosen=chosen, profile_id=profile_id, folder_path=folder_path),
+        )
+
+
+class SeriesAddPanel(AddPanel):
+    """Sonarr flavour — adds :attr:`monitor` and calls :meth:`SonarrAPI.add_series`."""
+
+    def __init__(self, *, monitor: MonitorType = MonitorType.all, **kwargs: Any) -> None:
+        self.monitor: MonitorType = monitor
+        super().__init__(**kwargs)
+
+    def setting_row(self) -> discord.ui.ActionRow:
         """Returns the monitoring select."""
         row = discord.ui.ActionRow()
         row.add_item(
@@ -762,68 +1025,29 @@ class AddPanel(SonarrPanel):
         )
         return row
 
-    def actions(self) -> discord.ui.ActionRow:
-        """Returns the confirm and cancel row."""
-        row = discord.ui.ActionRow()
-        addable: bool = self.chosen is not None and not self.chosen.in_library
-        row.add_item(ArrButton(action="add", label="Add", emoji="➕", style=discord.ButtonStyle.success, disabled=not addable))
-        if self.chosen is not None and self.chosen.in_library:
-            row.add_item(ArrButton(action="open", label="Open it", emoji="🔍"))
-        row.add_item(ArrButton(action="cancel", label="Cancel"))
-        return row
+    def _handle_setting(self, action: str, value: str) -> bool:
+        if action == "monitor":
+            self.monitor = MonitorType(value)
+            return True
+        return False
 
-    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # signature is the base's
-        """Applies a choice and re-renders, or performs the add."""
-        if action == "cancel":
-            self.stop()
-            await interaction.response.edit_message(view=SettledPanel(note=f"Nothing added. {self.cog.emoji_table.kuma_shrug}"))
-            return
-
-        if action == "open" and self.chosen is not None:
-            series: Optional[Series] = await self.cog.sonarr.get_series(series_id=self.chosen.id)
-            if series is not None:
-                await interaction.response.edit_message(view=SeriesPanel(cog=self.cog, user_id=self.user_id, series=series))
-            return
-
-        if action == "add":
-            await self.perform_add(interaction=interaction)
-            return
-
-        chosen: Optional[Series] = self.chosen
-        profile_id: int = self.profile_id
-        folder_path: str = self.folder_path
-        monitor: MonitorType = self.monitor
-
-        if action == "choose" and value is not None:
-            chosen = self.results[int(value)]
-        elif action == "profile" and value is not None:
-            profile_id = int(value)
-        elif action == "folder" and value is not None:
-            folder_path = value
-        elif action == "monitor" and value is not None:
-            monitor = MonitorType(value)
-        else:
-            return
-
-        await interaction.response.edit_message(
-            view=AddPanel(
-                cog=self.cog,
-                user_id=self.user_id,
-                term=self.term,
-                results=self.results,
-                chosen=chosen,
-                profile_id=profile_id,
-                folder_path=folder_path,
-                monitor=monitor,
-            ),
+    def _rebuild(self, *, chosen: Optional[Series], profile_id: int, folder_path: str) -> SeriesAddPanel:
+        return SeriesAddPanel(
+            cog=self.cog,
+            user_id=self.user_id,
+            term=self.term,
+            results=self.results,
+            chosen=chosen,
+            profile_id=profile_id,
+            folder_path=folder_path,
+            monitor=self.monitor,
         )
 
     async def perform_add(self, interaction: discord.Interaction) -> None:
-        """POST the chosen result, then show what was created."""
+        """POST the chosen series to Sonarr."""
         if self.chosen is None:
             return
-        # Sonarr writes to disk and may start grabbing immediately, so the response is deferred rather
-        # than risking the interaction expiring mid-add.
+        assert isinstance(self.cog, SonarrCog)  # noqa: S101 # type-narrowing for the API call below
         await interaction.response.defer()
         try:
             added: Series = await self.cog.sonarr.add_series(
@@ -834,7 +1058,10 @@ class AddPanel(SonarrPanel):
                 search_for_missing=self.monitor is not MonitorType.none,
             )
         except SonarrValidationError as error:
-            await interaction.followup.send(content=f"Sonarr said no — {error.summary} {self.cog.emoji_table.kuma_pout}", ephemeral=True)
+            await interaction.followup.send(
+                content=f"Sonarr said no — {error.summary} {self.cog.emoji_table.kuma_pout}",
+                ephemeral=True,
+            )
             return
         except SonarrError as error:
             await self.cog.report(interaction=interaction, error=error, deferred=True)
@@ -846,32 +1073,109 @@ class AddPanel(SonarrPanel):
             f"monitoring **{self.monitor.value}** {self.cog.emoji_table.kuma_happy}"
         )
         LOGGER.info("<%s.%s> | Added | Title: %s | Id: %s", __class__.__name__, "perform_add", added.title, added.id)
-        await interaction.edit_original_response(view=SeriesPanel(cog=self.cog, user_id=self.user_id, series=added, note=note))
+        await interaction.edit_original_response(view=self._build_detail(media=added, note=note))
 
 
-class RemovePanel(SonarrPanel):
+class MovieAddPanel(AddPanel):
+    """Radarr flavour — adds :attr:`availability` and calls :meth:`RadarrAPI.add_movie`."""
+
+    def __init__(self, *, availability: str = "released", **kwargs: Any) -> None:
+        self.availability: str = availability
+        super().__init__(**kwargs)
+
+    def setting_row(self) -> discord.ui.ActionRow:
+        """Returns the minimum availability select."""
+        row = discord.ui.ActionRow()
+        row.add_item(
+            ArrSelect(
+                action="availability",
+                placeholder="Minimum availability…",
+                options=[
+                    discord.SelectOption(label=label, value=avail_value, description=description, default=avail_value == self.availability)
+                    for avail_value, label, description in AVAILABILITY_CHOICES
+                ],
+            ),
+        )
+        return row
+
+    def _handle_setting(self, action: str, value: str) -> bool:
+        if action == "availability":
+            self.availability = value
+            return True
+        return False
+
+    def _rebuild(self, *, chosen: Optional[Series], profile_id: int, folder_path: str) -> MovieAddPanel:
+        return MovieAddPanel(
+            cog=self.cog,
+            user_id=self.user_id,
+            term=self.term,
+            results=self.results,
+            chosen=chosen,
+            profile_id=profile_id,
+            folder_path=folder_path,
+            availability=self.availability,
+        )
+
+    async def perform_add(self, interaction: discord.Interaction) -> None:
+        """POST the chosen movie to Radarr."""
+        if self.chosen is None:
+            return
+        assert isinstance(self.cog, RadarrCog)  # noqa: S101 # type-narrowing for the API call below
+        await interaction.response.defer()
+        try:
+            added: Series = await self.cog.radarr.add_movie(
+                self.chosen,
+                quality_profile_id=self.profile_id,
+                root_folder_path=self.folder_path,
+                minimum_availability=self.availability,
+                search_for_movie=True,
+            )
+        except SonarrValidationError as error:
+            await interaction.followup.send(
+                content=f"Radarr said no — {error.summary} {self.cog.emoji_table.kuma_pout}",
+                ephemeral=True,
+            )
+            return
+        except SonarrError as error:
+            await self.cog.report(interaction=interaction, error=error, deferred=True)
+            return
+
+        self.stop()
+        availability_label: str = MOVIE_STATUS_DISPLAY.get(self.availability, self.availability)
+        note: str = (
+            f"Added to `{self.folder_path}` {self.cog.unicode.middle_dot} "
+            f"availability **{availability_label}** {self.cog.emoji_table.kuma_happy}"
+        )
+        LOGGER.info("<%s.%s> | Added | Title: %s | Id: %s", __class__.__name__, "perform_add", added.title, added.id)
+        await interaction.edit_original_response(view=self._build_detail(media=added, note=note))
+
+
+# -- Remove panel ------------------------------------------------------------
+
+
+class RemovePanel(ArrPanel):
     """The confirmation in front of a delete, with the files toggle it needs."""
 
     def __init__(
         self,
         *,
-        cog: SonarrCog,
+        cog: Union[SonarrCog, RadarrCog],
         user_id: int,
-        series: Series,
+        media: Series,
         delete_files: bool = False,
         expires_at: Optional[float] = None,
     ) -> None:
         super().__init__(cog=cog, user_id=user_id)
-        self.series: Series = series
+        self.media: Series = media
         self.delete_files: bool = delete_files
-        # A destructive confirmation states a deadline, so it has to hold one. `View.timeout` measures
-        # inactivity and restarts on every press, so toggling the files switch would extend it forever;
-        # this is carried across a re-render instead.
+        # A destructive confirmation states a deadline, so it has to hold one. `View.timeout`
+        # measures inactivity and restarts on every press, so toggling the files switch would
+        # extend it forever; this is carried across a re-render instead.
         self.expires_at: float = expires_at if expires_at is not None else time.time() + PANEL_TIMEOUT
 
         container = discord.ui.Container(accent_colour=discord.Colour.from_str("#B71C1C"))
-        container.add_item(discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_hmm} Remove {series.display_title}?"))
-        container.add_item(discord.ui.Section(self.consequences(), accessory=self.accessory(series=series)))
+        container.add_item(discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_hmm} Remove {media.display_title}?"))
+        container.add_item(discord.ui.Section(self.consequences(), accessory=self.accessory(media)))
         container.add_item(discord.ui.Separator())
         container.add_item(discord.ui.TextDisplay(f"-# This expires <t:{int(self.expires_at)}:R>"))
         container.add_item(self.actions())
@@ -896,14 +1200,18 @@ class RemovePanel(SonarrPanel):
 
     def consequences(self) -> str:
         """Returns the plain statement of what pressing Remove will do."""
-        series: Series = self.series
-        lines: list[str] = [f"-# {series.path}" if series.path else "-# No path on disk."]
+        media: Series = self.media
+        lines: list[str] = [f"-# {media.path}" if media.path else "-# No path on disk."]
         if self.delete_files:
-            lines.append(
-                f"**{series.size_display}** across {series.episode_file_count} files **will be deleted.** {self.cog.emoji_table.kuma_shock}"
-            )
+            if self.is_sonarr:
+                lines.append(
+                    f"**{media.size_display}** across {media.episode_file_count} files "
+                    f"**will be deleted.** {self.cog.emoji_table.kuma_shock}"
+                )
+            else:
+                lines.append(f"**{media.size_display}** **will be deleted.** {self.cog.emoji_table.kuma_shock}")
         else:
-            lines.append(f"The entry is removed; **{series.size_display}** of files stay on disk.")
+            lines.append(f"The entry is removed; **{media.size_display}** of files stay on disk.")
         return "\n".join(lines)
 
     def actions(self) -> discord.ui.ActionRow:
@@ -928,7 +1236,7 @@ class RemovePanel(SonarrPanel):
                 view=RemovePanel(
                     cog=self.cog,
                     user_id=self.user_id,
-                    series=self.series,
+                    media=self.media,
                     delete_files=not self.delete_files,
                     expires_at=self.expires_at,
                 ),
@@ -938,7 +1246,7 @@ class RemovePanel(SonarrPanel):
         if action == "cancel":
             self.stop()
             await interaction.response.edit_message(
-                view=SeriesPanel(cog=self.cog, user_id=self.user_id, series=self.series, note=f"Kept. {self.cog.emoji_table.kuma_happy}"),
+                view=self._build_detail(media=self.media, note=f"Kept. {self.cog.emoji_table.kuma_happy}"),
             )
             return
 
@@ -947,7 +1255,8 @@ class RemovePanel(SonarrPanel):
 
         await interaction.response.defer()
         try:
-            await self.cog.sonarr.delete_series(series_id=self.series.id, delete_files=self.delete_files)
+            # `delete_series` works for movies too; the library resource routes by id.
+            await self.api.delete_series(series_id=self.media.id, delete_files=self.delete_files)
         except SonarrError as error:
             await self.cog.report(interaction=interaction, error=error, deferred=True)
             return
@@ -958,21 +1267,28 @@ class RemovePanel(SonarrPanel):
             "<%s.%s> | Removed | Title: %s | Files deleted: %s",
             __class__.__name__,
             "dispatch",
-            self.series.title,
+            self.media.title,
             self.delete_files,
         )
         await interaction.edit_original_response(
-            view=SettledPanel(note=f"Removed **{self.series.display_title}** — {fate}. {self.cog.emoji_table.kuma_happy}"),
+            view=SettledPanel(note=f"Removed **{self.media.display_title}** — {fate}. {self.cog.emoji_table.kuma_happy}"),
         )
 
 
-class StatusPanel(SonarrPanel):
-    """What the instance is doing: its queue, its health, its disks and its own version."""
+# -- Status panels -----------------------------------------------------------
+
+
+class StatusPanel(ArrPanel):
+    """What the instance is doing: its queue, its health, its disks and its own version.
+
+    :meth:`library_block` differs enough between episode-counting and movie-counting that each
+    service overrides it.
+    """
 
     def __init__(
         self,
         *,
-        cog: SonarrCog,
+        cog: Union[SonarrCog, RadarrCog],
         user_id: int,
         status: SystemStatus,
         queue: list[QueueRecord],
@@ -986,7 +1302,7 @@ class StatusPanel(SonarrPanel):
         # Red when something needs a person, amber when a download is stuck, green otherwise.
         errors: bool = any(warning.is_error for warning in warnings)
         stalled: bool = any(record.stalled for record in queue)
-        accent: discord.Colour = (
+        accent_colour: discord.Colour = (
             discord.Colour.from_str("#B71C1C")
             if errors
             else discord.Colour.from_str("#FFB300")
@@ -994,7 +1310,7 @@ class StatusPanel(SonarrPanel):
             else discord.Colour.from_str("#4CAF50")
         )
 
-        container = discord.ui.Container(accent_colour=accent)
+        container = discord.ui.Container(accent_colour=accent_colour)
         container.add_item(discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_tea} {status.instance_name}\n-# {self.headline()}"))
         container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
         container.add_item(discord.ui.TextDisplay(self.queue_block(queue=queue)))
@@ -1007,14 +1323,17 @@ class StatusPanel(SonarrPanel):
 
         row = discord.ui.ActionRow()
         row.add_item(ArrButton(action="reload", label="Refresh", emoji="🔄"))
-        row.add_item(discord.ui.Button(label="Open in Sonarr", style=discord.ButtonStyle.link, url=cog.base_url))
+        row.add_item(discord.ui.Button(label=f"Open in {self.service_name}", style=discord.ButtonStyle.link, url=cog.base_url))
         container.add_item(row)
         self.add_item(container)
 
     def headline(self) -> str:
         """Returns the version line, and whether the event listener is attached."""
         dot: str = self.cog.unicode.middle_dot
-        listening: str = "live" if self.cog.sonarr.listening else "polling"
+        if isinstance(self.cog, SonarrCog):
+            listening: str = "live" if self.cog.sonarr.listening else "polling"
+        else:
+            listening = "live" if self.cog.radarr.listening else "polling"
         parts: list[str] = [f"v{self.status.version}", self.status.branch]
         if self.status.is_docker:
             parts.append("docker")
@@ -1042,24 +1361,16 @@ class StatusPanel(SonarrPanel):
         return "\n".join(lines)
 
     def library_block(self, library: list[Series], mounts: list[DiskSpace]) -> str:
-        """Returns the library totals and the free space under them."""
-        dot: str = self.cog.unicode.middle_dot
-        missing: int = sum(series.missing_episode_count for series in library)
-        continuing: int = sum(1 for series in library if series.continuing)
-        lines: list[str] = [
-            "### Library",
-            f"- **Series** — {len(library)} ({continuing} continuing)",
-            f"- **Episodes** — {sum(series.episode_file_count for series in library):,} on disk {dot} {missing:,} missing",
-            f"- **Size** — {to_size(sum(series.size_on_disk for series in library))}",
-        ]
-        lines.extend(
-            f"- **{mount.path}** — {mount.free_space_display} free of {mount.total_space_display} ({mount.used_percent:.0f}% used)"
-            for mount in mounts[:3]
-        )
-        return "\n".join(lines)
+        """Returns the library totals and the free space under them.
+
+        .. note::
+            Override per service — Sonarr counts episodes, Radarr counts movies with files.
+
+        """
+        raise NotImplementedError
 
     def health_block(self, warnings: list[Health]) -> str:
-        """Returns Sonarr's own health warnings."""
+        """Returns the instance's own health warnings."""
         emoji_table = self.cog.emoji_table
         lines: list[str] = [f"### Health {emoji_table.kuma_hmm}"]
         for warning in warnings[:5]:
@@ -1080,813 +1391,32 @@ class StatusPanel(SonarrPanel):
         await interaction.edit_original_response(view=panel)
 
 
-class SearchPanel(SonarrPanel):
-    """Paginated TVDB lookup results; pick one to open its detail view."""
-
-    def __init__(self, *, cog: SonarrCog, user_id: int, term: str, results: list[Series], page: int = 0) -> None:
-        super().__init__(cog=cog, user_id=user_id)
-        self.term: str = term
-        self.results: list[Series] = results
-        self.pages: int = max(1, -(-len(results) // LIBRARY_PER_PAGE))
-        self.page: int = max(0, min(page, self.pages - 1))
-
-        start: int = self.page * LIBRARY_PER_PAGE
-        self.window: list[Series] = results[start : start + LIBRARY_PER_PAGE]
-
-        container = discord.ui.Container(accent_colour=UNADDED_ACCENT)
-        container.add_item(
-            discord.ui.TextDisplay(
-                f"## {cog.emoji_table.kuma_peak} Search results\n-# {len(results)} results for `{term}` {self.page_label()}"
-            )
-        )
-        container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
-
-        if not self.window:
-            container.add_item(discord.ui.TextDisplay(f"-# No results. {cog.emoji_table.kuma_shrug}"))
-        for series in self.window:
-            container.add_item(discord.ui.Section(self.row(series=series), accessory=self.accessory(series=series)))
-
-        if self.window:
-            picker = discord.ui.ActionRow()
-            picker.add_item(
-                ArrSelect(
-                    action="open",
-                    placeholder="Open a result…",
-                    options=[
-                        discord.SelectOption(
-                            label=series.display_title[:100],
-                            value=str(index + start),
-                            description=self.option_detail(series=series)[:100],
-                        )
-                        for index, series in enumerate(self.window)
-                    ],
-                ),
-            )
-            container.add_item(picker)
-
-        self.add_item(container)
-        self.add_item(self.navigation())
-
-    def page_label(self) -> str:
-        """Returns the page indicator when there is more than one."""
-        dot: str = self.cog.unicode.middle_dot
-        return f"{dot} page {self.page + 1} of {self.pages}" if self.pages > 1 else ""
-
-    def row(self, series: Series) -> str:
-        """Returns the two lines shown beside a result's poster."""
-        dot: str = self.cog.unicode.middle_dot
-        parts: list[str] = [str(series.status).title() or "Unknown"]
-        if series.network:
-            parts.append(series.network)
-        parts.append(f"{series.season_count} seasons")
-        if series.in_library:
-            parts.append("in library")
-        detail: str = f" {dot} ".join(parts)
-        return f"**{series.display_title}**\n-# {detail}"
-
-    def option_detail(self, series: Series) -> str:
-        """Returns the description line for a select option."""
-        if series.in_library:
-            return "Already in library"
-        return f"TVDB {series.tvdb_id}" if series.tvdb_id else str(series.status).title()
-
-    def navigation(self) -> discord.ui.ActionRow:
-        """Returns the paging row."""
-        row = discord.ui.ActionRow()
-        if self.pages > 1:
-            row.add_item(ArrButton(action="prev", label="Prev", disabled=self.page == 0))
-            row.add_item(ArrButton(action="next", label="Next", disabled=self.page >= self.pages - 1))
-        row.add_item(ArrButton(action="cancel", label="Close"))
-        return row
-
-    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # signature is the base's
-        """Pages the listing or opens one result."""
-        if action == "cancel":
-            self.stop()
-            await interaction.response.edit_message(view=SettledPanel(note=f"Search closed. {self.cog.emoji_table.kuma_shrug}"))
-            return
-
-        if action == "open" and value is not None:
-            series: Series = self.results[int(value)]
-            # If already in the library, fetch the full record for accurate stats.
-            if series.in_library:
-                fresh: Optional[Series] = await self.cog.sonarr.get_series(series_id=series.id)
-                if fresh is not None:
-                    series = fresh
-            await interaction.response.edit_message(view=SeriesPanel(cog=self.cog, user_id=self.user_id, series=series))
-            return
-
-        page: int = self.page
-        if action == "prev":
-            page -= 1
-        elif action == "next":
-            page += 1
-        else:
-            return
-
-        await interaction.response.edit_message(
-            view=SearchPanel(cog=self.cog, user_id=self.user_id, term=self.term, results=self.results, page=page)
-        )
-
-
-# endregion
-
-
-# region --- Radarr panels ---
-
-
-class RadarrPanel(discord.ui.LayoutView):
-    """Shared plumbing for every Radarr panel in this cog.
-
-    .. warning::
-        A Components V2 message cannot carry `content` or `embeds`, so anything a reader needs has to
-        be a `TextDisplay` inside the layout.
-
-    """
-
-    def __init__(self, *, cog: RadarrCog, user_id: int) -> None:
-        super().__init__(timeout=PANEL_TIMEOUT)
-        self.cog: RadarrCog = cog
-        self.user_id: int = user_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Rejects anyone but the person the panel was opened for."""
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                content=f"That panel isn't yours! {self.cog.emoji_table.kuma_shrug}",
-                ephemeral=True,
-            )
-            return False
-        return True
-
-    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:
-        """Handle one press or choice; overridden by every panel."""
-        raise NotImplementedError
-
-    def art(self, movie: Series) -> Optional[discord.ui.MediaGallery]:
-        """Returns the wide backdrop for a movie, when TMDB has one."""
-        backdrop: Optional[str] = movie.fanart or movie.banner
-        if backdrop is None:
-            return None
-        return discord.ui.MediaGallery(discord.MediaGalleryItem(media=backdrop, description=f"{movie.title} artwork"))
-
-    def accessory(self, movie: Series, *, action: str = "") -> discord.ui.Item:
-        """Returns a section accessory: the poster when there is one, otherwise a button.
-
-        .. note::
-            A `Section` accessory may only be a button or a thumbnail; discord.py enforces neither, so
-            the fallback stays inside that pair deliberately.
-
-        """
-        poster: Optional[str] = movie.poster
-        if poster is not None:
-            return discord.ui.Thumbnail(media=poster, description=f"{movie.title} poster")
-        return ArrButton(action=action or "noop", label="Details", disabled=not action)
-
-    def links(self, movie: Series) -> str:
-        """Returns the external id line that goes under a movie."""
-        parts: list[str] = []
-        web: Optional[str] = movie_web_url(movie, self.cog.base_url)
-        if web is not None:
-            parts.append(f"[Radarr]({web})")
-        tmdb: Optional[str] = movie_tmdb_url(movie)
-        if tmdb is not None:
-            parts.append(f"[TMDB]({tmdb})")
-        if movie.imdb_url is not None:
-            parts.append(f"[IMDb]({movie.imdb_url})")
-        return f"-# {f' {self.cog.unicode.middle_dot} '.join(parts)}" if parts else ""
-
-
-class MoviePanel(RadarrPanel):
-    """One movie in full: its artwork, its numbers, and the actions that apply to it."""
-
-    def __init__(self, *, cog: RadarrCog, user_id: int, movie: Series, note: Optional[str] = None) -> None:
-        super().__init__(cog=cog, user_id=user_id)
-        self.movie: Series = movie
-
-        container = discord.ui.Container(accent_colour=accent_for_movie(movie))
-        backdrop: Optional[discord.ui.MediaGallery] = self.art(movie=movie)
-        if backdrop is not None:
-            container.add_item(backdrop)
-
-        container.add_item(discord.ui.TextDisplay(f"## {movie.display_title}\n-# {self.headline()}"))
-        container.add_item(discord.ui.Section(truncate(movie.overview), accessory=self.accessory(movie=movie)))
-        container.add_item(discord.ui.Separator())
-        container.add_item(discord.ui.TextDisplay(self.details()))
-
-        links: str = self.links(movie=movie)
-        if links:
-            container.add_item(discord.ui.Separator())
-            container.add_item(discord.ui.TextDisplay(links))
-
-        if note is not None:
-            container.add_item(discord.ui.TextDisplay(f"-# {note}"))
-
-        container.add_item(self.actions())
-        self.add_item(container)
-
-    def headline(self) -> str:
-        """Returns the status line that sits under the title."""
-        movie: Series = self.movie
-        dot: str = self.cog.unicode.middle_dot
-        parts: list[str] = [movie_status_label(movie) or "Unknown"]
-        studio: Optional[str] = movie_studio(movie)
-        if studio:
-            parts.append(studio)
-        if movie.certification:
-            parts.append(movie.certification)
-        if movie.runtime:
-            parts.append(f"{movie.runtime}m")
-        if not movie.in_library:
-            parts.append("**not in your library**")
-        elif not movie.monitored:
-            parts.append("unmonitored")
-        return f" {dot} ".join(parts)
-
-    def details(self) -> str:
-        """Returns the bullet block of numbers.
-
-        A bullet list rather than a table: Discord renders no tables at all, and a code fence would
-        cost the bold and the timestamp.
-        """
-        movie: Series = self.movie
-        dot: str = self.cog.unicode.middle_dot
-        lines: list[str] = []
-
-        if movie.in_library:
-            if movie_has_file(movie):
-                lines.append(f"- **File** — {self.cog.emoji_table.kuma_happy} {movie.size_display}")
-            else:
-                lines.append(f"- **File** — {self.cog.emoji_table.kuma_hmm} Not downloaded")
-        if movie.added is not None and movie.in_library:
-            lines.append(f"- **Added** — {self.cog.to_discord_timestamp(time=movie.added, style='R')}")
-        if movie.first_aired is not None:
-            lines.append(f"- **Released** — {self.cog.to_discord_timestamp(time=movie.first_aired, style='D')}")
-        if movie.rating is not None:
-            lines.append(f"- **Rating** — {movie.rating:.1f} {self.cog.unicode.star} ({movie.rating_votes:,} votes)")
-        if movie.genres:
-            lines.append(f"- **Genres** — {f' {dot} '.join(movie.genres[:5])}")
-        return "\n".join(lines)
-
-    def actions(self) -> discord.ui.ActionRow:
-        """Returns the row of things that can be done to this movie."""
-        row = discord.ui.ActionRow()
-        if self.movie.in_library:
-            row.add_item(ArrButton(action="search", label="Search", emoji="🔍"))
-            row.add_item(ArrButton(action="refresh", label="Refresh", emoji="🔄"))
-            row.add_item(ArrButton(action="remove", label="Remove", emoji="🗑️", style=discord.ButtonStyle.danger))
-        web: Optional[str] = movie_web_url(self.movie, self.cog.base_url)
-        if web is not None:
-            row.add_item(discord.ui.Button(label="Open in Radarr", style=discord.ButtonStyle.link, url=web))
-        return row
-
-    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # noqa: ARG002 # signature is the base's
-        """Runs a command against the movie, or hands over to the remove confirmation."""
-        if action == "remove":
-            await interaction.response.edit_message(view=MovieRemovePanel(cog=self.cog, user_id=self.user_id, movie=self.movie))
-            return
-
-        note: str
-        try:
-            if action == "search":
-                await self.cog.radarr.search_movie(movie_id=self.movie.id)
-                note = f"Search queued {self.cog.emoji_table.kuma_tea}"
-            elif action == "refresh":
-                await self.cog.radarr.refresh_movie(movie_id=self.movie.id)
-                note = f"Refresh queued {self.cog.emoji_table.kuma_tea}"
-            else:
-                return
-        except SonarrError as error:
-            await self.cog.report(interaction=interaction, error=error)
-            return
-
-        fresh: Series = await self.cog.radarr.get_series(series_id=self.movie.id) or self.movie
-        await interaction.response.edit_message(view=MoviePanel(cog=self.cog, user_id=self.user_id, movie=fresh, note=note))
-
-
-class MovieLibraryPanel(RadarrPanel):
-    """The movie library, a page at a time, each row carrying its own poster."""
-
-    def __init__(self, *, cog: RadarrCog, user_id: int, entries: list[Series], page: int = 0) -> None:
-        super().__init__(cog=cog, user_id=user_id)
-        self.entries: list[Series] = entries
-        self.pages: int = max(1, -(-len(entries) // LIBRARY_PER_PAGE))
-        self.page: int = max(0, min(page, self.pages - 1))
-
-        start: int = self.page * LIBRARY_PER_PAGE
-        self.window: list[Series] = entries[start : start + LIBRARY_PER_PAGE]
-
-        container = discord.ui.Container(accent_colour=discord.Colour.blurple())
-        container.add_item(discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_peak} Radarr Library"))
-        container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
-
-        if not self.window:
-            container.add_item(discord.ui.TextDisplay("-# Nothing in the library yet."))
-        for movie in self.window:
-            container.add_item(discord.ui.Section(self.row(movie=movie), accessory=self.accessory(movie=movie)))
-
-        container.add_item(discord.ui.Separator())
-        container.add_item(discord.ui.TextDisplay(f"-# {self.summary()}"))
-
-        if self.window:
-            picker = discord.ui.ActionRow()
-            picker.add_item(
-                ArrSelect(
-                    action="open",
-                    placeholder="Open a movie…",
-                    options=[
-                        discord.SelectOption(
-                            label=movie.display_title[:100],
-                            value=str(movie.id),
-                            description=f"{movie_status_label(movie)} {self.cog.unicode.middle_dot} {movie.size_display}"[:100],
-                        )
-                        for movie in self.window
-                    ],
-                ),
-            )
-            container.add_item(picker)
-
-        self.add_item(container)
-        self.add_item(self.navigation())
-
-    def row(self, movie: Series) -> str:
-        """Returns the two lines shown beside a movie's poster."""
-        dot: str = self.cog.unicode.middle_dot
-        state: str = "" if movie.monitored else " (unmonitored)"
-        file_marker: str = self.cog.emoji_table.kuma_happy if movie_has_file(movie) else self.cog.emoji_table.kuma_hmm
-        detail: str = f"{file_marker} {movie.size_display} {dot} {movie_status_label(movie)}{state}"
-        return f"**{movie.display_title}**\n-# {detail}"
-
-    def summary(self) -> str:
-        """Returns the counts line under the listing."""
-        dot: str = self.cog.unicode.middle_dot
-        total_size: int = sum(movie.size_on_disk for movie in self.entries)
-        missing: int = sum(1 for movie in self.entries if movie.monitored and not movie_has_file(movie))
-        page: str = f" {dot} page {self.page + 1} of {self.pages}" if self.pages > 1 else ""
-        return f"{len(self.entries)} movies {dot} {to_size(total_size)} {dot} {missing} missing{page}"
-
-    def navigation(self) -> discord.ui.ActionRow:
-        """Returns the paging and refresh row."""
-        row = discord.ui.ActionRow()
-        if self.pages > 1:
-            row.add_item(ArrButton(action="prev", label="Prev", disabled=self.page == 0))
-            row.add_item(ArrButton(action="next", label="Next", disabled=self.page >= self.pages - 1))
-        row.add_item(ArrButton(action="reload", label="Reload", emoji="🔄"))
-        return row
-
-    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # signature is the base's
-        """Pages the listing, reloads it, or opens one movie."""
-        if action == "open" and value is not None:
-            movie: Optional[Series] = await self.cog.radarr.get_series(series_id=int(value))
-            if movie is None:
-                await interaction.response.send_message(
-                    content=f"Radarr no longer has that one. {self.cog.emoji_table.kuma_shrug}",
-                    ephemeral=True,
-                )
-                return
-            await interaction.response.edit_message(view=MoviePanel(cog=self.cog, user_id=self.user_id, movie=movie))
-            return
-
-        page: int = self.page
-        entries: list[Series] = self.entries
-        if action == "prev":
-            page -= 1
-        elif action == "next":
-            page += 1
-        elif action == "reload":
-            try:
-                entries = await self.cog.radarr.library(force=True)
-            except SonarrError as error:
-                await self.cog.report(interaction=interaction, error=error)
-                return
-        else:
-            return
-
-        await interaction.response.edit_message(view=MovieLibraryPanel(cog=self.cog, user_id=self.user_id, entries=entries, page=page))
-
-
-class MovieAddPanel(RadarrPanel):
-    """TMDB search results, then the one being added with its artwork and its settings.
-
-    The panel has two states rather than two views: nothing is chosen yet, or something is, and picking
-    a different result simply rebuilds it.
-    """
-
-    def __init__(
-        self,
-        *,
-        cog: RadarrCog,
-        user_id: int,
-        term: str,
-        results: list[Series],
-        chosen: Optional[Series] = None,
-        profile_id: Optional[int] = None,
-        folder_path: Optional[str] = None,
-        availability: str = "released",
-    ) -> None:
-        super().__init__(cog=cog, user_id=user_id)
-        self.term: str = term
-        self.results: list[Series] = results
-        self.chosen: Optional[Series] = chosen
-        self.availability: str = availability
-        self.profile_id: int = profile_id if profile_id is not None else cog.default_profile_id
-        self.folder_path: str = folder_path if folder_path is not None else cog.default_folder_path
-
-        accent: discord.Colour = accent_for_movie(chosen) if chosen is not None else UNADDED_ACCENT
-        container = discord.ui.Container(accent_colour=accent)
-
-        if chosen is not None:
-            backdrop: Optional[discord.ui.MediaGallery] = self.art(movie=chosen)
-            if backdrop is not None:
-                container.add_item(backdrop)
-            container.add_item(discord.ui.TextDisplay(f"## {chosen.display_title}\n-# {self.headline(movie=chosen)}"))
-            container.add_item(discord.ui.Section(truncate(chosen.overview), accessory=self.accessory(movie=chosen)))
-            links: str = self.links(movie=chosen)
-            if links:
-                container.add_item(discord.ui.TextDisplay(links))
-        else:
-            container.add_item(
-                discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_peak} Add a movie\n-# {len(results)} results for `{term}`")
-            )
-
-        container.add_item(discord.ui.Separator())
-        container.add_item(self.results_row())
-
-        if chosen is not None and not chosen.in_library:
-            container.add_item(self.profile_row())
-            container.add_item(self.folder_row())
-            container.add_item(self.availability_row())
-
-        container.add_item(self.actions())
-        self.add_item(container)
-
-    def headline(self, movie: Series) -> str:
-        """Returns the status line under a chosen result."""
-        dot: str = self.cog.unicode.middle_dot
-        parts: list[str] = [movie_status_label(movie) or "Unknown"]
-        studio: Optional[str] = movie_studio(movie)
-        if studio:
-            parts.append(studio)
-        if movie.year:
-            parts.append(str(movie.year))
-        if movie.rating is not None:
-            parts.append(f"{movie.rating:.1f} {self.cog.unicode.star}")
-        if movie.in_library:
-            parts.append(f"**already in your library** {self.cog.emoji_table.kuma_hmm}")
-        return f" {dot} ".join(parts)
-
-    def results_row(self) -> discord.ui.ActionRow:
-        """Returns the row holding the results select."""
-        row = discord.ui.ActionRow()
-        tmdb_key: str = "tmdbId"
-        row.add_item(
-            ArrSelect(
-                action="choose",
-                placeholder="Pick a result…",
-                options=[
-                    discord.SelectOption(
-                        label=movie.display_title[:100],
-                        value=str(index),
-                        description=("Already added" if movie.in_library else f"TMDB {movie._raw.get(tmdb_key, 'N/A')}")[:100],  # noqa: SLF001
-                        default=self.chosen is not None and movie._raw.get(tmdb_key, 0) == self.chosen._raw.get(tmdb_key, -1),  # noqa: SLF001
-                    )
-                    for index, movie in enumerate(self.results)
-                ],
-            ),
-        )
-        return row
-
-    def profile_row(self) -> discord.ui.ActionRow:
-        """Returns the quality profile select."""
-        row = discord.ui.ActionRow()
-        row.add_item(
-            ArrSelect(
-                action="profile",
-                placeholder="Quality profile…",
-                options=[
-                    discord.SelectOption(label=profile.name[:100], value=str(profile.id), default=profile.id == self.profile_id)
-                    for profile in self.cog.profiles[:25]
-                ],
-            ),
-        )
-        return row
-
-    def folder_row(self) -> discord.ui.ActionRow:
-        """Returns the root folder select."""
-        row = discord.ui.ActionRow()
-        row.add_item(
-            ArrSelect(
-                action="folder",
-                placeholder="Root folder…",
-                options=[
-                    discord.SelectOption(
-                        label=folder.path[:100],
-                        value=folder.path,
-                        description=f"{folder.free_space_display} free"[:100],
-                        default=folder.path == self.folder_path,
-                    )
-                    for folder in self.cog.folders[:25]
-                ],
-            ),
-        )
-        return row
-
-    def availability_row(self) -> discord.ui.ActionRow:
-        """Returns the minimum availability select."""
-        row = discord.ui.ActionRow()
-        row.add_item(
-            ArrSelect(
-                action="availability",
-                placeholder="Minimum availability…",
-                options=[
-                    discord.SelectOption(label=label, value=value, description=description, default=value == self.availability)
-                    for value, label, description in AVAILABILITY_CHOICES
-                ],
-            ),
-        )
-        return row
-
-    def actions(self) -> discord.ui.ActionRow:
-        """Returns the confirm and cancel row."""
-        row = discord.ui.ActionRow()
-        addable: bool = self.chosen is not None and not self.chosen.in_library
-        row.add_item(ArrButton(action="add", label="Add", emoji="➕", style=discord.ButtonStyle.success, disabled=not addable))
-        if self.chosen is not None and self.chosen.in_library:
-            row.add_item(ArrButton(action="open", label="Open it", emoji="🔍"))
-        row.add_item(ArrButton(action="cancel", label="Cancel"))
-        return row
-
-    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # signature is the base's
-        """Applies a choice and re-renders, or performs the add."""
-        if action == "cancel":
-            self.stop()
-            await interaction.response.edit_message(view=SettledPanel(note=f"Nothing added. {self.cog.emoji_table.kuma_shrug}"))
-            return
-
-        if action == "open" and self.chosen is not None:
-            movie: Optional[Series] = await self.cog.radarr.get_series(series_id=self.chosen.id)
-            if movie is not None:
-                await interaction.response.edit_message(view=MoviePanel(cog=self.cog, user_id=self.user_id, movie=movie))
-            return
-
-        if action == "add":
-            await self.perform_add(interaction=interaction)
-            return
-
-        chosen: Optional[Series] = self.chosen
-        profile_id: int = self.profile_id
-        folder_path: str = self.folder_path
-        availability: str = self.availability
-
-        if action == "choose" and value is not None:
-            chosen = self.results[int(value)]
-        elif action == "profile" and value is not None:
-            profile_id = int(value)
-        elif action == "folder" and value is not None:
-            folder_path = value
-        elif action == "availability" and value is not None:
-            availability = value
-        else:
-            return
-
-        await interaction.response.edit_message(
-            view=MovieAddPanel(
-                cog=self.cog,
-                user_id=self.user_id,
-                term=self.term,
-                results=self.results,
-                chosen=chosen,
-                profile_id=profile_id,
-                folder_path=folder_path,
-                availability=availability,
-            ),
-        )
-
-    async def perform_add(self, interaction: discord.Interaction) -> None:
-        """POST the chosen result, then show what was created."""
-        if self.chosen is None:
-            return
-        # Radarr writes to disk and may start grabbing immediately, so the response is deferred rather
-        # than risking the interaction expiring mid-add.
-        await interaction.response.defer()
-        try:
-            added: Series = await self.cog.radarr.add_movie(
-                self.chosen,
-                quality_profile_id=self.profile_id,
-                root_folder_path=self.folder_path,
-                minimum_availability=self.availability,
-                search_for_movie=True,
-            )
-        except SonarrValidationError as error:
-            await interaction.followup.send(content=f"Radarr said no — {error.summary} {self.cog.emoji_table.kuma_pout}", ephemeral=True)
-            return
-        except SonarrError as error:
-            await self.cog.report(interaction=interaction, error=error, deferred=True)
-            return
-
-        self.stop()
-        availability_label: str = MOVIE_STATUS_DISPLAY.get(self.availability, self.availability)
-        note: str = (
-            f"Added to `{self.folder_path}` {self.cog.unicode.middle_dot} "
-            f"availability **{availability_label}** {self.cog.emoji_table.kuma_happy}"
-        )
-        LOGGER.info("<%s.%s> | Added | Title: %s | Id: %s", __class__.__name__, "perform_add", added.title, added.id)
-        await interaction.edit_original_response(view=MoviePanel(cog=self.cog, user_id=self.user_id, movie=added, note=note))
-
-
-class MovieRemovePanel(RadarrPanel):
-    """The confirmation in front of a delete, with the files toggle it needs."""
-
-    def __init__(
-        self,
-        *,
-        cog: RadarrCog,
-        user_id: int,
-        movie: Series,
-        delete_files: bool = False,
-        expires_at: Optional[float] = None,
-    ) -> None:
-        super().__init__(cog=cog, user_id=user_id)
-        self.movie: Series = movie
-        self.delete_files: bool = delete_files
-        # A destructive confirmation states a deadline, so it has to hold one. `View.timeout` measures
-        # inactivity and restarts on every press, so toggling the files switch would extend it forever;
-        # this is carried across a re-render instead.
-        self.expires_at: float = expires_at if expires_at is not None else time.time() + PANEL_TIMEOUT
-
-        container = discord.ui.Container(accent_colour=discord.Colour.from_str("#B71C1C"))
-        container.add_item(discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_hmm} Remove {movie.display_title}?"))
-        container.add_item(discord.ui.Section(self.consequences(), accessory=self.accessory(movie=movie)))
-        container.add_item(discord.ui.Separator())
-        container.add_item(discord.ui.TextDisplay(f"-# This expires <t:{int(self.expires_at)}:R>"))
-        container.add_item(self.actions())
-        self.add_item(container)
-
-    @property
-    def expired(self) -> bool:
-        """Whether the confirmation has outlived its stated deadline."""
-        return time.time() >= self.expires_at
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Rejects a press that arrives after the stated deadline, as well as the wrong person."""
-        if not await super().interaction_check(interaction):
-            return False
-        if self.expired:
-            self.stop()
-            await interaction.response.edit_message(
-                view=SettledPanel(note=f"That removal expired without an answer. {self.cog.emoji_table.kuma_shrug}"),
-            )
-            return False
-        return True
-
-    def consequences(self) -> str:
-        """Returns the plain statement of what pressing Remove will do."""
-        movie: Series = self.movie
-        lines: list[str] = [f"-# {movie.path}" if movie.path else "-# No path on disk."]
-        if self.delete_files:
-            lines.append(f"**{movie.size_display}** **will be deleted.** {self.cog.emoji_table.kuma_shock}")
-        else:
-            lines.append(f"The entry is removed; **{movie.size_display}** of files stay on disk.")
-        return "\n".join(lines)
-
-    def actions(self) -> discord.ui.ActionRow:
-        """Returns the toggle, the confirm and the cancel."""
-        row = discord.ui.ActionRow()
-        row.add_item(
-            ArrButton(
-                action="toggle",
-                label="Delete files" if self.delete_files else "Keep files",
-                emoji=self.cog.emoji_table.kuma_shock if self.delete_files else self.cog.emoji_table.kuma_happy,
-                style=discord.ButtonStyle.danger if self.delete_files else discord.ButtonStyle.secondary,
-            ),
-        )
-        row.add_item(ArrButton(action="confirm", label="Remove", style=discord.ButtonStyle.danger))
-        row.add_item(ArrButton(action="cancel", label="Cancel", style=discord.ButtonStyle.success))
-        return row
-
-    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # noqa: ARG002 # signature is the base's
-        """Toggles the files switch, performs the removal, or backs out."""
-        if action == "toggle":
-            await interaction.response.edit_message(
-                view=MovieRemovePanel(
-                    cog=self.cog,
-                    user_id=self.user_id,
-                    movie=self.movie,
-                    delete_files=not self.delete_files,
-                    expires_at=self.expires_at,
-                ),
-            )
-            return
-
-        if action == "cancel":
-            self.stop()
-            await interaction.response.edit_message(
-                view=MoviePanel(cog=self.cog, user_id=self.user_id, movie=self.movie, note=f"Kept. {self.cog.emoji_table.kuma_happy}"),
-            )
-            return
-
-        if action != "confirm":
-            return
-
-        await interaction.response.defer()
-        try:
-            # `delete_series` works for movies too; `_library_resource` routes it to `/movie/{id}`.
-            await self.cog.radarr.delete_series(series_id=self.movie.id, delete_files=self.delete_files)
-        except SonarrError as error:
-            await self.cog.report(interaction=interaction, error=error, deferred=True)
-            return
-
-        self.stop()
-        fate: str = "and its files were deleted" if self.delete_files else "the files were left on disk"
-        LOGGER.info(
-            "<%s.%s> | Removed | Title: %s | Files deleted: %s",
-            __class__.__name__,
-            "dispatch",
-            self.movie.title,
-            self.delete_files,
-        )
-        await interaction.edit_original_response(
-            view=SettledPanel(note=f"Removed **{self.movie.display_title}** — {fate}. {self.cog.emoji_table.kuma_happy}"),
-        )
-
-
-class MovieStatusPanel(RadarrPanel):
-    """What the Radarr instance is doing: its queue, its health, its disks and its own version."""
-
-    def __init__(
-        self,
-        *,
-        cog: RadarrCog,
-        user_id: int,
-        status: SystemStatus,
-        queue: list[QueueRecord],
-        warnings: list[Health],
-        mounts: list[DiskSpace],
-        library: list[Series],
-    ) -> None:
-        super().__init__(cog=cog, user_id=user_id)
-        self.status: SystemStatus = status
-
-        # Red when something needs a person, amber when a download is stuck, green otherwise.
-        errors: bool = any(warning.is_error for warning in warnings)
-        stalled: bool = any(record.stalled for record in queue)
-        accent: discord.Colour = (
-            discord.Colour.from_str("#B71C1C")
-            if errors
-            else discord.Colour.from_str("#FFB300")
-            if stalled or warnings
-            else discord.Colour.from_str("#4CAF50")
-        )
-
-        container = discord.ui.Container(accent_colour=accent)
-        container.add_item(discord.ui.TextDisplay(f"## {cog.emoji_table.kuma_tea} {status.instance_name}\n-# {self.headline()}"))
-        container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
-        container.add_item(discord.ui.TextDisplay(self.queue_block(queue=queue)))
-        container.add_item(discord.ui.Separator())
-        container.add_item(discord.ui.TextDisplay(self.library_block(library=library, mounts=mounts)))
-
-        if warnings:
-            container.add_item(discord.ui.Separator())
-            container.add_item(discord.ui.TextDisplay(self.health_block(warnings=warnings)))
-
-        row = discord.ui.ActionRow()
-        row.add_item(ArrButton(action="reload", label="Refresh", emoji="🔄"))
-        row.add_item(discord.ui.Button(label="Open in Radarr", style=discord.ButtonStyle.link, url=cog.base_url))
-        container.add_item(row)
-        self.add_item(container)
-
-    def headline(self) -> str:
-        """Returns the version line, and whether the event listener is attached."""
-        dot: str = self.cog.unicode.middle_dot
-        listening: str = "live" if self.cog.radarr.listening else "polling"
-        parts: list[str] = [f"v{self.status.version}", self.status.branch]
-        if self.status.is_docker:
-            parts.append("docker")
-        parts.append(f"events {listening}")
-        if self.status.start_time is not None:
-            parts.append(f"up since {self.cog.to_discord_timestamp(time=self.status.start_time, style='R')}")
-        return f" {dot} ".join(parts)
-
-    def queue_block(self, queue: list[QueueRecord]) -> str:
-        """Returns the active downloads, which is the part of a status anyone actually wants."""
-        if not queue:
-            return f"### Queue\n-# Nothing downloading. {self.cog.emoji_table.kuma_shrug}"
-
-        dot: str = self.cog.unicode.middle_dot
-        lines: list[str] = [f"### Queue {dot} {len(queue)} items"]
-        for record in queue[:QUEUE_LIMIT]:
-            marker: str = f" {self.cog.emoji_table.kuma_sad}" if record.stalled else ""
-            eta: str = ""
-            if record.estimated_completion_time is not None and not record.stalled:
-                eta = f" {dot} {self.cog.to_discord_timestamp(time=record.estimated_completion_time, style='R')}"
-            lines.append(f"- **{record.title[:70]}**{marker}")
-            lines.append(f"  -# {progress_bar(record.progress, width=10)} {record.progress:.0f}% {dot} {record.size_display}{eta}")
-        if len(queue) > QUEUE_LIMIT:
-            lines.append(f"-# …and {len(queue) - QUEUE_LIMIT} more.")
-        return "\n".join(lines)
+class SeriesStatusPanel(StatusPanel):
+    """Sonarr status — counts episodes and continuing series."""
 
     def library_block(self, library: list[Series], mounts: list[DiskSpace]) -> str:
-        """Returns the library totals and the free space under them."""
+        """Returns episode-based library totals and disk space."""
+        dot: str = self.cog.unicode.middle_dot
+        missing: int = sum(series.missing_episode_count for series in library)
+        continuing: int = sum(1 for series in library if series.continuing)
+        lines: list[str] = [
+            "### Library",
+            f"- **Series** — {len(library)} ({continuing} continuing)",
+            f"- **Episodes** — {sum(series.episode_file_count for series in library):,} on disk {dot} {missing:,} missing",
+            f"- **Size** — {to_size(sum(series.size_on_disk for series in library))}",
+        ]
+        lines.extend(
+            f"- **{mount.path}** — {mount.free_space_display} free of {mount.total_space_display} ({mount.used_percent:.0f}% used)"
+            for mount in mounts[:3]
+        )
+        return "\n".join(lines)
+
+
+class MovieStatusPanel(StatusPanel):
+    """Radarr status — counts movies with files and monitored gaps."""
+
+    def library_block(self, library: list[Series], mounts: list[DiskSpace]) -> str:
+        """Returns movie-based library totals and disk space."""
         on_disk: int = sum(1 for movie in library if movie_has_file(movie))
         missing: int = sum(1 for movie in library if movie.monitored and not movie_has_file(movie))
         lines: list[str] = [
@@ -1901,32 +1431,22 @@ class MovieStatusPanel(RadarrPanel):
         )
         return "\n".join(lines)
 
-    def health_block(self, warnings: list[Health]) -> str:
-        """Returns Radarr's own health warnings."""
-        emoji_table = self.cog.emoji_table
-        lines: list[str] = [f"### Health {emoji_table.kuma_hmm}"]
-        for warning in warnings[:5]:
-            marker: str = emoji_table.kuma_shock if warning.is_error else emoji_table.kuma_hmm
-            lines.append(f"- {marker} **{warning.source}** — {warning.message[:150]}")
-        return "\n".join(lines)
 
-    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # noqa: ARG002 # signature is the base's
-        """Rebuilds the panel from a fresh read."""
-        if action != "reload":
-            return
-        await interaction.response.defer()
-        try:
-            panel: MovieStatusPanel = await self.cog.build_status(user_id=self.user_id)
-        except SonarrError as error:
-            await self.cog.report(interaction=interaction, error=error, deferred=True)
-            return
-        await interaction.edit_original_response(view=panel)
+# -- Search panel ------------------------------------------------------------
 
 
-class MovieSearchPanel(RadarrPanel):
-    """Paginated TMDB lookup results; pick one to open its detail view."""
+class SearchPanel(ArrPanel):
+    """Paginated lookup results; pick one to open its detail view."""
 
-    def __init__(self, *, cog: RadarrCog, user_id: int, term: str, results: list[Series], page: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        cog: Union[SonarrCog, RadarrCog],
+        user_id: int,
+        term: str,
+        results: list[Series],
+        page: int = 0,
+    ) -> None:
         super().__init__(cog=cog, user_id=user_id)
         self.term: str = term
         self.results: list[Series] = results
@@ -1946,8 +1466,8 @@ class MovieSearchPanel(RadarrPanel):
 
         if not self.window:
             container.add_item(discord.ui.TextDisplay(f"-# No results. {cog.emoji_table.kuma_shrug}"))
-        for movie in self.window:
-            container.add_item(discord.ui.Section(self.row(movie=movie), accessory=self.accessory(movie=movie)))
+        for media in self.window:
+            container.add_item(discord.ui.Section(self.row(media), accessory=self.accessory(media)))
 
         if self.window:
             picker = discord.ui.ActionRow()
@@ -1957,11 +1477,11 @@ class MovieSearchPanel(RadarrPanel):
                     placeholder="Open a result…",
                     options=[
                         discord.SelectOption(
-                            label=movie.display_title[:100],
+                            label=media.display_title[:100],
                             value=str(index + start),
-                            description=self.option_detail(movie=movie)[:100],
+                            description=self.option_detail(media)[:100],
                         )
-                        for index, movie in enumerate(self.window)
+                        for index, media in enumerate(self.window)
                     ],
                 ),
             )
@@ -1975,26 +1495,33 @@ class MovieSearchPanel(RadarrPanel):
         dot: str = self.cog.unicode.middle_dot
         return f"{dot} page {self.page + 1} of {self.pages}" if self.pages > 1 else ""
 
-    def row(self, movie: Series) -> str:
+    def row(self, media: Series) -> str:
         """Returns the two lines shown beside a result's poster."""
         dot: str = self.cog.unicode.middle_dot
-        parts: list[str] = [movie_status_label(movie) or "Unknown"]
-        studio: Optional[str] = movie_studio(movie)
-        if studio:
-            parts.append(studio)
-        if movie.year:
-            parts.append(str(movie.year))
-        if movie.in_library:
+        parts: list[str] = [self.status_label(media)]
+        if self.is_sonarr:
+            if media.network:
+                parts.append(media.network)
+            parts.append(f"{media.season_count} seasons")
+        else:
+            studio: Optional[str] = movie_studio(media)
+            if studio:
+                parts.append(studio)
+            if media.year:
+                parts.append(str(media.year))
+        if media.in_library:
             parts.append("in library")
         detail: str = f" {dot} ".join(parts)
-        return f"**{movie.display_title}**\n-# {detail}"
+        return f"**{media.display_title}**\n-# {detail}"
 
-    def option_detail(self, movie: Series) -> str:
+    def option_detail(self, media: Series) -> str:
         """Returns the description line for a select option."""
-        if movie.in_library:
+        if media.in_library:
             return "Already in library"
-        tmdb_id: int = movie._raw.get("tmdbId", 0)  # noqa: SLF001
-        return f"TMDB {tmdb_id}" if tmdb_id else movie_status_label(movie)
+        if self.is_sonarr:
+            return f"TVDB {media.tvdb_id}" if media.tvdb_id else self.status_label(media)
+        tmdb_id: int = media._raw.get("tmdbId", 0)  # noqa: SLF001
+        return f"TMDB {tmdb_id}" if tmdb_id else self.status_label(media)
 
     def navigation(self) -> discord.ui.ActionRow:
         """Returns the paging row."""
@@ -2005,7 +1532,7 @@ class MovieSearchPanel(RadarrPanel):
         row.add_item(ArrButton(action="cancel", label="Close"))
         return row
 
-    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # signature is the base's
+    async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:
         """Pages the listing or opens one result."""
         if action == "cancel":
             self.stop()
@@ -2013,13 +1540,13 @@ class MovieSearchPanel(RadarrPanel):
             return
 
         if action == "open" and value is not None:
-            movie: Series = self.results[int(value)]
+            media: Series = self.results[int(value)]
             # If already in the library, fetch the full record for accurate stats.
-            if movie.in_library:
-                fresh: Optional[Series] = await self.cog.radarr.get_series(series_id=movie.id)
+            if media.in_library:
+                fresh: Optional[Series] = await self.api.get_series(series_id=media.id)
                 if fresh is not None:
-                    movie = fresh
-            await interaction.response.edit_message(view=MoviePanel(cog=self.cog, user_id=self.user_id, movie=movie))
+                    media = fresh
+            await interaction.response.edit_message(view=self._build_detail(media))
             return
 
         page: int = self.page
@@ -2031,7 +1558,7 @@ class MovieSearchPanel(RadarrPanel):
             return
 
         await interaction.response.edit_message(
-            view=MovieSearchPanel(cog=self.cog, user_id=self.user_id, term=self.term, results=self.results, page=page)
+            view=SearchPanel(cog=self.cog, user_id=self.user_id, term=self.term, results=self.results, page=page),
         )
 
 
@@ -2155,9 +1682,9 @@ class SonarrCog(Cog, name="Sonarr"):
         )
         return False
 
-    async def build_status(self, user_id: int) -> StatusPanel:
+    async def build_status(self, user_id: int) -> SeriesStatusPanel:
         """Read everything the status panel shows and build it."""
-        return StatusPanel(
+        return SeriesStatusPanel(
             cog=self,
             user_id=user_id,
             status=await self.sonarr.system_status(),
@@ -2218,7 +1745,7 @@ class SonarrCog(Cog, name="Sonarr"):
         except SonarrError as error:
             await self.report(interaction=interaction, error=error, deferred=True)
             return
-        await interaction.followup.send(view=LibraryPanel(cog=self, user_id=interaction.user.id, entries=entries), ephemeral=True)
+        await interaction.followup.send(view=ListingPanel(cog=self, user_id=interaction.user.id, entries=entries), ephemeral=True)
 
     @sonarr_group.command(name="info", description="Everything Sonarr knows about one series.")
     @app_commands.check(_owner_only)
@@ -2235,11 +1762,13 @@ class SonarrCog(Cog, name="Sonarr"):
             return
         if found is None:
             return
-        await interaction.response.send_message(view=SeriesPanel(cog=self, user_id=interaction.user.id, series=found), ephemeral=True)
+        await interaction.response.send_message(view=SeriesDetailPanel(cog=self, user_id=interaction.user.id, media=found), ephemeral=True)
 
     @sonarr_group.command(name="search", description="Search TVDB and browse results.")
     @app_commands.check(_owner_only)
-    @app_commands.describe(term="A title, or an id term such as tvdb:121361.", ephemeral="Hide the response so only you can see it (default True).")
+    @app_commands.describe(
+        term="A title, or an id term such as tvdb:121361.", ephemeral="Hide the response so only you can see it (default True)."
+    )
     async def sonarr_search(self, interaction: discord.Interaction, term: str, ephemeral: bool = True) -> None:
         """Looks the term up and opens the paginated search panel."""
         if not await self.guard(interaction=interaction):
@@ -2281,7 +1810,7 @@ class SonarrCog(Cog, name="Sonarr"):
         # A single result is the common case for an id term, so skip a click and open it chosen.
         chosen: Optional[Series] = results[0] if len(results) == 1 else None
         await interaction.followup.send(
-            view=AddPanel(cog=self, user_id=interaction.user.id, term=term, results=results, chosen=chosen),
+            view=SeriesAddPanel(cog=self, user_id=interaction.user.id, term=term, results=results, chosen=chosen),
             ephemeral=True,
         )
 
@@ -2300,7 +1829,7 @@ class SonarrCog(Cog, name="Sonarr"):
             return
         if found is None:
             return
-        await interaction.response.send_message(view=RemovePanel(cog=self, user_id=interaction.user.id, series=found), ephemeral=True)
+        await interaction.response.send_message(view=RemovePanel(cog=self, user_id=interaction.user.id, media=found), ephemeral=True)
 
     @sonarr_group.command(name="status", description="What Sonarr is downloading, and how it is doing.")
     @app_commands.check(_owner_only)
@@ -2513,7 +2042,7 @@ class RadarrCog(Cog, name="Radarr"):
         except SonarrError as error:
             await self.report(interaction=interaction, error=error, deferred=True)
             return
-        await interaction.followup.send(view=MovieLibraryPanel(cog=self, user_id=interaction.user.id, entries=entries), ephemeral=True)
+        await interaction.followup.send(view=ListingPanel(cog=self, user_id=interaction.user.id, entries=entries), ephemeral=True)
 
     @radarr_group.command(name="info", description="Everything Radarr knows about one movie.")
     @app_commands.check(_owner_only)
@@ -2530,11 +2059,13 @@ class RadarrCog(Cog, name="Radarr"):
             return
         if found is None:
             return
-        await interaction.response.send_message(view=MoviePanel(cog=self, user_id=interaction.user.id, movie=found), ephemeral=True)
+        await interaction.response.send_message(view=MovieDetailPanel(cog=self, user_id=interaction.user.id, media=found), ephemeral=True)
 
     @radarr_group.command(name="search", description="Search TMDB and browse results.")
     @app_commands.check(_owner_only)
-    @app_commands.describe(term="A title, or an id term such as tmdb:550.", ephemeral="Hide the response so only you can see it (default True).")
+    @app_commands.describe(
+        term="A title, or an id term such as tmdb:550.", ephemeral="Hide the response so only you can see it (default True)."
+    )
     async def radarr_search(self, interaction: discord.Interaction, term: str, ephemeral: bool = True) -> None:
         """Looks the term up and opens the paginated search panel."""
         if not await self.guard(interaction=interaction):
@@ -2551,7 +2082,7 @@ class RadarrCog(Cog, name="Radarr"):
             return
 
         await interaction.followup.send(
-            view=MovieSearchPanel(cog=self, user_id=interaction.user.id, term=term, results=results),
+            view=SearchPanel(cog=self, user_id=interaction.user.id, term=term, results=results),
             ephemeral=ephemeral,
         )
 
@@ -2595,7 +2126,7 @@ class RadarrCog(Cog, name="Radarr"):
             return
         if found is None:
             return
-        await interaction.response.send_message(view=MovieRemovePanel(cog=self, user_id=interaction.user.id, movie=found), ephemeral=True)
+        await interaction.response.send_message(view=RemovePanel(cog=self, user_id=interaction.user.id, media=found), ephemeral=True)
 
     @radarr_group.command(name="status", description="What Radarr is downloading, and how it is doing.")
     @app_commands.check(_owner_only)
