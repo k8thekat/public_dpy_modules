@@ -49,7 +49,7 @@ from PIL import Image, ImageFilter
 from PIL._util import DeferredError  # No public API to check for a deferred/broken image.
 from PIL.Image import Resampling
 
-from utils import KumaCog as Cog, KumaEmbed, KumaView
+from utils import KumaCog as Cog, KumaEmbed, KumaView  # KumaEmbed, KumaView — see commented-out embed code.
 
 # Optional compiled helper for byte-level edge comparisons; the cog degrades to hash-only
 # duplicate detection when it is not installed.
@@ -523,69 +523,70 @@ class ImageComparison:
         return self._p_match >= self._match_percent
 
 
-class RedditEmbed(KumaEmbed):
-    """Embed representing a single Reddit submission.
-
-    Attributes
-    ----------
-    img_url: :class:`Optional[str]`, optional
-        Acts as a backup URL for the `Field Image` of the embed.
-
-    """
-
-    img_url: Optional[str] = None
-    """Acts as a backup URL for the `Field Image` of the embed."""
-
-    def __init__(
-        self,
-        cog: Cog,
-        *,
-        sub: str,
-        submission: Submission,
-        img_url: Optional[str] = None,
-        first_post_url: Optional[str] = None,
-        previous_post_url: Optional[str] = None,
-        img_info: Optional[ImageInfo] = None,
-        **kwargs: Unpack[EmbedParams],
-    ) -> None:
-        """...
-
-        Parameters
-        ----------
-        cog: :class:`KumaCog`
-            The parent Cog, passed through to :class:`KumaEmbed`.
-        sub: :class:`str`
-            The subreddit name the submission belongs to, without the leading `/r/`.
-        submission: :class:`Submission`
-            The asyncpraw Submission; provides the title, jump link and creation timestamp.
-        img_url: :class:`Optional[str]`, optional
-            The original post image url if it exists.
-        first_post_url: :class:`Optional[str]`, optional
-            A jump link to the first post sent today for this subreddit, shown as an emoji link.
-        previous_post_url: :class:`Optional[str]`, optional
-            A jump link to the previous Discord message sent for this subreddit, shown as an emoji link.
-        img_info: :class:`Optional[ImageInfo]`, optional
-            The resolution information of the image, shown as a field if provided.
-        **kwargs: :class:`Unpack[EmbedParams]`
-            Any additional keyword arguments forwarded to :class:`KumaEmbed`.
-
-        """
-        kwargs.setdefault("title", submission.title[:256])
-        kwargs.setdefault("url", f"{REDDIT_BASE_URL}{submission.permalink}")
-        kwargs.setdefault("color", discord.Color.orange())
-        kwargs.setdefault("timestamp", submission.created_datetime)
-        super().__init__(cog=cog, **kwargs)
-        self.img_url = img_url
-
-        links: list[str] = [f"{cog.unicode.right_arrow} [/r/{sub}]({REDDIT_BASE_URL}/r/{sub}/new/)"]
-        if first_post_url is not None:
-            links.append(f"{cog.unicode.star} [First {sub} post of the day]({first_post_url})")
-        if previous_post_url is not None:
-            links.append(f":arrow_left: [Previous post]({previous_post_url})")
-        self.add_field(name="Links:", value="\n".join(links), inline=False)
-
-        if img_info is not None and img_info.width and img_info.height:
-            self.add_field(name="Resolution:", value=f"{img_info.width}x{img_info.height}", inline=True)
+# ?CV2: RedditEmbed replaced by RedditPost; see RedditPostData + RedditPost.
+# class RedditEmbed(KumaEmbed):
+#     """Embed representing a single Reddit submission.
+#
+#     Attributes
+#     ----------
+#     img_url: :class:`Optional[str]`, optional
+#         Acts as a backup URL for the `Field Image` of the embed.
+#
+#     """
+#
+#     img_url: Optional[str] = None
+#     """Acts as a backup URL for the `Field Image` of the embed."""
+#
+#     def __init__(
+#         self,
+#         cog: Cog,
+#         *,
+#         sub: str,
+#         submission: Submission,
+#         img_url: Optional[str] = None,
+#         first_post_url: Optional[str] = None,
+#         previous_post_url: Optional[str] = None,
+#         img_info: Optional[ImageInfo] = None,
+#         **kwargs: Unpack[EmbedParams],
+#     ) -> None:
+#         """...
+#
+#         Parameters
+#         ----------
+#         cog: :class:`KumaCog`
+#             The parent Cog, passed through to :class:`KumaEmbed`.
+#         sub: :class:`str`
+#             The subreddit name the submission belongs to, without the leading `/r/`.
+#         submission: :class:`Submission`
+#             The asyncpraw Submission; provides the title, jump link and creation timestamp.
+#         img_url: :class:`Optional[str]`, optional
+#             The original post image url if it exists.
+#         first_post_url: :class:`Optional[str]`, optional
+#             A jump link to the first post sent today for this subreddit, shown as an emoji link.
+#         previous_post_url: :class:`Optional[str]`, optional
+#             A jump link to the previous Discord message sent for this subreddit, shown as an emoji link.
+#         img_info: :class:`Optional[ImageInfo]`, optional
+#             The resolution information of the image, shown as a field if provided.
+#         **kwargs: :class:`Unpack[EmbedParams]`
+#             Any additional keyword arguments forwarded to :class:`KumaEmbed`.
+#
+#         """
+#         kwargs.setdefault("title", submission.title[:256])
+#         kwargs.setdefault("url", f"{REDDIT_BASE_URL}{submission.permalink}")
+#         kwargs.setdefault("color", discord.Color.orange())
+#         kwargs.setdefault("timestamp", submission.created_datetime)
+#         super().__init__(cog=cog, **kwargs)
+#         self.img_url = img_url
+#
+#         links: list[str] = [f"{cog.unicode.right_arrow} [/r/{sub}]({REDDIT_BASE_URL}/r/{sub}/new/)"]
+#         if first_post_url is not None:
+#             links.append(f"{cog.unicode.star} [First {sub} post of the day]({first_post_url})")
+#         if previous_post_url is not None:
+#             links.append(f":arrow_left: [Previous post]({previous_post_url})")
+#         self.add_field(name="Links:", value="\n".join(links), inline=False)
+#
+#         if img_info is not None and img_info.width and img_info.height:
+#             self.add_field(name="Resolution:", value=f"{img_info.width}x{img_info.height}", inline=True)
 
 
 def link_label(text: str) -> str:
@@ -1052,51 +1053,52 @@ class RedditImageCrawler(Cog):
                 ids.add(int(segments[-2]))
         return ids
 
-    @commands.Cog.listener("on_reaction_add")
-    async def on_reaction_compare(self, reaction: discord.Reaction, user: discord.User) -> None:
-        """Reacting :white_check_mark: on two of the crawler's own posts compares their images.
-
-        .. note::
-            Scoped to messages *this crawler* sent. It used to answer anywhere in any guild the bot
-            could see, so a ✅ on an unrelated message downloaded whatever URL it could scrape out of
-            it. Comparing arbitrary images is what `hash_comparison` and `edge_comparison` are for.
-
-        Parameters
-        ----------
-        reaction: :class:`discord.Reaction`
-            The Discord Reaction object.
-        user: :class:`discord.User`
-            The Discord User object.
-
-        """
-        if user.bot or not (isinstance(reaction.emoji, str) and reaction.emoji == COMPARE_EMOJI):
-            return
-
-        # Our posts go out through a webhook, so `webhook_id` is set and is what identifies them.
-        if reaction.message.webhook_id is None or reaction.message.webhook_id not in self.crawler_webhook_ids():
-            return
-
-        url: Optional[str] = None
-        if reaction.message.embeds and reaction.message.embeds[0].image.url is not None:
-            url = reaction.message.embeds[0].image.url
-        elif reaction.message.content:
-            url = reaction.message.content.split("\n")[-1]
-
-        if url is None:
-            return
-
-        user_urls: list[str] = self.reaction_compare_urls.setdefault(user.id, [])
-        user_urls.append(url)
-        with contextlib.suppress(discord.HTTPException):
-            await reaction.message.remove_reaction(emoji=COMPARE_EMOJI, member=user)
-
-        if len(user_urls) >= 2:
-            await self._compare_urls(url_one=user_urls[0], url_two=user_urls[1])
-            await reaction.message.channel.send(
-                content=f"{user.mention}\n**URL One**: {user_urls[0]}\n**URL Two**: {user_urls[1]}\n**Results:** {self.image_comp.results}",
-                delete_after=15,
-            )
-            del self.reaction_compare_urls[user.id]
+    # ?CV2: Reaction comparison disabled; use /hash_comparison or /edge_comparison instead.
+    #     @commands.Cog.listener("on_reaction_add")
+    #     async def on_reaction_compare(self, reaction: discord.Reaction, user: discord.User) -> None:
+    #         """Reacting :white_check_mark: on two of the crawler's own posts compares their images.
+    #
+    #         .. note::
+    #             Scoped to messages *this crawler* sent. It used to answer anywhere in any guild the bot
+    #             could see, so a ✅ on an unrelated message downloaded whatever URL it could scrape out of
+    #             it. Comparing arbitrary images is what `hash_comparison` and `edge_comparison` are for.
+    #
+    #         Parameters
+    #         ----------
+    #         reaction: :class:`discord.Reaction`
+    #             The Discord Reaction object.
+    #         user: :class:`discord.User`
+    #             The Discord User object.
+    #
+    #         """
+    #         if user.bot or not (isinstance(reaction.emoji, str) and reaction.emoji == COMPARE_EMOJI):
+    #             return
+    #
+    #         # Our posts go out through a webhook, so `webhook_id` is set and is what identifies them.
+    #         if reaction.message.webhook_id is None or reaction.message.webhook_id not in self.crawler_webhook_ids():
+    #             return
+    #
+    #         url: Optional[str] = None
+    #         if reaction.message.embeds and reaction.message.embeds[0].image.url is not None:
+    #             url = reaction.message.embeds[0].image.url
+    #         elif reaction.message.content:
+    #             url = reaction.message.content.split("\n")[-1]
+    #
+    #         if url is None:
+    #             return
+    #
+    #         user_urls: list[str] = self.reaction_compare_urls.setdefault(user.id, [])
+    #         user_urls.append(url)
+    #         with contextlib.suppress(discord.HTTPException):
+    #             await reaction.message.remove_reaction(emoji=COMPARE_EMOJI, member=user)
+    #
+    #         if len(user_urls) >= 2:
+    #             await self._compare_urls(url_one=user_urls[0], url_two=user_urls[1])
+    #             await reaction.message.channel.send(
+    #                 content=f"{user.mention}\n**URL One**: {user_urls[0]}\n**URL Two**: {user_urls[1]}\n**Results:** {self.image_comp.results}",  # noqa: E501
+    #                 delete_after=15,
+    #             )
+    #             del self.reaction_compare_urls[user.id]
 
     async def cog_load(self) -> None:
         """Creates the Sqlite tables if not present.
@@ -1832,17 +1834,17 @@ class RedditImageCrawler(Cog):
                 sub_sent += 1
 
                 first_post: Optional[tuple[date, str]] = self.daily_first_post.get(sub)
-                embed = RedditEmbed(
-                    cog=self,
+                post_data: RedditPostData = RedditPostData.from_submission(
                     sub=sub,
-                    img_url=img_url,
                     submission=submission,
+                    media=discord.File(fp=io.BytesIO(img_data), filename=media_filename(img_url)),
+                    img_info=img_info,
                     first_post_url=(None if first_post is None else first_post[1]),
                     previous_post_url=self.last_message_jump.get(sub),
-                    img_info=img_info,
-                ).set_image(img=discord.File(fp=io.BytesIO(img_data), filename="image"))
+                )
+                post: RedditPost = RedditPost(cog=self, posts=[post_data])
 
-                msg: Optional[discord.WebhookMessage] = await self.webhook_send(url=webhook_url, embed=embed)
+                msg: Optional[discord.WebhookMessage] = await self.webhook_send(url=webhook_url, view=post, img_url=img_url)
                 if msg is not None:
                     today: date = datetime.now(tz=UTC).date()
                     self.last_message_jump[sub] = msg.jump_url
@@ -2159,9 +2161,10 @@ class RedditImageCrawler(Cog):
         self,
         url: str,
         content: Optional[str] = None,
-        embed: Optional[RedditEmbed] = None,
+        view: Optional[RedditPost] = None,
+        img_url: Optional[str] = None,
     ) -> Optional[discord.WebhookMessage]:
-        """Sends the content or embed to the Discord Webhook url provided.
+        """Sends the content or view to the Discord Webhook url provided.
 
         Parameters
         ----------
@@ -2169,8 +2172,10 @@ class RedditImageCrawler(Cog):
             The Webhook URL to use.
         content: :class:`Optional[str]`, optional
             The message content to send to the url, by default `None`.
-        embed: :class:`Optional[RedditEmbed]`, optional
-            The embed to send to the url; includes its `attachments`, by default `None`.
+        view: :class:`Optional[RedditPost]`, optional
+            The Components V2 view to send to the url, by default `None`.
+        img_url: :class:`Optional[str]`, optional
+            The original image URL for 413 retry fallback, by default `None`.
 
         Returns
         -------
@@ -2180,8 +2185,8 @@ class RedditImageCrawler(Cog):
         """
         webhook: discord.Webhook = discord.Webhook.from_url(url=url, session=self.bot.session)
         try:
-            if embed is not None:
-                return await webhook.send(embed=embed, files=embed.attachments, username=self.user_name, wait=True)
+            if view is not None:
+                return await webhook.send(view=view, files=view.files, username=self.user_name, wait=True)
             if content is not None:
                 return await webhook.send(content=content, username=self.user_name, wait=True)
         except discord.NotFound:
@@ -2194,21 +2199,17 @@ class RedditImageCrawler(Cog):
             await self._del_webhook(arg=url)
             self.recent_edit = True
         except discord.HTTPException as e:
-            # 413 Payload Too Large — retry with the image URL as a link instead of a file attachment.
-            if e.status == 413 and embed is not None and embed.img_url is not None:
+            # 413 Payload Too Large — retry with the remote URL instead of the file attachment.
+            if e.status == 413 and view is not None and img_url is not None:
                 LOGGER.warning(
-                    "<%s.%s> | 413 Payload Too Large; retrying with image URL as link. | %s",
+                    "<%s.%s> | 413 Payload Too Large; retrying with remote URL. | %s",
                     __class__.__name__,
                     "webhook_send",
-                    embed.img_url,
+                    img_url,
                 )
-
-                # Strip the attachment:// reference and set the remote URL directly.
-                if not embed.img_url.startswith("attachment://"):
-                    embed.field_image = None
-                    embed.set_image(url=embed.img_url)
+                view.use_remote_media(img_url)
                 try:
-                    return await webhook.send(embed=embed, username=self.user_name, wait=True)
+                    return await webhook.send(view=view, username=self.user_name, wait=True)
                 except (discord.HTTPException, ValueError) as retry_e:
                     LOGGER.warning("<%s.%s> | Retry also failed. | %s", __class__.__name__, "webhook_send", retry_e)
             else:
@@ -2319,36 +2320,70 @@ class RedditImageCrawler(Cog):
             img_two: Image.Image = Image.open(fp=io.BytesIO(await res_two.read()))
             self.image_comp.compare(source=img_one, comparison=img_two)
 
-    async def _send_paginated_list(self, context: Context, title: str, entries: list[str], per_page: int = 15) -> discord.Message:
-        """Sends the entries as :class:`KumaEmbed` pages, using a :class:`KumaView` to navigate when there is more than one page.
+    # ?CV2: _send_paginated_list replaced by _paginate_lines + RedditPagePanel.
+    #     async def _send_paginated_list(self, context: Context, title: str, entries: list[str], per_page: int = 15) -> discord.Message:
+    #         """Sends the entries as :class:`KumaEmbed` pages, using a :class:`KumaView` to navigate when there is more than one page.
+    #
+    #         Parameters
+    #         ----------
+    #         context: :class:`Context`
+    #             The invocation context to send the message to.
+    #         title: :class:`str`
+    #             The title for each embed page.
+    #         entries: :class:`list[str]`
+    #             The pre-formatted lines to display; must not be empty.
+    #         per_page: :class:`int`, optional
+    #             The number of entries per embed page, by default 15.
+    #
+    #         Returns
+    #         -------
+    #         :class:`discord.Message`
+    #             The sent message.
+    #
+    #         """
+    #         pages: list[list[str]] = [entries[idx : idx + per_page] for idx in range(0, len(entries), per_page)]
+    #         embeds: list[KumaEmbed] = [KumaEmbed(cog=self, title=title, description="\n".join(page)) for page in pages]
+    #         for idx, embed in enumerate(embeds):
+    #             embed.set_footer(text=f"{idx + 1}/{len(embeds)} | Kuma Kuma Bear")
+    #
+    #         first: KumaEmbed = embeds[0]
+    #         if len(embeds) > 1:
+    #             view = KumaView(owner=context.author, cog=self, embeds=embeds, timeout=None)
+    #             return await context.send(embed=first, files=first.attachments, view=view)
+    #         return await context.send(embed=first, files=first.attachments)
+
+    @staticmethod
+    def _paginate_lines(entries: list[str], limit: int = PAGE_LIMIT) -> list[str]:
+        """Chunk pre-formatted lines into pages that fit within the CV2 character budget.
 
         Parameters
         ----------
-        context: :class:`Context`
-            The invocation context to send the message to.
-        title: :class:`str`
-            The title for each embed page.
         entries: :class:`list[str]`
-            The pre-formatted lines to display; must not be empty.
-        per_page: :class:`int`, optional
-            The number of entries per embed page, by default 15.
+            The pre-formatted lines to paginate.
+        limit: :class:`int`, optional
+            Maximum characters per page, by default :attr:`PAGE_LIMIT`.
 
         Returns
         -------
-        :class:`discord.Message`
-            The sent message.
+        :class:`list[str]`
+            The joined page strings; at least one page is always returned.
 
         """
-        pages: list[list[str]] = [entries[idx : idx + per_page] for idx in range(0, len(entries), per_page)]
-        embeds: list[KumaEmbed] = [KumaEmbed(cog=self, title=title, description="\n".join(page)) for page in pages]
-        for idx, embed in enumerate(embeds):
-            embed.set_footer(text=f"{idx + 1}/{len(embeds)} | Kuma Kuma Bear")
-
-        first: KumaEmbed = embeds[0]
-        if len(embeds) > 1:
-            view = KumaView(owner=context.author, cog=self, embeds=embeds, timeout=None)
-            return await context.send(embed=first, files=first.attachments, view=view)
-        return await context.send(embed=first, files=first.attachments)
+        pages: list[str] = []
+        current: list[str] = []
+        length: int = 0
+        for entry in entries:
+            cost: int = len(entry) + (1 if current else 0)
+            if length + cost > limit and current:
+                pages.append("\n".join(current))
+                current = [entry]
+                length = len(entry)
+            else:
+                current.append(entry)
+                length += cost
+        if current:
+            pages.append("\n".join(current))
+        return pages or [""]
 
     @commands.hybrid_command(help="Retrieves a subreddits X number of Submissions")
     @app_commands.describe(sub="The subreddit name.")
@@ -2377,11 +2412,9 @@ class RedditImageCrawler(Cog):
                 delete_after=self.message_timeout,
             )
 
-        embeds: list[RedditEmbed] = [RedditEmbed(cog=self, sub=sub, submission=submission).set_image(url=url) for submission, url in res]
-        view = KumaView(cog=self, owner=context.author, embeds=embeds, timeout=None)
-        first_embed = embeds[0]
-        first_embed.set_footer(text=f"1 out of {len(embeds)} | Kuma Kuma Bear")
-        return await context.send(embed=first_embed, files=first_embed.attachments, view=view)
+        posts: list[RedditPostData] = [RedditPostData.from_submission(sub=sub, submission=submission, media=url) for submission, url in res]
+        post: RedditPost = RedditPost(cog=self, posts=posts, owner_id=context.author.id, timeout=None)
+        return await context.send(view=post)
 
     @commands.hybrid_command(help="Add a subreddit to the DB", aliases=["rsadd", "rsa"])
     @app_commands.describe(
@@ -2554,23 +2587,22 @@ class RedditImageCrawler(Cog):
     async def list_subreddit(self, context: Context) -> discord.Message:
         """List all subreddits and their linked webhooks."""
         res: list[SubRedditTable] = await self._get_all_subreddits()
-        temp_list: list[str] = []
+        entries: list[str] = []
         for entry in res:
             if entry["webhook_name"]:
-                temp_list.append(f"\U00002705 - **/r/**`{entry['subreddit']}` \U00002192 `{entry['webhook_name']}`")
+                entries.append(f"\U00002705 - **/r/**`{entry['subreddit']}` \U00002192 `{entry['webhook_name']}`")
             else:
-                temp_list.append(f"\U0000274c - **/r/**`{entry['subreddit']}`")
+                entries.append(f"\U0000274c - **/r/**`{entry['subreddit']}`")
 
-        if len(temp_list) == 0:
+        if not entries:
             return await context.send(
                 content=f"No subreddits in the database yet. {self.emoji_table.kuma_tear}",
                 delete_after=self.message_timeout,
             )
-        return await self._send_paginated_list(
-            context=context,
-            title=f"__Current Subreddit List__ (total: {len(temp_list)})",
-            entries=temp_list,
-        )
+        pages: list[str] = self._paginate_lines(entries)
+        title: str = f"__Current Subreddit List__ (total: {len(entries)})"
+        panel: RedditPagePanel = RedditPagePanel(cog=self, title=title, pages=pages, owner_id=context.author.id, timeout=None)
+        return await context.send(view=panel)
 
     @commands.hybrid_command(help="Info about a subreddit", aliases=["rsinfo", "rsi"])
     @app_commands.describe(sub="The sub Reddit name.")
@@ -2682,13 +2714,16 @@ class RedditImageCrawler(Cog):
     @app_commands.default_permissions(manage_webhooks=True)
     async def list_webhook(self, context: Context) -> discord.Message:
         """List all webhooks in the database."""
-        if len(self.webhooks) == 0:
+        if not self.webhooks:
             return await context.send(
                 content=f"No webhooks in the database yet. {self.emoji_table.kuma_tear}",
                 delete_after=self.message_timeout,
             )
         entries: list[str] = [f"**{entry['name']}** ({entry['id']})\n> `{entry['url']}`" for entry in self.webhooks]
-        return await self._send_paginated_list(context=context, title=f"__Current Webhook List__ (total: {len(entries)})", entries=entries)
+        pages: list[str] = self._paginate_lines(entries)
+        title: str = f"__Current Webhook List__ (total: {len(entries)})"
+        panel: RedditPagePanel = RedditPagePanel(cog=self, title=title, pages=pages, owner_id=context.author.id, timeout=None)
+        return await context.send(view=panel)
 
     @commands.hybrid_command(help="Start/Stop the Crawler loop", aliases=["rsloop"])
     @app_commands.default_permissions(administrator=True)
@@ -2781,54 +2816,37 @@ class RedditImageCrawler(Cog):
             )
 
         if sub:
-            embeds: list[KumaEmbed] = []
-            for row in rows:
-                embed = KumaEmbed(
-                    cog=self,
-                    title=f"/r/{row['subreddit']} — Crawl Run",
-                    color=discord.Color.orange(),
-                    timestamp=datetime.fromtimestamp(row["run_at"], tz=UTC),
+            # Per-subreddit detail — one page per crawl run.
+            pages: list[str] = [
+                (
+                    f"### /r/{row['subreddit']} — <t:{int(row['run_at'])}:f>\n"
+                    f"- **Posts Seen** — {row['posts_seen']}\n"
+                    f"- **Images Found** — {row['images_found']}\n"
+                    f"- **Duplicates** — {row['duplicates_skipped']}\n"
+                    f"- **Sent** — {row['webhooks_sent']}"
                 )
-                embed.add_field(name="Posts Seen", value=str(row["posts_seen"]), inline=True)
-                embed.add_field(name="Images Found", value=str(row["images_found"]), inline=True)
-                embed.add_field(name="Duplicates", value=str(row["duplicates_skipped"]), inline=True)
-                embed.add_field(name="Sent", value=str(row["webhooks_sent"]), inline=True)
-                embeds.append(embed)
-
-            for i, embed in enumerate(embeds):
-                embed.set_footer(text=f"{i + 1}/{len(embeds)} | Kuma Kuma Bear")
-
-            first = embeds[0]
-            if len(embeds) > 1:
-                view = KumaView(owner=context.author, cog=self, embeds=embeds, timeout=None)
-                return await context.send(embed=first, files=first.attachments, view=view, delete_after=self.message_timeout)
-            return await context.send(embed=first, files=first.attachments, delete_after=self.message_timeout)
-
-        # Summary view — one embed per subreddit, paginated.
-        embeds = []
-        for row in rows:
-            embed = KumaEmbed(
-                cog=self,
-                title=f"/r/{row['subreddit']}",
-                color=discord.Color.orange(),
-                timestamp=datetime.fromtimestamp(row["last_run"], tz=UTC),
+                for row in rows
+            ]
+            panel: RedditPagePanel = RedditPagePanel(
+                cog=self, title=f"/r/{sub} — Crawl Runs", pages=pages, owner_id=context.author.id, timeout=None
             )
-            embed.add_field(name="Total Runs", value=str(row["runs"]), inline=True)
-            embed.add_field(name="Posts Seen", value=str(row["posts_seen"]), inline=True)
-            embed.add_field(name="Images Found", value=str(row["images_found"]), inline=True)
-            embed.add_field(name="Duplicates", value=str(row["duplicates_skipped"]), inline=True)
-            embed.add_field(name="Sent", value=str(row["webhooks_sent"]), inline=True)
-            embed.add_field(name="Last Run", value=f"<t:{int(row['last_run'])}:R>", inline=True)
-            embeds.append(embed)
+            return await context.send(view=panel)
 
-        for i, embed in enumerate(embeds):
-            embed.set_footer(text=f"{i + 1}/{len(embeds)} | Kuma Kuma Bear")
-
-        first = embeds[0]
-        if len(embeds) > 1:
-            view = KumaView(owner=context.author, cog=self, embeds=embeds, timeout=None)
-            return await context.send(embed=first, files=first.attachments, view=view)
-        return await context.send(embed=first, files=first.attachments)
+        # Summary view — one page per subreddit.
+        pages = [
+            (
+                f"### /r/{row['subreddit']}\n"
+                f"- **Total Runs** — {row['runs']}\n"
+                f"- **Posts Seen** — {row['posts_seen']}\n"
+                f"- **Images Found** — {row['images_found']}\n"
+                f"- **Duplicates** — {row['duplicates_skipped']}\n"
+                f"- **Sent** — {row['webhooks_sent']}\n"
+                f"- **Last Run** — <t:{int(row['last_run'])}:R>"
+            )
+            for row in rows
+        ]
+        panel = RedditPagePanel(cog=self, title="__Crawler Metrics__", pages=pages, owner_id=context.author.id, timeout=None)
+        return await context.send(view=panel)
 
     @commands.is_owner()
     @commands.hybrid_command(help="Preview the Components V2 Reddit views", aliases=["rspreview"])
