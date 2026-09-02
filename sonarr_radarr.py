@@ -19,21 +19,20 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 
 """
 
+from __future__ import annotations
+
 __author__ = "k8thekat"
 __license__ = "GNU"
-__version__ = "2.0.0"
-
-from __future__ import annotations
+__version__ = "3.0.0"
 
 import logging
 import time
 from configparser import ConfigParser
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Optional
 
 import discord
 from a_sonarr_radarr import (
-    CoverType,
     DiskSpace,
     Health,
     MonitorType,
@@ -43,8 +42,6 @@ from a_sonarr_radarr import (
     RootFolder,
     Series,
     SeriesStatus,
-    SignalRAction,
-    SignalRMessage,
     SonarrAPI,
     SonarrError,
     SonarrValidationError,
@@ -146,16 +143,8 @@ async def _owner_only(interaction: discord.Interaction) -> bool:
 # region --- Settings ---
 
 
-class SonarrSettings(NamedTuple):
-    """The `[SONARR]` section of `local.ini`."""
-
-    url: str
-    api_key: str
-    url_base: str
-
-
-class RadarrSettings(NamedTuple):
-    """The `[RADARR]` section of `local.ini`."""
+class ArrSettings(NamedTuple):
+    """One ``[SONARR]`` or ``[RADARR]`` section from ``local.ini``."""
 
     url: str
     api_key: str
@@ -171,12 +160,12 @@ def _load_section(section: str) -> Optional[tuple[str, str, str]]:
     Parameters
     ----------
     section: :class:`str`
-        The INI section name, eg `SONARR` or `RADARR`.
+        The INI section name, eg ``'SONARR'`` or ``'RADARR'``.
 
     Returns
     -------
     :class:`Optional[tuple[str, str, str]]`
-        `(url, api_key, url_base)`, or `None` when the section or the key is missing.
+        ``(url, api_key, url_base)``, or ``None`` when the section or the key is missing.
 
     """
     path: Path = Path(__file__).parent.parent.joinpath("local.ini")
@@ -193,16 +182,22 @@ def _load_section(section: str) -> Optional[tuple[str, str, str]]:
     return url, api_key, url_base
 
 
-def load_sonarr_settings() -> Optional[SonarrSettings]:
-    """Read the Sonarr credentials out of `local.ini`."""
-    raw: Optional[tuple[str, str, str]] = _load_section("SONARR")
-    return SonarrSettings(*raw) if raw is not None else None
+def load_arr_settings(section: str) -> Optional[ArrSettings]:
+    """Read credentials for one *arr service out of ``local.ini``.
 
+    Parameters
+    ----------
+    section: :class:`str`
+        The INI section name, e.g. ``'SONARR'`` or ``'RADARR'``.
 
-def load_radarr_settings() -> Optional[RadarrSettings]:
-    """Read the Radarr credentials out of `local.ini`."""
-    raw: Optional[tuple[str, str, str]] = _load_section("RADARR")
-    return RadarrSettings(*raw) if raw is not None else None
+    Returns
+    -------
+    :class:`Optional[ArrSettings]`
+        The parsed credentials, or ``None`` when the section or a key is missing.
+
+    """
+    raw: Optional[tuple[str, str, str]] = _load_section(section)
+    return ArrSettings(*raw) if raw is not None else None
 
 
 # endregion
@@ -343,6 +338,336 @@ class SettledPanel(discord.ui.LayoutView):
 # endregion
 
 
+# region --- Base cog ---
+
+
+class ArrCog(Cog):
+    """Shared plumbing for the Sonarr and Radarr cogs.
+
+    Stores the API client, connection lifecycle, error reporting, and every command body.  Subclasses
+    provide the service-specific class variables and the decorated command wrappers — discord.py binds
+    ``@group.command`` at class definition time, so the decorators must live on the concrete cog.
+
+    """
+
+    # -- subclass configuration ------------------------------------------------
+
+    service_name: ClassVar[str]
+    """``'Sonarr'`` or ``'Radarr'``, for labels and messages."""
+
+    ini_section: ClassVar[str]
+    """The INI heading that holds this service's credentials."""
+
+    external_db: ClassVar[str]
+    """The external database name — ``'TVDB'`` for Sonarr, ``'TMDB'`` for Radarr."""
+
+    client_cls: ClassVar[type[SonarrAPI]]
+    """The API class to construct; :class:`SonarrAPI` or :class:`RadarrAPI`."""
+
+    detail_cls: ClassVar[type[DetailPanel]]
+    add_cls: ClassVar[type[AddPanel]]
+    status_cls: ClassVar[type[StatusPanel]]
+
+    def __init__(self, bot: Kuma_Kuma) -> None:
+        super().__init__(bot=bot)
+        self.settings: Optional[ArrSettings] = load_arr_settings(self.ini_section)
+        self._client: Optional[SonarrAPI] = None
+        self.profiles: list[QualityProfile] = []
+        self.folders: list[RootFolder] = []
+
+    # -- properties ------------------------------------------------------------
+
+    @property
+    def api(self) -> SonarrAPI:
+        """Returns the active API client.
+
+        Raises
+        ------
+        RuntimeError
+            The cog loaded without credentials; every command guards on :attr:`configured` first.
+
+        """
+        if self._client is None:
+            msg: str = f"The {self.service_name} client is not configured."
+            raise RuntimeError(msg)
+        return self._client
+
+    @property
+    def configured(self) -> bool:
+        """Whether ``local.ini`` had a usable section for this service."""
+        return self._client is not None
+
+    @property
+    def base_url(self) -> str:
+        """Returns the instance root, for the link buttons."""
+        return self._client.base_url if self._client is not None else ""
+
+    @property
+    def default_profile_id(self) -> int:
+        """Returns the quality profile an add starts on."""
+        return self.profiles[0].id if self.profiles else 1
+
+    @property
+    def default_folder_path(self) -> str:
+        """Returns the root folder an add starts on."""
+        return self.folders[0].path if self.folders else ""
+
+    # -- lifecycle -------------------------------------------------------------
+
+    async def cog_load(self) -> None:
+        """Connect, warm the caches, and attach the event listener.
+
+        An instance that is down at start-up must not stop the cog loading — the bot outlives it, and
+        the listener reconnects on its own once it comes back.
+        """
+        if self.settings is None:
+            LOGGER.warning(
+                "<%s.%s> | No [%s] section in local.ini; commands will refuse.",
+                __class__.__name__,
+                "cog_load",
+                self.ini_section,
+            )
+            return
+
+        client: SonarrAPI = self.client_cls(
+            base_url=self.settings.url,
+            api_key=self.settings.api_key,
+            session=self.bot.session,
+            url_base=self.settings.url_base,
+        )
+        # Always store the client so commands work once the instance comes back up.
+        self._client = client
+        try:
+            status: SystemStatus = await client.connect()
+            self.profiles = await client.quality_profiles()
+            self.folders = await client.root_folders()
+            await client.library()
+            await client.listen()
+        except SonarrError as error:
+            LOGGER.warning(
+                "<%s.%s> | %s unreachable at load | Reason: %s",
+                __class__.__name__,
+                "cog_load",
+                self.service_name,
+                error.error_reason,
+            )
+            return
+
+        LOGGER.info(
+            "<%s.%s> | Ready | Version: %s | Profiles: %s",
+            __class__.__name__,
+            "cog_load",
+            status.version,
+            len(self.profiles),
+        )
+
+    async def cog_unload(self) -> None:
+        """Stop the listener; a reload otherwise leaves a websocket writing into a dead cog."""
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
+
+    # -- error handling --------------------------------------------------------
+
+    async def report(self, interaction: discord.Interaction, error: SonarrError, *, deferred: bool = False) -> None:
+        """Turn a wrapper error into one Kuma-styled ephemeral reply."""
+        emoji_table = self.emoji_table
+        name: str = self.service_name
+        if isinstance(error, SonarrValidationError):
+            note: str = f"{name} refused that — {error.summary} {emoji_table.kuma_pout}"
+        elif error.status_code == 0:
+            note = f"I couldn't reach {name}. {emoji_table.kuma_sad}\n-# {error.error_reason}"
+        else:
+            note = f"{name} answered `{error.status_code}` — {error.error_reason} {emoji_table.kuma_sad}"
+
+        LOGGER.warning(
+            "<%s.%s> | Reported | Status: %s | Reason: %s",
+            __class__.__name__,
+            "report",
+            error.status_code,
+            error.error_reason,
+        )
+        if deferred or interaction.response.is_done():
+            await interaction.followup.send(content=note, ephemeral=True)
+        else:
+            await interaction.response.send_message(content=note, ephemeral=True)
+
+    async def guard(self, interaction: discord.Interaction) -> bool:
+        """Returns whether the cog can serve a command, telling the caller when it cannot."""
+        if self.configured:
+            return True
+        await interaction.response.send_message(
+            content=(
+                f"{self.service_name} isn't set up yet. {self.emoji_table.kuma_shrug}\n"
+                f"-# Add a `[{self.ini_section}]` section to `local.ini` with `url` and `api_key`, then reload this cog."
+            ),
+            ephemeral=True,
+        )
+        return False
+
+    async def build_status(self, user_id: int) -> StatusPanel:
+        """Read everything the status panel shows and build it."""
+        return self.status_cls(
+            cog=self,
+            user_id=user_id,
+            status=await self.api.system_status(),
+            queue=await self.api.queue(),
+            warnings=await self.api.health(),
+            mounts=await self.api.disk_space(),
+            library=await self.api.library(),
+        )
+
+    # -- shared helpers --------------------------------------------------------
+
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:  # noqa: ARG002 # discord.py's callback signature
+        """Suggest library items by title.
+
+        Served entirely from the cache, which is what makes it fast enough to fire on every keystroke.
+        """
+        if not self.configured:
+            return []
+        try:
+            matches: list[Series] = await self.api.find(term=current)
+        except SonarrError:
+            return []
+        return [app_commands.Choice(name=entry.display_title[:100], value=str(entry.id)) for entry in matches[:25]]
+
+    async def resolve(self, interaction: discord.Interaction, term: str) -> Optional[Series]:
+        """Turn an autocomplete value, or a typed title, into a media item.
+
+        Nothing stops a caller submitting free text instead of picking a choice, so a title search backs
+        the id lookup up.
+        """
+        if term.isdigit():
+            found: Optional[Series] = await self.api.get_series(series_id=int(term))
+            if found is not None:
+                return found
+        matches: list[Series] = await self.api.find(term=term, limit=1)
+        if matches:
+            return matches[0]
+        await interaction.response.send_message(
+            content=f"I couldn't find **{term}** in the library. {self.emoji_table.kuma_sad}",
+            ephemeral=True,
+        )
+        return None
+
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        """Answer a failed check quietly; everything else goes to the tree's error handler."""
+        if isinstance(error, app_commands.CheckFailure):
+            note: str = f"That command isn't available right now. {self.emoji_table.kuma_shrug}"
+            if interaction.response.is_done():
+                await interaction.followup.send(content=note, ephemeral=True)
+            else:
+                await interaction.response.send_message(content=note, ephemeral=True)
+            return
+        raise error
+
+    # -- command bodies --------------------------------------------------------
+    # discord.py binds `@group.command` at class definition time, so the decorators must live on the
+    # concrete cog.  These private methods hold the logic that every command shares.
+
+    async def _cmd_list(self, interaction: discord.Interaction, filter_by: Optional[str] = None) -> None:
+        if not await self.guard(interaction=interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            entries: list[Series] = await self.api.find(term=filter_by, limit=500) if filter_by else await self.api.library()
+        except SonarrError as error:
+            await self.report(interaction=interaction, error=error, deferred=True)
+            return
+        await interaction.followup.send(view=ListingPanel(cog=self, user_id=interaction.user.id, entries=entries), ephemeral=True)
+
+    async def _cmd_info(self, interaction: discord.Interaction, term: str) -> None:
+        if not await self.guard(interaction=interaction):
+            return
+        try:
+            found: Optional[Series] = await self.resolve(interaction=interaction, term=term)
+        except SonarrError as error:
+            await self.report(interaction=interaction, error=error)
+            return
+        if found is None:
+            return
+        await interaction.response.send_message(
+            view=self.detail_cls(cog=self, user_id=interaction.user.id, media=found),
+            ephemeral=True,
+        )
+
+    async def _cmd_search(self, interaction: discord.Interaction, term: str, ephemeral: bool = True) -> None:
+        if not await self.guard(interaction=interaction):
+            return
+        await interaction.response.defer(ephemeral=ephemeral)
+        try:
+            results: list[Series] = await self.api.lookup(term=term)
+        except SonarrError as error:
+            await self.report(interaction=interaction, error=error, deferred=True)
+            return
+
+        if not results:
+            await interaction.followup.send(
+                content=f"{self.external_db} has nothing for **{term}**. {self.emoji_table.kuma_sad}",
+                ephemeral=ephemeral,
+            )
+            return
+
+        await interaction.followup.send(
+            view=SearchPanel(cog=self, user_id=interaction.user.id, term=term, results=results),
+            ephemeral=ephemeral,
+        )
+
+    async def _cmd_add(self, interaction: discord.Interaction, term: str) -> None:
+        if not await self.guard(interaction=interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            results: list[Series] = await self.api.lookup(term=term)
+        except SonarrError as error:
+            await self.report(interaction=interaction, error=error, deferred=True)
+            return
+
+        if not results:
+            await interaction.followup.send(
+                content=f"{self.external_db} has nothing for **{term}**. {self.emoji_table.kuma_sad}",
+                ephemeral=True,
+            )
+            return
+
+        # A single result is the common case for an id term; skip a click and open it chosen.
+        chosen: Optional[Series] = results[0] if len(results) == 1 else None
+        await interaction.followup.send(
+            view=self.add_cls(cog=self, user_id=interaction.user.id, term=term, results=results, chosen=chosen),
+            ephemeral=True,
+        )
+
+    async def _cmd_remove(self, interaction: discord.Interaction, term: str) -> None:
+        if not await self.guard(interaction=interaction):
+            return
+        try:
+            found: Optional[Series] = await self.resolve(interaction=interaction, term=term)
+        except SonarrError as error:
+            await self.report(interaction=interaction, error=error)
+            return
+        if found is None:
+            return
+        await interaction.response.send_message(
+            view=RemovePanel(cog=self, user_id=interaction.user.id, media=found),
+            ephemeral=True,
+        )
+
+    async def _cmd_status(self, interaction: discord.Interaction) -> None:
+        if not await self.guard(interaction=interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            panel: StatusPanel = await self.build_status(user_id=interaction.user.id)
+        except SonarrError as error:
+            await self.report(interaction=interaction, error=error, deferred=True)
+            return
+        await interaction.followup.send(view=panel, ephemeral=True)
+
+
+# endregion
+
+
 # region --- Panels ---
 
 
@@ -358,9 +683,9 @@ class ArrPanel(discord.ui.LayoutView):
 
     """
 
-    def __init__(self, *, cog: Union[SonarrCog, RadarrCog], user_id: int) -> None:
+    def __init__(self, *, cog: ArrCog, user_id: int) -> None:
         super().__init__(timeout=PANEL_TIMEOUT)
-        self.cog: Union[SonarrCog, RadarrCog] = cog
+        self.cog: ArrCog = cog
         self.user_id: int = user_id
 
     # -- properties ----------------------------------------------------------
@@ -373,19 +698,17 @@ class ArrPanel(discord.ui.LayoutView):
     @property
     def service_name(self) -> str:
         """``'Sonarr'`` or ``'Radarr'``, for labels and messages."""
-        return "Sonarr" if self.is_sonarr else "Radarr"
+        return self.cog.service_name
 
     @property
-    def api(self) -> Union[SonarrAPI, RadarrAPI]:
-        """The active API client, narrowed from whichever cog owns us."""
-        if isinstance(self.cog, SonarrCog):
-            return self.cog.sonarr
-        return self.cog.radarr
+    def api(self) -> SonarrAPI:
+        """The active API client, via the cog's shared property."""
+        return self.cog.api
 
     @property
     def external_name(self) -> str:
         """The external database name — ``'TVDB'`` for Sonarr, ``'TMDB'`` for Radarr."""
-        return "TVDB" if self.is_sonarr else "TMDB"
+        return self.cog.external_db
 
     # -- interaction ---------------------------------------------------------
 
@@ -479,24 +802,25 @@ class ArrPanel(discord.ui.LayoutView):
 
     async def search_media(self, media_id: int) -> None:
         """Ask the *arr to search for a media item."""
-        if isinstance(self.cog, SonarrCog):
-            await self.cog.sonarr.search_series(series_id=media_id)
+        api: SonarrAPI = self.cog.api
+        if isinstance(api, RadarrAPI):
+            await api.search_movie(movie_id=media_id)
         else:
-            await self.cog.radarr.search_movie(movie_id=media_id)
+            await api.search_series(series_id=media_id)
 
     async def refresh_media(self, media_id: int) -> None:
         """Ask the *arr to refresh a media item's metadata and rescan its folder."""
-        if isinstance(self.cog, SonarrCog):
-            await self.cog.sonarr.refresh_series(series_id=media_id)
+        api: SonarrAPI = self.cog.api
+        if isinstance(api, RadarrAPI):
+            await api.refresh_movie(movie_id=media_id)
         else:
-            await self.cog.radarr.refresh_movie(movie_id=media_id)
+            await api.refresh_series(series_id=media_id)
 
     # -- transition helpers --------------------------------------------------
 
     def _build_detail(self, media: Series, *, note: Optional[str] = None) -> DetailPanel:
         """Construct the right :class:`DetailPanel` subclass for this panel's service."""
-        cls = SeriesDetailPanel if self.is_sonarr else MovieDetailPanel
-        return cls(cog=self.cog, user_id=self.user_id, media=media, note=note)
+        return self.cog.detail_cls(cog=self.cog, user_id=self.user_id, media=media, note=note)
 
 
 # -- Detail panels -----------------------------------------------------------
@@ -512,7 +836,7 @@ class DetailPanel(ArrPanel):
     def __init__(
         self,
         *,
-        cog: Union[SonarrCog, RadarrCog],
+        cog: ArrCog,
         user_id: int,
         media: Series,
         note: Optional[str] = None,
@@ -575,15 +899,29 @@ class DetailPanel(ArrPanel):
             row.add_item(ArrButton(action="search", label="Search", emoji="🔍"))
             row.add_item(ArrButton(action="refresh", label="Refresh", emoji="🔄"))
             row.add_item(ArrButton(action="remove", label="Remove", emoji="🗑️", style=discord.ButtonStyle.danger))
+        else:
+            row.add_item(ArrButton(action="add", label="Add", emoji="➕", style=discord.ButtonStyle.success))
         web: Optional[str] = self.web_url(self.media)
         if web is not None:
             row.add_item(discord.ui.Button(label=f"Open in {self.service_name}", style=discord.ButtonStyle.link, url=web))
         return row
 
     async def dispatch(self, interaction: discord.Interaction, action: str, value: Optional[str] = None) -> None:  # noqa: ARG002 # signature is the base's
-        """Runs a command against the item, or hands over to the remove confirmation."""
+        """Runs a command against the item, or hands over to the remove/add flow."""
         if action == "remove":
             await interaction.response.edit_message(view=RemovePanel(cog=self.cog, user_id=self.user_id, media=self.media))
+            return
+
+        # Transition into the add flow with this item pre-chosen.
+        if action == "add":
+            add_view = self.cog.add_cls(
+                cog=self.cog,
+                user_id=self.user_id,
+                term=self.media.display_title,
+                results=[self.media],
+                chosen=self.media,
+            )
+            await interaction.response.edit_message(view=add_view)
             return
 
         note: str
@@ -675,7 +1013,7 @@ class MovieDetailPanel(DetailPanel):
 class ListingPanel(ArrPanel):
     """The library, a page at a time, each row carrying its own poster."""
 
-    def __init__(self, *, cog: Union[SonarrCog, RadarrCog], user_id: int, entries: list[Series], page: int = 0) -> None:
+    def __init__(self, *, cog: ArrCog, user_id: int, entries: list[Series], page: int = 0) -> None:
         super().__init__(cog=cog, user_id=user_id)
         self.entries: list[Series] = entries
         self.pages: int = max(1, -(-len(entries) // LIBRARY_PER_PAGE))
@@ -804,7 +1142,7 @@ class AddPanel(ArrPanel):
     def __init__(
         self,
         *,
-        cog: Union[SonarrCog, RadarrCog],
+        cog: ArrCog,
         user_id: int,
         term: str,
         results: list[Series],
@@ -1047,10 +1385,9 @@ class SeriesAddPanel(AddPanel):
         """POST the chosen series to Sonarr."""
         if self.chosen is None:
             return
-        assert isinstance(self.cog, SonarrCog)  # noqa: S101 # type-narrowing for the API call below
         await interaction.response.defer()
         try:
-            added: Series = await self.cog.sonarr.add_series(
+            added: Series = await self.cog.api.add_series(
                 self.chosen,
                 quality_profile_id=self.profile_id,
                 root_folder_path=self.folder_path,
@@ -1120,10 +1457,11 @@ class MovieAddPanel(AddPanel):
         """POST the chosen movie to Radarr."""
         if self.chosen is None:
             return
-        assert isinstance(self.cog, RadarrCog)  # noqa: S101 # type-narrowing for the API call below
+        api: SonarrAPI = self.cog.api
+        assert isinstance(api, RadarrAPI)  # noqa: S101 # type-narrowing; MovieAddPanel is Radarr-only
         await interaction.response.defer()
         try:
-            added: Series = await self.cog.radarr.add_movie(
+            added: Series = await api.add_movie(
                 self.chosen,
                 quality_profile_id=self.profile_id,
                 root_folder_path=self.folder_path,
@@ -1159,7 +1497,7 @@ class RemovePanel(ArrPanel):
     def __init__(
         self,
         *,
-        cog: Union[SonarrCog, RadarrCog],
+        cog: ArrCog,
         user_id: int,
         media: Series,
         delete_files: bool = False,
@@ -1288,7 +1626,7 @@ class StatusPanel(ArrPanel):
     def __init__(
         self,
         *,
-        cog: Union[SonarrCog, RadarrCog],
+        cog: ArrCog,
         user_id: int,
         status: SystemStatus,
         queue: list[QueueRecord],
@@ -1330,10 +1668,7 @@ class StatusPanel(ArrPanel):
     def headline(self) -> str:
         """Returns the version line, and whether the event listener is attached."""
         dot: str = self.cog.unicode.middle_dot
-        if isinstance(self.cog, SonarrCog):
-            listening: str = "live" if self.cog.sonarr.listening else "polling"
-        else:
-            listening = "live" if self.cog.radarr.listening else "polling"
+        listening: str = "live" if self.cog.api.listening else "polling"
         parts: list[str] = [f"v{self.status.version}", self.status.branch]
         if self.status.is_docker:
             parts.append("docker")
@@ -1441,7 +1776,7 @@ class SearchPanel(ArrPanel):
     def __init__(
         self,
         *,
-        cog: Union[SonarrCog, RadarrCog],
+        cog: ArrCog,
         user_id: int,
         term: str,
         results: list[Series],
@@ -1568,201 +1903,37 @@ class SearchPanel(ArrPanel):
 # region --- Sonarr cog ---
 
 
-class SonarrCog(Cog, name="Sonarr"):
+class SonarrCog(ArrCog, name="Sonarr"):
     """Drive a Sonarr instance from Discord: add, remove, inspect and watch.
 
     Reads are served from :class:`SonarrAPI`'s cache, which the SignalR hub keeps current, so a command
     is usually answered without touching the network at all.
     """
 
-    def __init__(self, bot: Kuma_Kuma) -> None:
-        super().__init__(bot=bot)
-        self.settings: Optional[SonarrSettings] = load_sonarr_settings()
-        self._sonarr: Optional[SonarrAPI] = None
-        self.profiles: list[QualityProfile] = []
-        self.folders: list[RootFolder] = []
+    service_name: ClassVar[str] = "Sonarr"
+    ini_section: ClassVar[str] = "SONARR"
+    external_db: ClassVar[str] = "TVDB"
+    client_cls: ClassVar[type[SonarrAPI]] = SonarrAPI
+    detail_cls: ClassVar[type[DetailPanel]] = SeriesDetailPanel
+    add_cls: ClassVar[type[AddPanel]] = SeriesAddPanel
+    status_cls: ClassVar[type[StatusPanel]] = SeriesStatusPanel
 
-    @property
-    def sonarr(self) -> SonarrAPI:
-        """Returns the client.
-
-        Raises
-        ------
-        RuntimeError
-            The cog loaded without credentials; every command guards on :attr:`configured` first.
-
-        """
-        if self._sonarr is None:
-            msg = "The Sonarr client is not configured."
-            raise RuntimeError(msg)
-        return self._sonarr
-
-    @property
-    def configured(self) -> bool:
-        """Whether `local.ini` had a usable `[SONARR]` section."""
-        return self._sonarr is not None
-
-    @property
-    def base_url(self) -> str:
-        """Returns the instance root, for the link buttons."""
-        return self._sonarr.base_url if self._sonarr is not None else ""
-
-    @property
-    def default_profile_id(self) -> int:
-        """Returns the quality profile an add starts on."""
-        return self.profiles[0].id if self.profiles else 1
-
-    @property
-    def default_folder_path(self) -> str:
-        """Returns the root folder an add starts on."""
-        return self.folders[0].path if self.folders else ""
-
-    async def cog_load(self) -> None:
-        """Connect, warm the caches, and attach the event listener.
-
-        A Sonarr that is down at start-up must not stop the cog loading — the bot outlives it, and the
-        listener reconnects on its own once it comes back.
-        """
-        if self.settings is None:
-            LOGGER.warning("<%s.%s> | No [SONARR] section in local.ini; commands will refuse.", __class__.__name__, "cog_load")
-            return
-
-        client = SonarrAPI(
-            base_url=self.settings.url,
-            api_key=self.settings.api_key,
-            session=self.bot.session,
-            url_base=self.settings.url_base,
-        )
-        try:
-            status: SystemStatus = await client.connect()
-            self.profiles = await client.quality_profiles()
-            self.folders = await client.root_folders()
-            await client.library()
-            await client.listen()
-        except SonarrError as error:
-            LOGGER.warning("<%s.%s> | Sonarr unreachable at load | Reason: %s", __class__.__name__, "cog_load", error.error_reason)
-            self._sonarr = client
-            return
-
-        self._sonarr = client
-        LOGGER.info("<%s.%s> | Ready | Version: %s | Profiles: %s", __class__.__name__, "cog_load", status.version, len(self.profiles))
-
-    async def cog_unload(self) -> None:
-        """Stop the listener; a reload otherwise leaves a websocket writing into a dead cog."""
-        if self._sonarr is not None:
-            await self._sonarr.close()
-            self._sonarr = None
-
-    async def report(self, interaction: discord.Interaction, error: SonarrError, *, deferred: bool = False) -> None:
-        """Turn a wrapper error into one Kuma-styled ephemeral reply."""
-        emoji_table = self.emoji_table
-        if isinstance(error, SonarrValidationError):
-            note: str = f"Sonarr refused that — {error.summary} {emoji_table.kuma_pout}"
-        elif error.status_code == 0:
-            note = f"I couldn't reach Sonarr. {emoji_table.kuma_sad}\n-# {error.error_reason}"
-        else:
-            note = f"Sonarr answered `{error.status_code}` — {error.error_reason} {emoji_table.kuma_sad}"
-
-        LOGGER.warning("<%s.%s> | Reported | Status: %s | Reason: %s", __class__.__name__, "report", error.status_code, error.error_reason)
-        if deferred or interaction.response.is_done():
-            await interaction.followup.send(content=note, ephemeral=True)
-        else:
-            await interaction.response.send_message(content=note, ephemeral=True)
-
-    async def guard(self, interaction: discord.Interaction) -> bool:
-        """Returns whether the cog can serve a command, telling the caller when it cannot."""
-        if self.configured:
-            return True
-        await interaction.response.send_message(
-            content=(
-                f"Sonarr isn't set up yet. {self.emoji_table.kuma_shrug}\n"
-                "-# Add a `[SONARR]` section to `local.ini` with `url` and `api_key`, then reload this cog."
-            ),
-            ephemeral=True,
-        )
-        return False
-
-    async def build_status(self, user_id: int) -> SeriesStatusPanel:
-        """Read everything the status panel shows and build it."""
-        return SeriesStatusPanel(
-            cog=self,
-            user_id=user_id,
-            status=await self.sonarr.system_status(),
-            queue=await self.sonarr.queue(),
-            warnings=await self.sonarr.health(),
-            mounts=await self.sonarr.disk_space(),
-            library=await self.sonarr.library(),
-        )
-
-    async def series_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:  # noqa: ARG002 # discord.py's callback signature
-        """Suggest library series by title.
-
-        Served entirely from the cache, which is what makes it fast enough to fire on every keystroke.
-        """
-        if not self.configured:
-            return []
-        try:
-            matches: list[Series] = await self.sonarr.find(term=current)
-        except SonarrError:
-            return []
-        return [app_commands.Choice(name=series.display_title[:100], value=str(series.id)) for series in matches[:25]]
-
-    async def resolve(self, interaction: discord.Interaction, series: str) -> Optional[Series]:
-        """Turn an autocomplete value, or a typed title, into a series.
-
-        Nothing stops a caller submitting free text instead of picking a choice, so a title search backs
-        the id lookup up.
-        """
-        if series.isdigit():
-            found: Optional[Series] = await self.sonarr.get_series(series_id=int(series))
-            if found is not None:
-                return found
-        matches: list[Series] = await self.sonarr.find(term=series, limit=1)
-        if matches:
-            return matches[0]
-        await interaction.response.send_message(
-            content=f"I couldn't find **{series}** in the library. {self.emoji_table.kuma_sad}",
-            ephemeral=True,
-        )
-        return None
-
-    sonarr_group = app_commands.Group(
-        name="sonarr",
-        description="Manage the Sonarr library.",
-        guild_only=False,
-    )
+    sonarr_group = app_commands.Group(name="sonarr", description="Manage the Sonarr library.", guild_only=False)
 
     @sonarr_group.command(name="list", description="Show the Sonarr library.")
     @app_commands.check(_owner_only)
     @app_commands.describe(filter_by="Only show series whose title contains this.")
     async def sonarr_list(self, interaction: discord.Interaction, filter_by: Optional[str] = None) -> None:
         """Opens the library panel."""
-        if not await self.guard(interaction=interaction):
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            entries: list[Series] = await self.sonarr.find(term=filter_by, limit=500) if filter_by else await self.sonarr.library()
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error, deferred=True)
-            return
-        await interaction.followup.send(view=ListingPanel(cog=self, user_id=interaction.user.id, entries=entries), ephemeral=True)
+        await self._cmd_list(interaction, filter_by)
 
     @sonarr_group.command(name="info", description="Everything Sonarr knows about one series.")
     @app_commands.check(_owner_only)
     @app_commands.describe(series="Start typing a title from your library.")
-    @app_commands.autocomplete(series=series_autocomplete)
+    @app_commands.autocomplete(series=ArrCog.autocomplete)
     async def sonarr_info(self, interaction: discord.Interaction, series: str) -> None:
         """Opens the detail panel for one series."""
-        if not await self.guard(interaction=interaction):
-            return
-        try:
-            found: Optional[Series] = await self.resolve(interaction=interaction, series=series)
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error)
-            return
-        if found is None:
-            return
-        await interaction.response.send_message(view=SeriesDetailPanel(cog=self, user_id=interaction.user.id, media=found), ephemeral=True)
+        await self._cmd_info(interaction, series)
 
     @sonarr_group.command(name="search", description="Search TVDB and browse results.")
     @app_commands.check(_owner_only)
@@ -1771,92 +1942,28 @@ class SonarrCog(Cog, name="Sonarr"):
     )
     async def sonarr_search(self, interaction: discord.Interaction, term: str, ephemeral: bool = True) -> None:
         """Looks the term up and opens the paginated search panel."""
-        if not await self.guard(interaction=interaction):
-            return
-        await interaction.response.defer(ephemeral=ephemeral)
-        try:
-            results: list[Series] = await self.sonarr.lookup(term=term)
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error, deferred=True)
-            return
-
-        if not results:
-            await interaction.followup.send(content=f"TVDB has nothing for **{term}**. {self.emoji_table.kuma_sad}", ephemeral=ephemeral)
-            return
-
-        await interaction.followup.send(
-            view=SearchPanel(cog=self, user_id=interaction.user.id, term=term, results=results),
-            ephemeral=ephemeral,
-        )
+        await self._cmd_search(interaction, term, ephemeral)
 
     @sonarr_group.command(name="add", description="Search TVDB and add a series to Sonarr.")
     @app_commands.check(_owner_only)
     @app_commands.describe(term="A title, or an id term such as tvdb:121361.")
     async def sonarr_add(self, interaction: discord.Interaction, term: str) -> None:
         """Looks the term up and opens the add panel."""
-        if not await self.guard(interaction=interaction):
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            results: list[Series] = await self.sonarr.lookup(term=term)
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error, deferred=True)
-            return
-
-        if not results:
-            await interaction.followup.send(content=f"TVDB has nothing for **{term}**. {self.emoji_table.kuma_sad}", ephemeral=True)
-            return
-
-        # A single result is the common case for an id term, so skip a click and open it chosen.
-        chosen: Optional[Series] = results[0] if len(results) == 1 else None
-        await interaction.followup.send(
-            view=SeriesAddPanel(cog=self, user_id=interaction.user.id, term=term, results=results, chosen=chosen),
-            ephemeral=True,
-        )
+        await self._cmd_add(interaction, term)
 
     @sonarr_group.command(name="remove", description="Remove a series from Sonarr.")
     @app_commands.check(_owner_only)
     @app_commands.describe(series="Start typing a title from your library.")
-    @app_commands.autocomplete(series=series_autocomplete)
+    @app_commands.autocomplete(series=ArrCog.autocomplete)
     async def sonarr_remove(self, interaction: discord.Interaction, series: str) -> None:
         """Opens the removal confirmation."""
-        if not await self.guard(interaction=interaction):
-            return
-        try:
-            found: Optional[Series] = await self.resolve(interaction=interaction, series=series)
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error)
-            return
-        if found is None:
-            return
-        await interaction.response.send_message(view=RemovePanel(cog=self, user_id=interaction.user.id, media=found), ephemeral=True)
+        await self._cmd_remove(interaction, series)
 
     @sonarr_group.command(name="status", description="What Sonarr is downloading, and how it is doing.")
     @app_commands.check(_owner_only)
     async def sonarr_status(self, interaction: discord.Interaction) -> None:
         """Opens the instance status panel."""
-        if not await self.guard(interaction=interaction):
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            panel: StatusPanel = await self.build_status(user_id=interaction.user.id)
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error, deferred=True)
-            return
-        await interaction.followup.send(view=panel, ephemeral=True)
-
-    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        """Answer a failed check quietly rather than letting it surface as an unknown error."""
-        if isinstance(error, app_commands.CheckFailure):
-            note: str = f"These are k8thekat's alone for now. {self.emoji_table.kuma_shrug}"
-            if interaction.response.is_done():
-                await interaction.followup.send(content=note, ephemeral=True)
-            else:
-                await interaction.response.send_message(content=note, ephemeral=True)
-            return
-        LOGGER.exception(
-            "<%s.%s> | Command failed | Command: %s", __class__.__name__, "cog_app_command_error", interaction.command, exc_info=error
-        )
+        await self._cmd_status(interaction)
 
 
 # endregion
@@ -1865,201 +1972,37 @@ class SonarrCog(Cog, name="Sonarr"):
 # region --- Radarr cog ---
 
 
-class RadarrCog(Cog, name="Radarr"):
+class RadarrCog(ArrCog, name="Radarr"):
     """Drive a Radarr instance from Discord: add, remove, inspect and watch.
 
     Reads are served from :class:`RadarrAPI`'s cache, which the SignalR hub keeps current, so a command
     is usually answered without touching the network at all.
     """
 
-    def __init__(self, bot: Kuma_Kuma) -> None:
-        super().__init__(bot=bot)
-        self.settings: Optional[RadarrSettings] = load_radarr_settings()
-        self._radarr: Optional[RadarrAPI] = None
-        self.profiles: list[QualityProfile] = []
-        self.folders: list[RootFolder] = []
+    service_name: ClassVar[str] = "Radarr"
+    ini_section: ClassVar[str] = "RADARR"
+    external_db: ClassVar[str] = "TMDB"
+    client_cls: ClassVar[type[SonarrAPI]] = RadarrAPI
+    detail_cls: ClassVar[type[DetailPanel]] = MovieDetailPanel
+    add_cls: ClassVar[type[AddPanel]] = MovieAddPanel
+    status_cls: ClassVar[type[StatusPanel]] = MovieStatusPanel
 
-    @property
-    def radarr(self) -> RadarrAPI:
-        """Returns the client.
-
-        Raises
-        ------
-        RuntimeError
-            The cog loaded without credentials; every command guards on :attr:`configured` first.
-
-        """
-        if self._radarr is None:
-            msg = "The Radarr client is not configured."
-            raise RuntimeError(msg)
-        return self._radarr
-
-    @property
-    def configured(self) -> bool:
-        """Whether `local.ini` had a usable `[RADARR]` section."""
-        return self._radarr is not None
-
-    @property
-    def base_url(self) -> str:
-        """Returns the instance root, for the link buttons."""
-        return self._radarr.base_url if self._radarr is not None else ""
-
-    @property
-    def default_profile_id(self) -> int:
-        """Returns the quality profile an add starts on."""
-        return self.profiles[0].id if self.profiles else 1
-
-    @property
-    def default_folder_path(self) -> str:
-        """Returns the root folder an add starts on."""
-        return self.folders[0].path if self.folders else ""
-
-    async def cog_load(self) -> None:
-        """Connect, warm the caches, and attach the event listener.
-
-        A Radarr that is down at start-up must not stop the cog loading — the bot outlives it, and the
-        listener reconnects on its own once it comes back.
-        """
-        if self.settings is None:
-            LOGGER.warning("<%s.%s> | No [RADARR] section in local.ini; commands will refuse.", __class__.__name__, "cog_load")
-            return
-
-        client = RadarrAPI(
-            base_url=self.settings.url,
-            api_key=self.settings.api_key,
-            session=self.bot.session,
-            url_base=self.settings.url_base,
-        )
-        try:
-            status: SystemStatus = await client.connect()
-            self.profiles = await client.quality_profiles()
-            self.folders = await client.root_folders()
-            await client.library()
-            await client.listen()
-        except SonarrError as error:
-            LOGGER.warning("<%s.%s> | Radarr unreachable at load | Reason: %s", __class__.__name__, "cog_load", error.error_reason)
-            self._radarr = client
-            return
-
-        self._radarr = client
-        LOGGER.info("<%s.%s> | Ready | Version: %s | Profiles: %s", __class__.__name__, "cog_load", status.version, len(self.profiles))
-
-    async def cog_unload(self) -> None:
-        """Stop the listener; a reload otherwise leaves a websocket writing into a dead cog."""
-        if self._radarr is not None:
-            await self._radarr.close()
-            self._radarr = None
-
-    async def report(self, interaction: discord.Interaction, error: SonarrError, *, deferred: bool = False) -> None:
-        """Turn a wrapper error into one Kuma-styled ephemeral reply."""
-        emoji_table = self.emoji_table
-        if isinstance(error, SonarrValidationError):
-            note: str = f"Radarr refused that — {error.summary} {emoji_table.kuma_pout}"
-        elif error.status_code == 0:
-            note = f"I couldn't reach Radarr. {emoji_table.kuma_sad}\n-# {error.error_reason}"
-        else:
-            note = f"Radarr answered `{error.status_code}` — {error.error_reason} {emoji_table.kuma_sad}"
-
-        LOGGER.warning("<%s.%s> | Reported | Status: %s | Reason: %s", __class__.__name__, "report", error.status_code, error.error_reason)
-        if deferred or interaction.response.is_done():
-            await interaction.followup.send(content=note, ephemeral=True)
-        else:
-            await interaction.response.send_message(content=note, ephemeral=True)
-
-    async def guard(self, interaction: discord.Interaction) -> bool:
-        """Returns whether the cog can serve a command, telling the caller when it cannot."""
-        if self.configured:
-            return True
-        await interaction.response.send_message(
-            content=(
-                f"Radarr isn't set up yet. {self.emoji_table.kuma_shrug}\n"
-                "-# Add a `[RADARR]` section to `local.ini` with `url` and `api_key`, then reload this cog."
-            ),
-            ephemeral=True,
-        )
-        return False
-
-    async def build_status(self, user_id: int) -> MovieStatusPanel:
-        """Read everything the status panel shows and build it."""
-        return MovieStatusPanel(
-            cog=self,
-            user_id=user_id,
-            status=await self.radarr.system_status(),
-            queue=await self.radarr.queue(),
-            warnings=await self.radarr.health(),
-            mounts=await self.radarr.disk_space(),
-            library=await self.radarr.library(),
-        )
-
-    async def movie_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:  # noqa: ARG002 # discord.py's callback signature
-        """Suggest library movies by title.
-
-        Served entirely from the cache, which is what makes it fast enough to fire on every keystroke.
-        """
-        if not self.configured:
-            return []
-        try:
-            matches: list[Series] = await self.radarr.find(term=current)
-        except SonarrError:
-            return []
-        return [app_commands.Choice(name=movie.display_title[:100], value=str(movie.id)) for movie in matches[:25]]
-
-    async def resolve(self, interaction: discord.Interaction, movie: str) -> Optional[Series]:
-        """Turn an autocomplete value, or a typed title, into a movie.
-
-        Nothing stops a caller submitting free text instead of picking a choice, so a title search backs
-        the id lookup up.
-        """
-        if movie.isdigit():
-            found: Optional[Series] = await self.radarr.get_series(series_id=int(movie))
-            if found is not None:
-                return found
-        matches: list[Series] = await self.radarr.find(term=movie, limit=1)
-        if matches:
-            return matches[0]
-        await interaction.response.send_message(
-            content=f"I couldn't find **{movie}** in the library. {self.emoji_table.kuma_sad}",
-            ephemeral=True,
-        )
-        return None
-
-    radarr_group = app_commands.Group(
-        name="radarr",
-        description="Manage the Radarr library.",
-        guild_only=False,
-    )
+    radarr_group = app_commands.Group(name="radarr", description="Manage the Radarr library.", guild_only=False)
 
     @radarr_group.command(name="list", description="Show the Radarr library.")
     @app_commands.check(_owner_only)
     @app_commands.describe(filter_by="Only show movies whose title contains this.")
     async def radarr_list(self, interaction: discord.Interaction, filter_by: Optional[str] = None) -> None:
         """Opens the library panel."""
-        if not await self.guard(interaction=interaction):
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            entries: list[Series] = await self.radarr.find(term=filter_by, limit=500) if filter_by else await self.radarr.library()
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error, deferred=True)
-            return
-        await interaction.followup.send(view=ListingPanel(cog=self, user_id=interaction.user.id, entries=entries), ephemeral=True)
+        await self._cmd_list(interaction, filter_by)
 
     @radarr_group.command(name="info", description="Everything Radarr knows about one movie.")
     @app_commands.check(_owner_only)
     @app_commands.describe(movie="Start typing a title from your library.")
-    @app_commands.autocomplete(movie=movie_autocomplete)
+    @app_commands.autocomplete(movie=ArrCog.autocomplete)
     async def radarr_info(self, interaction: discord.Interaction, movie: str) -> None:
         """Opens the detail panel for one movie."""
-        if not await self.guard(interaction=interaction):
-            return
-        try:
-            found: Optional[Series] = await self.resolve(interaction=interaction, movie=movie)
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error)
-            return
-        if found is None:
-            return
-        await interaction.response.send_message(view=MovieDetailPanel(cog=self, user_id=interaction.user.id, media=found), ephemeral=True)
+        await self._cmd_info(interaction, movie)
 
     @radarr_group.command(name="search", description="Search TMDB and browse results.")
     @app_commands.check(_owner_only)
@@ -2068,92 +2011,28 @@ class RadarrCog(Cog, name="Radarr"):
     )
     async def radarr_search(self, interaction: discord.Interaction, term: str, ephemeral: bool = True) -> None:
         """Looks the term up and opens the paginated search panel."""
-        if not await self.guard(interaction=interaction):
-            return
-        await interaction.response.defer(ephemeral=ephemeral)
-        try:
-            results: list[Series] = await self.radarr.lookup(term=term)
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error, deferred=True)
-            return
-
-        if not results:
-            await interaction.followup.send(content=f"TMDB has nothing for **{term}**. {self.emoji_table.kuma_sad}", ephemeral=ephemeral)
-            return
-
-        await interaction.followup.send(
-            view=SearchPanel(cog=self, user_id=interaction.user.id, term=term, results=results),
-            ephemeral=ephemeral,
-        )
+        await self._cmd_search(interaction, term, ephemeral)
 
     @radarr_group.command(name="add", description="Search TMDB and add a movie to Radarr.")
     @app_commands.check(_owner_only)
     @app_commands.describe(term="A title, or an id term such as tmdb:550.")
     async def radarr_add(self, interaction: discord.Interaction, term: str) -> None:
         """Looks the term up and opens the add panel."""
-        if not await self.guard(interaction=interaction):
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            results: list[Series] = await self.radarr.lookup(term=term)
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error, deferred=True)
-            return
-
-        if not results:
-            await interaction.followup.send(content=f"TMDB has nothing for **{term}**. {self.emoji_table.kuma_sad}", ephemeral=True)
-            return
-
-        # A single result is the common case for an id term, so skip a click and open it chosen.
-        chosen: Optional[Series] = results[0] if len(results) == 1 else None
-        await interaction.followup.send(
-            view=MovieAddPanel(cog=self, user_id=interaction.user.id, term=term, results=results, chosen=chosen),
-            ephemeral=True,
-        )
+        await self._cmd_add(interaction, term)
 
     @radarr_group.command(name="remove", description="Remove a movie from Radarr.")
     @app_commands.check(_owner_only)
     @app_commands.describe(movie="Start typing a title from your library.")
-    @app_commands.autocomplete(movie=movie_autocomplete)
+    @app_commands.autocomplete(movie=ArrCog.autocomplete)
     async def radarr_remove(self, interaction: discord.Interaction, movie: str) -> None:
         """Opens the removal confirmation."""
-        if not await self.guard(interaction=interaction):
-            return
-        try:
-            found: Optional[Series] = await self.resolve(interaction=interaction, movie=movie)
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error)
-            return
-        if found is None:
-            return
-        await interaction.response.send_message(view=RemovePanel(cog=self, user_id=interaction.user.id, media=found), ephemeral=True)
+        await self._cmd_remove(interaction, movie)
 
     @radarr_group.command(name="status", description="What Radarr is downloading, and how it is doing.")
     @app_commands.check(_owner_only)
     async def radarr_status(self, interaction: discord.Interaction) -> None:
         """Opens the instance status panel."""
-        if not await self.guard(interaction=interaction):
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            panel: MovieStatusPanel = await self.build_status(user_id=interaction.user.id)
-        except SonarrError as error:
-            await self.report(interaction=interaction, error=error, deferred=True)
-            return
-        await interaction.followup.send(view=panel, ephemeral=True)
-
-    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        """Answer a failed check quietly rather than letting it surface as an unknown error."""
-        if isinstance(error, app_commands.CheckFailure):
-            note: str = f"These are k8thekat's alone for now. {self.emoji_table.kuma_shrug}"
-            if interaction.response.is_done():
-                await interaction.followup.send(content=note, ephemeral=True)
-            else:
-                await interaction.response.send_message(content=note, ephemeral=True)
-            return
-        LOGGER.exception(
-            "<%s.%s> | Command failed | Command: %s", __class__.__name__, "cog_app_command_error", interaction.command, exc_info=error
-        )
+        await self._cmd_status(interaction)
 
 
 # endregion
