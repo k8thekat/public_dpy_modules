@@ -26,6 +26,7 @@ __license__ = "GNU"
 __version__ = "3.0.0"
 
 import logging
+import sqlite3
 import time
 from configparser import ConfigParser
 from pathlib import Path
@@ -42,6 +43,8 @@ from a_sonarr_radarr import (
     RootFolder,
     Series,
     SeriesStatus,
+    SignalRAction,
+    SignalRMessage,
     SonarrAPI,
     SonarrError,
     SonarrValidationError,
@@ -53,6 +56,8 @@ from discord import app_commands
 from utils import KumaCog as Cog
 
 if TYPE_CHECKING:
+    from sqlite3 import Row
+
     from kuma_kuma import Kuma_Kuma
 
 LOGGER = logging.getLogger()
@@ -122,6 +127,15 @@ MOVIE_STATUS_DISPLAY: dict[str, str] = {
 
 # Shared accent for a lookup result that is not yet added to either library.
 UNADDED_ACCENT: discord.Colour = discord.Colour.from_str("#5865F2")
+
+# Accent for notification panels — a calm blue that stands apart from status accents.
+NOTIFICATION_ACCENT: discord.Colour = discord.Colour.from_str("#00BCD4")
+
+NOTIFICATION_SETUP_SQL = """
+CREATE TABLE IF NOT EXISTS arr_notifications (
+    service TEXT PRIMARY KEY NOT NULL,
+    channel_id INTEGER NOT NULL)
+"""
 
 
 # TODO: Move to KumaCog.
@@ -374,6 +388,7 @@ class ArrCog(Cog):
         self._client: Optional[SonarrAPI] = None
         self.profiles: list[QualityProfile] = []
         self.folders: list[RootFolder] = []
+        self._notification_channel: Optional[int] = None
 
     # -- properties ------------------------------------------------------------
 
@@ -415,11 +430,22 @@ class ArrCog(Cog):
     # -- lifecycle -------------------------------------------------------------
 
     async def cog_load(self) -> None:
-        """Connect, warm the caches, and attach the event listener.
+        """Connect, warm the caches, attach the event listener, and restore the notification channel.
 
         An instance that is down at start-up must not stop the cog loading — the bot outlives it, and
         the listener reconnects on its own once it comes back.
         """
+        # -- notification table + cached channel -----------------------------------
+        async with self.bot.pool.acquire() as conn:
+            await conn.execute(NOTIFICATION_SETUP_SQL)
+            row: Optional[Row] = await conn.fetchone(
+                """SELECT channel_id FROM arr_notifications WHERE service = ?""",
+                self.ini_section,
+            )
+        if row is not None:
+            self._notification_channel = row["channel_id"]
+
+        # -- API client ------------------------------------------------------------
         if self.settings is None:
             LOGGER.warning(
                 "<%s.%s> | No [%s] section in local.ini; commands will refuse.",
@@ -442,7 +468,7 @@ class ArrCog(Cog):
             self.profiles = await client.quality_profiles()
             self.folders = await client.root_folders()
             await client.library()
-            await client.listen()
+            await client.listen(callback=self._on_hub_event)
         except SonarrError as error:
             LOGGER.warning(
                 "<%s.%s> | %s unreachable at load | Reason: %s",
@@ -561,6 +587,112 @@ class ArrCog(Cog):
                 await interaction.response.send_message(content=note, ephemeral=True)
             return
         raise error
+
+    # -- notifications ---------------------------------------------------------
+
+    async def _on_hub_event(self, name: SignalRMessage, action: SignalRAction, resource: dict[str, Any]) -> None:
+        """Subscriber callback for the SignalR hub; sends a notification when media is added or imported.
+
+        The library's ``_on_event`` applies the cache update *before* calling subscribers, so by the
+        time this fires the media is already in ``_series_cache`` and a lookup is a dict read.
+        """
+        LOGGER.info(
+            "<%s.%s> | Hub event | Name: %s | Action: %s | Channel: %s",
+            __class__.__name__,
+            "_on_hub_event",
+            name,
+            action,
+            self._notification_channel,
+        )
+        if self._notification_channel is None:
+            return
+
+        event: Optional[str] = None
+        media: Optional[Series] = None
+
+        # -- media added to the library --
+        if action is SignalRAction.created and name in {SignalRMessage.series, SignalRMessage.movie}:
+            media = Series(data=resource)  # type: ignore[arg-type] # hub sends a full SeriesPayload
+            noun: str = "Series" if name is SignalRMessage.series else "Movie"
+            event = f"{noun} added to {self.service_name} {self.emoji_table.kuma_happy}"
+
+        # -- file imported (episode or movie file landed on disk) --
+        elif action is SignalRAction.created and name in {SignalRMessage.episode_file, SignalRMessage.movie_file}:
+            # The resource is the file payload; look up the parent from the cache.
+            parent_key: str = "seriesId" if name is SignalRMessage.episode_file else "movieId"
+            parent_id: int = resource.get(parent_key, 0)
+            if parent_id:
+                media = self.api._series_cache.get(parent_id)  # noqa: SLF001 # _series_cache is the library's escape hatch
+            if media is None:
+                return
+            noun = "Episode" if name is SignalRMessage.episode_file else "Movie"
+            event = f"{noun} file imported {self.emoji_table.kuma_tea}"
+
+        if event is None or media is None:
+            return
+
+        try:
+            channel: Optional[Any] = self.bot.get_channel(self._notification_channel)
+            if channel is None:
+                channel = await self.bot.fetch_channel(self._notification_channel)
+            await channel.send(view=NotificationPanel(cog=self, media=media, event=event))
+        except Exception:
+            LOGGER.exception(
+                "<%s.%s> | Failed to send notification | Channel: %s | Title: %s",
+                __class__.__name__,
+                "_on_hub_event",
+                self._notification_channel,
+                media.title,
+            )
+
+    async def _cmd_notifications(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel]) -> None:
+        """Set or clear the notification channel for this service."""
+        if not await self.guard(interaction=interaction):
+            return
+
+        if channel is None:
+            # Clear the notification channel.
+            self._notification_channel = None
+            try:
+                async with self.bot.pool.acquire() as conn:
+                    await conn.execute(
+                        """DELETE FROM arr_notifications WHERE service = ?""",
+                        self.ini_section,
+                    )
+            except sqlite3.DatabaseError:
+                LOGGER.exception(
+                    "<%s.%s> | Failed to clear notification channel.",
+                    __class__.__name__,
+                    "_cmd_notifications",
+                )
+            await interaction.response.send_message(
+                content=f"Notifications disabled for {self.service_name}. {self.emoji_table.kuma_shrug}",
+                ephemeral=True,
+            )
+            return
+
+        self._notification_channel = channel.id
+        try:
+            async with self.bot.pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT OR REPLACE INTO arr_notifications(service, channel_id) VALUES(?, ?)""",
+                    self.ini_section,
+                    channel.id,
+                )
+        except sqlite3.DatabaseError:
+            LOGGER.exception(
+                "<%s.%s> | Failed to persist notification channel %s.",
+                __class__.__name__,
+                "_cmd_notifications",
+                channel.id,
+            )
+        await interaction.response.send_message(
+            content=(
+                f"{self.service_name} notifications will go to {channel.mention}. {self.emoji_table.kuma_happy}\n"
+                f"-# Adds and file imports are announced."
+            ),
+            ephemeral=True,
+        )
 
     # -- command bodies --------------------------------------------------------
     # discord.py binds `@group.command` at class definition time, so the decorators must live on the
@@ -1897,6 +2029,63 @@ class SearchPanel(ArrPanel):
         )
 
 
+# -- Notification panel ------------------------------------------------------
+
+
+class NotificationPanel(discord.ui.LayoutView):
+    """A non-interactive announcement sent to a channel when media is added or imported.
+
+    No ``timeout`` needed — this view carries no interactive components, so there is nothing for the
+    framework to collect.
+    """
+
+    def __init__(
+        self,
+        *,
+        cog: ArrCog,
+        media: Series,
+        event: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        accent: discord.Colour = (
+            accent_for_series(media) if isinstance(cog, SonarrCog) else accent_for_movie(media)
+        ) if media.in_library else NOTIFICATION_ACCENT
+
+        container = discord.ui.Container(accent_colour=accent)
+
+        # -- artwork --
+        backdrop: Optional[str] = media.fanart or media.banner
+        if backdrop is not None:
+            container.add_item(
+                discord.ui.MediaGallery(discord.MediaGalleryItem(media=backdrop, description=f"{media.title} artwork")),
+            )
+
+        # -- header --
+        container.add_item(discord.ui.TextDisplay(f"## {media.display_title}\n-# {event}"))
+
+        # -- poster + overview --
+        poster: Optional[str] = media.poster
+        if poster is not None:
+            accessory: discord.ui.Item = discord.ui.Thumbnail(media=poster, description=f"{media.title} poster")
+        else:
+            accessory = discord.ui.TextDisplay("-# Poster unavailable.")
+        container.add_item(discord.ui.Section(truncate(media.overview), accessory=accessory))
+
+        # -- link button --
+        if isinstance(cog, SonarrCog):
+            web: Optional[str] = media.web_url(cog.base_url)
+            label: str = "Sonarr"
+        else:
+            web = movie_web_url(media, cog.base_url)
+            label = "Radarr"
+        if web is not None:
+            row = discord.ui.ActionRow()
+            row.add_item(discord.ui.Button(label=f"Open in {label}", style=discord.ButtonStyle.link, url=web))
+            container.add_item(row)
+
+        self.add_item(container)
+
+
 # endregion
 
 
@@ -1964,6 +2153,13 @@ class SonarrCog(ArrCog, name="Sonarr"):
     async def sonarr_status(self, interaction: discord.Interaction) -> None:
         """Opens the instance status panel."""
         await self._cmd_status(interaction)
+
+    @sonarr_group.command(name="notifications", description="Set or clear the channel for Sonarr notifications.")
+    @app_commands.check(_owner_only)
+    @app_commands.describe(channel="The channel to post notifications in, or leave empty to disable.")
+    async def sonarr_notifications(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None) -> None:
+        """Set or clear the notification channel."""
+        await self._cmd_notifications(interaction, channel)
 
 
 # endregion
@@ -2033,6 +2229,13 @@ class RadarrCog(ArrCog, name="Radarr"):
     async def radarr_status(self, interaction: discord.Interaction) -> None:
         """Opens the instance status panel."""
         await self._cmd_status(interaction)
+
+    @radarr_group.command(name="notifications", description="Set or clear the channel for Radarr notifications.")
+    @app_commands.check(_owner_only)
+    @app_commands.describe(channel="The channel to post notifications in, or leave empty to disable.")
+    async def radarr_notifications(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None) -> None:
+        """Set or clear the notification channel."""
+        await self._cmd_notifications(interaction, channel)
 
 
 # endregion
