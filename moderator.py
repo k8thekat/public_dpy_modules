@@ -177,7 +177,7 @@ def setting_label(key: str) -> str:
 class SettingButton(discord.ui.Button):
     """A button that hands its press to the panel that built it, via `action`.
 
-    The panel is built imperatively — a row per column the database hands back — so there is no fixed
+    The panel is built imperatively - a row per column the database hands back - so there is no fixed
     layout to declare with `@discord.ui.button`, and a plain Button has a no-op callback.
     """
 
@@ -204,7 +204,7 @@ class SettingButton(discord.ui.Button):
 class ModeratorSettingsPanel(discord.ui.LayoutView):
     """A guild's Moderator settings, a `Section` per column with its on/off button beside it.
 
-    The same panel as `preferences`, on the other side of the split — `settings` is about a place, so
+    The same panel as `preferences`, on the other side of the split - `settings` is about a place, so
     the header carries the guild's icon rather than a user's avatar. Only the admin who ran the command
     may press anything, not every admin who can see it.
 
@@ -384,11 +384,11 @@ class Moderator(Cog):
         flags=re.DOTALL | re.MULTILINE,
     )
     SPAM_LIMIT: int = 3
-    # Allowed column names for UPDATE — guards against SQL injection via the setting parameter.
+    # Allowed column names for UPDATE - guards against SQL injection via the setting parameter.
     _MOD_SETTING_COLUMNS: frozenset[str] = frozenset({"use_mystbin", "spam_filter"})
     spam_messages: dict[int, MessageRecords]
 
-    # Global shorthand hash table — persisted across restarts.
+    # Global shorthand hash table - persisted across restarts.
     _banned_hash_file: Path = Path(__file__).parent.joinpath("moderator_hashes.json")
     banned_hashes: set[str]
 
@@ -506,7 +506,7 @@ class Moderator(Cog):
                     # `WHERE NOT EXISTS` rather than a bare INSERT, which is how one guild ended up
                     # with two rows. Written this way instead of `ON CONFLICT` because that needs a
                     # constraint to name, and `migrate` cannot add the index while a guild's rows
-                    # still disagree — so this has to be correct without one.
+                    # still disagree - so this has to be correct without one.
                     data: ModeratorSettings | None = await conn.fetchone(
                         """INSERT INTO moderator(serverid) SELECT ?
                            WHERE NOT EXISTS (SELECT 1 FROM moderator WHERE serverid = ?) RETURNING *""",
@@ -578,7 +578,7 @@ class Moderator(Cog):
         """Reads one of a user's preferences, answering `default` when Preferences is not loaded.
 
         Reached through `get_cog` rather than an import, so the two cogs stay independently
-        reloadable — the same route :meth:`HintsCog.preference` takes.
+        reloadable - the same route :meth:`HintsCog.preference` takes.
 
         Parameters
         ----------
@@ -678,7 +678,7 @@ class Moderator(Cog):
         if before.permissions_for(before.guild.me).manage_threads is False:
             return
 
-        # Either marker already present on either side means there is nothing left to do — and since
+        # Either marker already present on either side means there is nothing left to do - and since
         # the `archived` branch below re-opens the thread to rename it, which dispatches this listener
         # all over again, this is also what stops it recursing.
         markers: tuple[str, ...] = (LOCKED_PREFIX.lower(), CLOSED_PREFIX.lower())
@@ -1027,7 +1027,7 @@ class Moderator(Cog):
         with contextlib.suppress(discord.HTTPException):
             await context.message.delete()
 
-        # No `delete_after` — the task that would do the deleting dies with the event loop. This is
+        # No `delete_after` - the task that would do the deleting dies with the event loop. This is
         # the last thing said before the process is replaced, so it stays up.
         await context.send(content=f"Be right back... {self.emoji_table.kuma_tea}", track=True)
         await self.bot.restart()
@@ -1227,7 +1227,7 @@ class Moderator(Cog):
                     user = await self.bot.fetch_user(owner_id)
 
             name: str = user.display_name if user is not None else "*(unknown user)*"
-            marker: str = " — that's you" if owner_id == self.bot.owner_user_id else ""
+            marker: str = " · that's you" if owner_id == self.bot.owner_user_id else ""
             lines.append(f"- {name} `{owner_id}`{marker}")
 
         return await context.send(
@@ -1314,8 +1314,8 @@ class Moderator(Cog):
                 delete_after=self.message_timeout,
             )
 
-        # `discard`, not `remove`: the set and the table are allowed to disagree — a seeded owner ID
-        # has no row — so `remove` could `KeyError` on an id that was never in the set.
+        # `discard`, not `remove`: the set and the table are allowed to disagree - a seeded owner ID
+        # has no row - so `remove` could `KeyError` on an id that was never in the set.
         self.bot.owner_ids.discard(owner_id)
         LOGGER.info(
             "<%s.%s> | Removed a trusted user. | User ID: %s | Rows: %s | By: %s",
@@ -1411,7 +1411,7 @@ class Moderator(Cog):
     @app_commands.default_permissions(administrator=True)
     async def settings(self, interaction: GuildContext) -> Message:
         """See this server's Moderator settings. These are the server's, not yours."""
-        # Build the panel for `interaction.guild`, the guild the command was run in — not a fixed
+        # Build the panel for `interaction.guild`, the guild the command was run in - not a fixed
         # guild, or the title and icon would name the wrong server.
         settings: ModeratorSettings | None = await self.get_mod_settings(guild=interaction.guild)
         if settings is not None:

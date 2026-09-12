@@ -688,7 +688,7 @@ class RedditPostContainer(KumaContainer):
         self.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(self.media)))
 
     def _details(self) -> discord.ui.TextDisplay:
-        """The subtext line under the title — where it came from, how old it is, how big it is."""
+        """The subtext line under the title - where it came from, how old it is, how big it is."""
         assert self.view.cog  # noqa: S101 | We know
         parts: list[str] = [
             f"{self.view.cog.unicode.right_hook_arrow} [/r/{self.sub}]({REDDIT_BASE_URL}/r/{self.sub}/new/)",
@@ -1595,7 +1595,7 @@ class RedditImageCrawler(Cog):
             else:
                 return img_url_to_send
 
-            # asyncpraw listings are lazy — the actual HTTP request fires here during iteration
+            # asyncpraw listings are lazy - the actual HTTP request fires here during iteration
             # (via _next_batch), not when .new()/.hot()/.top() was called above, so a network
             # timeout surfaces inside this loop and it must stay in the try.
             async for submission in res:
@@ -1817,7 +1817,7 @@ class RedditImageCrawler(Cog):
                 first_post: Optional[tuple[date, str]] = self.daily_first_post.get(sub)
 
                 if len(images) == 1:
-                    # Single image — send as an attachment.
+                    # Single image - send as an attachment.
                     _, img_url, img_data, img_info = images[0]
                     post_container: RedditPostContainer = RedditPostContainer.from_submission(
                         sub=sub,
@@ -1832,7 +1832,7 @@ class RedditImageCrawler(Cog):
                     )
                     msg: Optional[discord.WebhookMessage] = await self.webhook_send(url=webhook_url, view=container_view)
                 else:
-                    # Gallery — remote URLs so page turns can rebuild the view.
+                    # Gallery - remote URLs so page turns can rebuild the view.
                     gallery_posts: list[RedditPostContainer] = [
                         RedditPostContainer.from_submission(
                             sub=sub,
@@ -2209,7 +2209,7 @@ class RedditImageCrawler(Cog):
             await self._del_webhook(arg=url)
             self.recent_edit = True
         except discord.HTTPException as e:
-            # 413 Payload Too Large — retry with the remote URL instead of the file attachment.
+            # 413 Payload Too Large - retry with the remote URL instead of the file attachment.
             # if e.status == 413 and view is not None and img_url is not None:
             #     LOGGER.warning(
             #         "<%s.%s> | 413 Payload Too Large; retrying with remote URL. | %s",
@@ -2284,7 +2284,7 @@ class RedditImageCrawler(Cog):
             return 404
 
         except asyncprawcore.exceptions.ServerError as e:
-            # Reddit-side 5xx — asyncprawcore already retried. Treat as transient; abort this run
+            # Reddit-side 5xx - asyncprawcore already retried. Treat as transient; abort this run
             # (return 503) rather than skipping only this sub, since the API is likely degraded.
             LOGGER.warning(
                 "<%s.%s> | Reddit server error checking /r/%s, aborting this cycle. | Error: %s",
@@ -2368,7 +2368,7 @@ class RedditImageCrawler(Cog):
     @app_commands.describe(count="The number of submissions to retrieve, default is 5.")
     @app_commands.describe(order_type="Either `New, Hot or Top`")
     @app_commands.describe(ephemeral="Hide the response so only you can see it (default True).")
-    @app_commands.describe(access="Who can use the buttons — Public (anyone), Preview (no one), or Only Me (default).")
+    @app_commands.describe(access="Who can use the buttons: Public (anyone), Preview (no one), or Only Me (default).")
     @app_commands.autocomplete(sub=autocomplete_subreddit)
     # @app_commands.autocomplete(order_type=autocomplete_submission_type)
     async def get_subreddit(
@@ -2413,7 +2413,7 @@ class RedditImageCrawler(Cog):
     async def add_subreddit(self, context: Context, sub: str, webhook: Optional[str] = None) -> discord.Message:
         """Add a subreddit to the database, optionally linking a webhook on creation."""
         # A pasted URL is advertised as acceptable, so it is reduced to a name before anything else
-        # touches it — the whole URL used to be handed to the API and stored in the table verbatim.
+        # touches it - the whole URL used to be handed to the API and stored in the table verbatim.
         sub = self.normalize_subreddit(sub)
         display_sub: str = f"/r/{sub}"
         status: int = await self.check_subreddit(subreddit=sub)
@@ -2438,7 +2438,7 @@ class RedditImageCrawler(Cog):
                 delete_after=self.message_timeout,
             )
 
-        # Try linking the webhook — reuse the same resolution logic as update_subreddit.
+        # Try linking the webhook - reuse the same resolution logic as update_subreddit.
         update_res: Optional[Row] = await self._update_subreddit(name=sub, webhook=webhook)
         if update_res is not None:
             return await context.send(
@@ -2572,7 +2572,7 @@ class RedditImageCrawler(Cog):
 
     @commands.hybrid_command(help="List of subreddits", aliases=["rslist", "rsl"])
     @app_commands.describe(ephemeral="Hide the response so only you can see it (default True).")
-    @app_commands.describe(access="Who can use the buttons — Public (anyone), Preview (no one), or Only Me (default).")
+    @app_commands.describe(access="Who can use the buttons: Public (anyone), Preview (no one), or Only Me (default).")
     async def list_subreddit(self, context: Context, ephemeral: bool = True, access: PanelAccess = PanelAccess.only_me) -> discord.Message:
         """List all subreddits and their linked webhooks."""
         res: list[SubRedditTable] = await self._get_all_subreddits()
@@ -2785,7 +2785,7 @@ class RedditImageCrawler(Cog):
     @commands.hybrid_command(help="View crawler metrics for subreddits", aliases=["rsstats", "rsmetrics"])
     @app_commands.describe(sub="Filter to a specific subreddit (optional).")
     @app_commands.describe(ephemeral="Hide the response so only you can see it (default True).")
-    @app_commands.describe(access="Who can use the buttons — Public (anyone), Preview (no one), or Only Me (default).")
+    @app_commands.describe(access="Who can use the buttons: Public (anyone), Preview (no one), or Only Me (default).")
     @app_commands.autocomplete(sub=autocomplete_subreddit)
     async def crawler_stats(
         self,
@@ -2819,31 +2819,31 @@ class RedditImageCrawler(Cog):
         owner: Optional[discord.Member | discord.User | discord.ClientUser] = access.owner(user=context.author, bot=self.bot)
 
         if sub:
-            # Per-subreddit detail — one page per crawl run.
+            # Per-subreddit detail - one page per crawl run.
             pages: list[str] = [
                 (
-                    f"### /r/{row['subreddit']} — <t:{int(row['run_at'])}:f>\n"
-                    f"- **Posts Seen** — {row['posts_seen']}\n"
-                    f"- **Images Found** — {row['images_found']}\n"
-                    f"- **Duplicates** — {row['duplicates_skipped']}\n"
-                    f"- **Sent** — {row['webhooks_sent']}"
+                    f"### /r/{row['subreddit']} · <t:{int(row['run_at'])}:f>\n"
+                    f"- **Posts Seen:** {row['posts_seen']}\n"
+                    f"- **Images Found:** {row['images_found']}\n"
+                    f"- **Duplicates:** {row['duplicates_skipped']}\n"
+                    f"- **Sent:** {row['webhooks_sent']}"
                 )
                 for row in rows
             ]
-            containers: list[RedditTextPanel] = [RedditTextPanel(title=f"/r/{sub} — Crawl Runs", body=entry) for entry in pages]
+            containers: list[RedditTextPanel] = [RedditTextPanel(title=f"/r/{sub} · Crawl Runs", body=entry) for entry in pages]
             view: KumaLayoutView = await KumaLayoutView(cog=self, owner=owner, timeout=None).add_containers(containers)
             return await context.send(view=view, ephemeral=ephemeral)
 
-        # Summary view — one page per subreddit.
+        # Summary view - one page per subreddit.
         pages = [
             (
                 f"### /r/{row['subreddit']}\n"
-                f"- **Total Runs** — {row['runs']}\n"
-                f"- **Posts Seen** — {row['posts_seen']}\n"
-                f"- **Images Found** — {row['images_found']}\n"
-                f"- **Duplicates** — {row['duplicates_skipped']}\n"
-                f"- **Sent** — {row['webhooks_sent']}\n"
-                f"- **Last Run** — <t:{int(row['last_run'])}:R>"
+                f"- **Total Runs:** {row['runs']}\n"
+                f"- **Posts Seen:** {row['posts_seen']}\n"
+                f"- **Images Found:** {row['images_found']}\n"
+                f"- **Duplicates:** {row['duplicates_skipped']}\n"
+                f"- **Sent:** {row['webhooks_sent']}\n"
+                f"- **Last Run:** <t:{int(row['last_run'])}:R>"
             )
             for row in rows
         ]
