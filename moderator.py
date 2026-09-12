@@ -459,8 +459,6 @@ class Moderator(Cog):
             msg = "Unable to connect to the database."
             raise ConnectionError(msg) from None
 
-
-
     async def set_mod_settings(
         self,
         guild: discord.Guild,
@@ -856,9 +854,9 @@ class Moderator(Cog):
         # If the users count breaks SPAM LIMIT, we try to ban the user.
         if record.count >= self.SPAM_LIMIT:
             cur_time: datetime.datetime = datetime.datetime.now(tz=datetime.UTC)
-            # If they triggered the SPAM LIMIT and it's been over 3 minutes since the first "dupe";
-            # ignore the count, reset the counter to 1 (as it's still a "dupe") and adjust the timestamp for a new 3 minute window.
-            if cur_time - record.timestamp > datetime.timedelta(minutes=3):
+            # If they triggered the SPAM LIMIT and it's been over 1 minute since the first "dupe";
+            # ignore the count, reset the counter to 1 (as it's still a "dupe") and adjust the timestamp for a new 1 minute window.
+            if cur_time - record.timestamp > datetime.timedelta(minutes=1):
                 LOGGER.info(
                     "<%s.%s> | Reset Users Spam Record Count and Timestamp. | User: %s",
                     __class__.__name__,
@@ -1013,37 +1011,10 @@ class Moderator(Cog):
                 delete_after=self.message_timeout,
             )
 
+    @commands.is_owner()
     @commands.command(name="restart", help=f"Restarts the entire {BOT_NAME} process.", hidden=True)
     async def restart(self, context: Context) -> None:
-        """Restarts the whole bot, not just the extensions.
-
-        Prefix only and deliberately *not* `@commands.is_owner()`. The owner list is editable at
-        runtime via the `trusted` command, and a full process restart is a bigger door than that
-        should open — so it checks my User ID directly.
-
-        Use `reload` for anything short of this; it picks up code changes without dropping the
-        gateway connection.
-        """
-        # Read defensively: `reload` re-executes this file but never `kuma_kuma.py`, so a cog can end
-        # up newer than the live bot object and reference an attribute that build does not have. That
-        # is exactly the state a restart is wanted from, so it must report it rather than raise --
-        # otherwise the only way out of a stale process is the command that just crashed.
-        owner_user_id: Optional[int] = getattr(self.bot, "owner_user_id", None)
-        if owner_user_id is None:
-            await context.send(
-                content=f"Unable to find a `owner_user_id`. {self.emoji_table.kuma_hmm}",
-                delete_after=self.message_timeout,
-            )
-            return
-
-        if context.author.id != owner_user_id:
-            await context.send(
-                content=f"Only Kuma's owner gets to press this one. {self.emoji_table.kuma_pout}",
-                ephemeral=True,
-                delete_after=self.message_timeout,
-            )
-            return
-
+        """Restarts the whole bot, not just the extensions."""
         LOGGER.info(
             "<%s.%s> | Restart requested by %s (%s).",
             __class__.__name__,
@@ -1065,19 +1036,9 @@ class Moderator(Cog):
     @commands.is_owner()
     @commands.guild_only()
     async def sync(self, context: GuildContext, local: bool = True, reset: bool = False) -> Message:
-        """Push the application command tree to Discord.
-
-        Parameters
-        ----------
-        context: :class:`GuildContext`
-            The invoking command context.
-        local: :class:`bool`, optional
-            Sync to this guild only, by default True. `False` syncs globally, which Discord can take
-            up to an hour to roll out.
-        reset: :class:`bool`, optional
-            Clear the commands from that scope before syncing, by default False.
-
-        """
+        """Push the application command tree to Discord."""
+        # `local` (default) syncs this guild only; `local=False` syncs globally, which Discord can
+        # take up to an hour to roll out. `reset` clears the commands from that scope before syncing.
         await context.typing(ephemeral=True)
         scope: Optional[discord.Guild] = context.guild if local is True else None
         where: str = f"to {context.guild.name}" if local is True else "globally"
@@ -1258,8 +1219,8 @@ class Moderator(Cog):
 
         lines: list[str] = []
         for owner_id in sorted(owner_ids):
-            # `Guild.fetch_member` was the wrong lookup: a trusted user does not have to share a
-            # guild with wherever the command was run, and one `NotFound` took the whole listing down.
+            # A trusted user need not share a guild with where the command runs, so resolve by user,
+            # not member.
             user: Optional[User] = self.bot.get_user(owner_id)
             if user is None:
                 with contextlib.suppress(discord.HTTPException):
@@ -1312,14 +1273,7 @@ class Moderator(Cog):
     @app_commands.describe(member="The trusted user to remove; pick one from the list.")
     @app_commands.autocomplete(member=autocomplete_trusted)
     async def trusted_remove(self, context: Context, member: str) -> Message:
-        """Take away someone's access to my owner only commands.
-
-        .. note::
-            Takes a :class:`str` rather than a member converter on purpose. Discord only offers
-            autocomplete on a string option, and being picked from the list of who is *actually*
-            trusted is the whole point of this being its own command. A raw ID or a mention still
-            works for the prefix form.
-        """
+        """Take away someone's access to my owner only commands."""
         cleaned: str = member.strip().removeprefix("<@").removeprefix("!").removesuffix(">")
         if not cleaned.isdigit():
             return await context.send(
@@ -1360,9 +1314,8 @@ class Moderator(Cog):
                 delete_after=self.message_timeout,
             )
 
-        # `discard`, not `remove`. The set and the table are allowed to disagree — my own ID is
-        # seeded and has no row — and the `KeyError` that used to raise here escaped into the
-        # command error handler *after* the row had already gone.
+        # `discard`, not `remove`: the set and the table are allowed to disagree — a seeded owner ID
+        # has no row — so `remove` could `KeyError` on an id that was never in the set.
         self.bot.owner_ids.discard(owner_id)
         LOGGER.info(
             "<%s.%s> | Removed a trusted user. | User ID: %s | Rows: %s | By: %s",
@@ -1388,18 +1341,10 @@ class Moderator(Cog):
     async def clear(
         self,
         context: GuildContext,
-        amount: int = 15,
         all_messages: bool = False,
+        amount: int = 15,
     ) -> Message:
-        """Delete messages in this channel.
-
-        By default only removes messages sent by the bot. Pass ``all_messages=True`` to remove
-        everyone's — requires owner or ``manage_messages``.
-
-        Three ways to say how far back, in order of precedence: reply to a message and everything
-        after it goes; pass a message ID as ``amount``, which behaves the same; or pass a count. In
-        both anchored forms the anchor itself is the marker, and survives.
-        """
+        """Delete messages in this channel; the bot's own by default, everyone's with `all_messages`."""
         messages: list[discord.Message] = []
         anchor: Union[discord.abc.Snowflake, None] = None
 
@@ -1466,9 +1411,8 @@ class Moderator(Cog):
     @app_commands.default_permissions(administrator=True)
     async def settings(self, interaction: GuildContext) -> Message:
         """See this server's Moderator settings. These are the server's, not yours."""
-        # The panel is built for `interaction.guild`, the guild the command was run in. It used to be
-        # built for `get_guild()` — the *owner's* guild — so anywhere else the title and icon named
-        # Neko Neko Cafe while the values underneath belonged to the guild you were standing in.
+        # Build the panel for `interaction.guild`, the guild the command was run in — not a fixed
+        # guild, or the title and icon would name the wrong server.
         settings: ModeratorSettings | None = await self.get_mod_settings(guild=interaction.guild)
         if settings is not None:
             return await interaction.send(
