@@ -22,34 +22,33 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
+import html
 import io
 import json
 import logging
+import re
 import struct
 import sys
 import time
 from configparser import ConfigParser
-from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NotRequired, Optional, Self, TypedDict, Union, Unpack
 
-import aiohttp
 import asyncpraw
 import asyncprawcore
 import asyncprawcore.exceptions
 import discord
 import tzlocal
-from discord import app_commands
+from discord import Color, app_commands
 from discord.ext import commands, tasks
 from fake_useragent import UserAgent
 from PIL import Image, ImageFilter
 from PIL._util import DeferredError  # No public API to check for a deferred/broken image.
 from PIL.Image import Resampling
 
-from utils import KumaCog as Cog, KumaEmbed, KumaView  # KumaEmbed, KumaView — see commented-out embed code.
+from utils import KumaCog as Cog, KumaContainer, KumaLayoutView, PanelAccess
 
 # Optional compiled helper for byte-level edge comparisons; the cog degrades to hash-only
 # duplicate detection when it is not installed.
@@ -74,15 +73,14 @@ if TYPE_CHECKING:
     from asyncpraw.reddit import Submission
 
     from kuma_kuma import Kuma_Kuma
-    from utils import KumaContext as Context
-    from utils._types import EmbedParams
+    from utils import ContainerParams, KumaContext as Context, LayoutViewParams
+    from utils.ui import V
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
 REDDIT_BASE_URL = "https://www.reddit.com"
 WEBHOOK_CACHE_TTL: int = 180  # Seconds to cache guild webhook fetches for autocomplete.
 # The reaction that queues an image for comparison, on the crawler's own posts only.
-COMPARE_EMOJI: str = "\U00002705"  # WHITE HEAVY CHECK MARK - ✅
 # An embed title caps at 256; a `##` heading has no cap, but a paragraph is not a heading.
 TITLE_LIMIT: int = 256
 # Characters of page body a `RedditPagePanel` caller may spend, leaving the heading and footer room
@@ -90,6 +88,13 @@ TITLE_LIMIT: int = 256
 PAGE_LIMIT: int = 3500
 # Extensions Discord's CDN will serve a media gallery item from; see `media_filename`.
 IMAGE_SUFFIXES: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+# Stable `custom_id` for the crawler gallery buttons; the trailing digits are the page to render.
+# The buttons carry their own destination so a page turn needs no in-memory view, which is what
+# survives a restart. See `on_gallery_page`.
+GALLERY_PAGE_PREFIX: str = "RS::PAGE::"
+GALLERY_PAGE_REGEX: re.Pattern[str] = re.compile(r"RS::PAGE::(?P<POSITION>\d+)")
+# How long a sent gallery stays pageable before `prune_galleries` drops its rows.
+GALLERY_MAX_AGE_DAYS: int = 30
 
 SUBREDDIT_SETUP_SQL = """
 CREATE TABLE IF NOT EXISTS subreddit (
@@ -118,10 +123,44 @@ CREATE TABLE IF NOT EXISTS crawler_metrics (
 )"""
 
 
+GALLERY_SETUP_SQL = """
+CREATE TABLE IF NOT EXISTS gallery_page (
+    id INTEGER PRIMARY KEY NOT NULL,
+    message_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    subreddit TEXT NOT NULL,
+    title TEXT NOT NULL,
+    permalink TEXT NOT NULL,
+    created REAL NOT NULL,
+    media_url TEXT NOT NULL,
+    width INTEGER,
+    height INTEGER,
+    first_post_url TEXT,
+    previous_post_url TEXT,
+    UNIQUE (message_id, position)
+)"""
+
+
 class Webhook(TypedDict):
     name: str
     url: str
     id: int
+
+
+class GalleryPageRow(TypedDict):
+    """One page of a sent crawler gallery; enough to rebuild its :class:`RedditPostContainer`."""
+
+    message_id: int
+    position: int
+    subreddit: str
+    title: str
+    permalink: str
+    created: float
+    media_url: str
+    width: Optional[int]
+    height: Optional[int]
+    first_post_url: Optional[str]
+    previous_post_url: Optional[str]
 
 
 class JSONTyped(TypedDict):
@@ -132,11 +171,15 @@ class JSONTyped(TypedDict):
     last_message_jump: NotRequired[dict[str, str]]
 
 
-@dataclass
 class ImageInfo:
-    width: int = field(default=0)
-    height: int = field(default=0)
-    edge_res: bool = field(default=True)
+    """Resolution and edge-comparison result for a downloaded image."""
+
+    __slots__ = ("edge_res", "height", "width")
+
+    def __init__(self, width: int = 0, height: int = 0, edge_res: bool = True) -> None:
+        self.width: int = width
+        self.height: int = height
+        self.edge_res: bool = edge_res
 
 
 class SubRedditTable(TypedDict):
@@ -148,7 +191,7 @@ class SubRedditTable(TypedDict):
 class ImageComparison:
     """Compares two PIL Images edge maps to determine if they are "similar".
 
-    Properties
+    Attributes
     ----------
     match_percent: :class:`int`
         This is the percentage base match value, results must be this or higher. Defaults to 90%.
@@ -264,7 +307,8 @@ class ImageComparison:
         """Set the image dimensions to scale down images for like comparisons and pixel edge detection.
 
         .. note::
-        A lower resolution to speed the process and by using a fixed dimension value all images will line up when doing array comparisons.
+            A lower resolution speeds the process, and a fixed dimension value keeps all images
+            lined up when doing array comparisons.
 
         Parameters
         ----------
@@ -523,72 +567,7 @@ class ImageComparison:
         return self._p_match >= self._match_percent
 
 
-# ?CV2: RedditEmbed replaced by RedditPost; see RedditPostData + RedditPost.
-# class RedditEmbed(KumaEmbed):
-#     """Embed representing a single Reddit submission.
-#
-#     Attributes
-#     ----------
-#     img_url: :class:`Optional[str]`, optional
-#         Acts as a backup URL for the `Field Image` of the embed.
-#
-#     """
-#
-#     img_url: Optional[str] = None
-#     """Acts as a backup URL for the `Field Image` of the embed."""
-#
-#     def __init__(
-#         self,
-#         cog: Cog,
-#         *,
-#         sub: str,
-#         submission: Submission,
-#         img_url: Optional[str] = None,
-#         first_post_url: Optional[str] = None,
-#         previous_post_url: Optional[str] = None,
-#         img_info: Optional[ImageInfo] = None,
-#         **kwargs: Unpack[EmbedParams],
-#     ) -> None:
-#         """...
-#
-#         Parameters
-#         ----------
-#         cog: :class:`KumaCog`
-#             The parent Cog, passed through to :class:`KumaEmbed`.
-#         sub: :class:`str`
-#             The subreddit name the submission belongs to, without the leading `/r/`.
-#         submission: :class:`Submission`
-#             The asyncpraw Submission; provides the title, jump link and creation timestamp.
-#         img_url: :class:`Optional[str]`, optional
-#             The original post image url if it exists.
-#         first_post_url: :class:`Optional[str]`, optional
-#             A jump link to the first post sent today for this subreddit, shown as an emoji link.
-#         previous_post_url: :class:`Optional[str]`, optional
-#             A jump link to the previous Discord message sent for this subreddit, shown as an emoji link.
-#         img_info: :class:`Optional[ImageInfo]`, optional
-#             The resolution information of the image, shown as a field if provided.
-#         **kwargs: :class:`Unpack[EmbedParams]`
-#             Any additional keyword arguments forwarded to :class:`KumaEmbed`.
-#
-#         """
-#         kwargs.setdefault("title", submission.title[:256])
-#         kwargs.setdefault("url", f"{REDDIT_BASE_URL}{submission.permalink}")
-#         kwargs.setdefault("color", discord.Color.orange())
-#         kwargs.setdefault("timestamp", submission.created_datetime)
-#         super().__init__(cog=cog, **kwargs)
-#         self.img_url = img_url
-#
-#         links: list[str] = [f"{cog.unicode.right_arrow} [/r/{sub}]({REDDIT_BASE_URL}/r/{sub}/new/)"]
-#         if first_post_url is not None:
-#             links.append(f"{cog.unicode.star} [First {sub} post of the day]({first_post_url})")
-#         if previous_post_url is not None:
-#             links.append(f":arrow_left: [Previous post]({previous_post_url})")
-#         self.add_field(name="Links:", value="\n".join(links), inline=False)
-#
-#         if img_info is not None and img_info.width and img_info.height:
-#             self.add_field(name="Resolution:", value=f"{img_info.width}x{img_info.height}", inline=True)
-
-
+# TODO: Improve the filtering; still making mistakes.
 def link_label(text: str) -> str:
     """Escape a masked link's label so brackets inside it do not close the link early.
 
@@ -630,26 +609,151 @@ def media_filename(img_url: str) -> str:
     return f"image{suffix}" if suffix in IMAGE_SUFFIXES else "image.png"
 
 
-@dataclass
-class RedditPostData:
-    """Everything :class:`RedditPost` renders for a single submission.
+class RedditTextPanel(KumaContainer):
+    """Pre-rendered text pages in a Components V2 container.
 
-    Attributes
-    ----------
-    media: :class:`Union[str, discord.File]`
-        Either a remote image URL or an in-line attachment. A :class:`discord.File` is uploaded with
-        the message and referenced as `attachment://<name>`; see :meth:`RedditPost.files`.
+    The Components V2 counterpart of the `KumaEmbed` + :class:`KumaView` pairing used for the
+    listings and the crawler metrics.
+
+    .. warning::
+        Discord's 4000 character budget is **not** enforced by discord.py, and `content_length()`
+        counts `TextDisplay` content only. Pages are built by the caller, so the caller owns the
+        budget; :attr:`PAGE_LIMIT` is what the cog's own callers slice to.
 
     """
 
-    sub: str
-    title: str
-    permalink: str
-    created: datetime
-    media: Union[str, discord.File]
-    img_info: Optional[ImageInfo] = field(default=None)
-    first_post_url: Optional[str] = field(default=None)
-    previous_post_url: Optional[str] = field(default=None)
+    def __init__(self, *, title: str, body: str) -> None:
+        """Build the panel.
+
+        Parameters
+        ----------
+        title: :class:`str`
+            The heading, repeated on every page.
+        body: :class:`str`
+            The body of the Container.
+
+        """
+        super().__init__(include_footer=True)
+        self.add_item(discord.ui.TextDisplay(f"## {title}"))
+        self.add_separator(True)  # noqa: FBT003
+        self.add_item(discord.ui.TextDisplay(body))
+
+
+class RedditPostContainer(KumaContainer):
+    """Everything from a Reddit Post, turned into a re-usable :class:`RedditPostContainer` object that supports pagination."""
+
+    __slots__ = ("created", "first_post_url", "img_info", "media", "permalink", "previous_post_url", "sub", "title")
+    default_color: Color = discord.Color.orange()
+    """Default to :class:`discord.Color.orange()`."""
+
+    view: KumaLayoutView
+
+    def __init__(
+        self,
+        sub: str,
+        title: str,
+        permalink: str,
+        created: datetime,
+        media: str,
+        img_info: Optional[ImageInfo] = None,
+        first_post_url: Optional[str] = None,
+        previous_post_url: Optional[str] = None,
+        *children: discord.ui.Item[V],
+        **kwargs: Unpack[ContainerParams],
+    ) -> None:
+        self.sub: str = sub
+        self.title: str = title
+        self.permalink: str = permalink
+        self.media: str = media
+        self.created: datetime = created
+        self.img_info: Optional[ImageInfo] = img_info
+        self.first_post_url: Optional[str] = first_post_url
+        self.previous_post_url: Optional[str] = previous_post_url
+
+        if kwargs.get("accent_color") is None and kwargs.get("accent_colour") is None:
+            kwargs["accent_color"] = self.default_color
+
+        super().__init__(*children, include_footer=True, **kwargs)
+
+    async def _kuma_populate(self) -> None:
+        """Build the post body once mounted; the base :meth:`~KumaContainer._kuma_prepare` adds the footer."""
+        self.add_item(discord.ui.TextDisplay(f"## [{link_label(self.title[:TITLE_LIMIT])}]({self.permalink})"))
+        self.add_separator(True)  # noqa: FBT003
+        self.add_item(self._details())
+        links: Optional[discord.ui.TextDisplay] = self._links()
+
+        if links is not None:
+            self.add_item(links)
+
+        self.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(self.media)))
+
+    def _details(self) -> discord.ui.TextDisplay:
+        """The subtext line under the title — where it came from, how old it is, how big it is."""
+        assert self.view.cog  # noqa: S101 | We know
+        parts: list[str] = [
+            f"{self.view.cog.unicode.right_hook_arrow} [/r/{self.sub}]({REDDIT_BASE_URL}/r/{self.sub}/new/)",
+            f"<t:{int(self.created.timestamp())}:R>",
+        ]
+
+        if self.img_info is not None and self.img_info.width and self.img_info.height:
+            parts.append(f"{self.img_info.width}x{self.img_info.height}")
+
+        return discord.ui.TextDisplay(f"-# {f' {self.view.cog.unicode.middle_dot} '.join(parts)}")
+
+    def _links(self) -> Optional[discord.ui.TextDisplay]:
+        """The jump links back through the day's posts; ``None`` when the crawler has sent none yet.
+
+        Returns
+        -------
+        :class:`Optional[discord.ui.TextDisplay]`
+            The links line, or ``None`` when there are no links; a :class:`discord.ui.TextDisplay`
+            cannot carry empty content.
+
+        """
+        links: list[str] = []
+        if self.first_post_url is not None:
+            links.append(f"[First of the day]({self.first_post_url})")
+        if self.previous_post_url is not None:
+            links.append(f"[Previous post]({self.previous_post_url})")
+        if not links:
+            return None
+        return discord.ui.TextDisplay(f" {self._middle_dot} ".join(links))
+
+    def _paginator_footer(self) -> Self:
+        """Label gallery pagination as *Image*."""
+        count: str = f"{self.view_pos + 1}/{self.view.c_length}"
+        return self.add_item(discord.ui.TextDisplay(content=f"-# Image {count} {self._middle_dot} Kuma Kuma Bear"))
+
+    @classmethod
+    def from_row(cls, row: GalleryPageRow) -> RedditPostContainer:
+        """Rebuild a page from its stored `gallery_page` row.
+
+        Parameters
+        ----------
+        row: :class:`GalleryPageRow`
+            The stored page, as returned by :meth:`RedditImageCrawler.get_gallery_pages`.
+
+        Returns
+        -------
+        :class:`RedditPostContainer`
+            The rebuilt page.
+
+        """
+        img_info: Optional[ImageInfo] = None
+        if row["width"] and row["height"]:
+            # Stored dimensions are display only; edge_res is a dedupe result that is not persisted.
+            img_info = ImageInfo(width=row["width"], height=row["height"], edge_res=False)
+
+        return cls(
+            sub=row["subreddit"],
+            title=row["title"],
+            permalink=row["permalink"],
+            created=datetime.fromtimestamp(row["created"], tz=UTC),
+            media=row["media_url"],
+            img_info=img_info,
+            first_post_url=row["first_post_url"],
+            previous_post_url=row["previous_post_url"],
+        )
 
     @classmethod
     def from_submission(
@@ -657,11 +761,11 @@ class RedditPostData:
         *,
         sub: str,
         submission: Submission,
-        media: Union[str, discord.File],
+        media: str,
         img_info: Optional[ImageInfo] = None,
         first_post_url: Optional[str] = None,
         previous_post_url: Optional[str] = None,
-    ) -> RedditPostData:
+    ) -> RedditPostContainer:
         """Build the render data from an asyncpraw Submission.
 
         Parameters
@@ -670,8 +774,8 @@ class RedditPostData:
             The subreddit name the submission belongs to, without the leading `/r/`.
         submission: :class:`Submission`
             The asyncpraw Submission; provides the title, permalink and creation timestamp.
-        media: :class:`Union[str, discord.File]`
-            The image to show, as a remote URL or an in-line attachment.
+        media: :class:`str`
+            The image to show, as a remote URL.
         img_info: :class:`Optional[ImageInfo]`, optional
             The resolution information of the image, by default `None`.
         first_post_url: :class:`Optional[str]`, optional
@@ -681,7 +785,7 @@ class RedditPostData:
 
         Returns
         -------
-        :class:`RedditPostData`
+        :class:`RedditPostContainer`
             The populated render data.
 
         """
@@ -697,275 +801,60 @@ class RedditPostData:
         )
 
 
-class PageButton(discord.ui.Button["RedditPagedView"]):
-    """Steps a :class:`RedditPagedView` one page in either direction."""
+class RedditGalleryView(KumaLayoutView):
+    """A crawler gallery whose page turns outlive the bot process.
 
-    def __init__(self, *, step: int, label: str, emoji: str) -> None:
-        super().__init__(style=discord.ButtonStyle.blurple, label=label, emoji=emoji)
-        self.step: int = step
+    Pages are rebuilt from the `gallery_page` table by :meth:`RedditImageCrawler.on_gallery_page`
+    rather than from the view held in memory, so a restart does not break an old post.
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        """Turn the panel; a dead view means the message outlived its handler."""
-        view: Optional[RedditPagedView] = self.view
-        if view is None:
-            return
-        await view.turn(interaction=interaction, step=self.step)
-
-
-class RedditPagedView(discord.ui.LayoutView):
-    """Shared paging behaviour for this cog's Components V2 panels.
-
-    Paging a :class:`discord.ui.LayoutView` is a *rebuild* — there is no `embed=` to swap on the
-    message the way :class:`KumaView` does it — so subclasses implement :meth:`rebuild` and the one
-    :class:`PageButton` drives the whole thing.
-
-    Attributes
-    ----------
-    owner_id: :class:`Optional[int]`
-        Who may press the buttons; `None` leaves the panel open to anyone, which is what a webhook
-        post with no buttons at all wants.
+    .. note::
+        The navigation buttons are deliberately inert :class:`discord.ui.Button` rather than
+        :class:`NavButton`; each carries the page it renders in its `custom_id` and the cog's
+        listener does the work. A live :class:`NavButton` callback would double handle the click
+        alongside that listener.
 
     """
 
-    def __init__(self, *, cog: Cog, owner_id: Optional[int], index: int, length: int, timeout: Optional[float]) -> None:
-        super().__init__(timeout=timeout)
-        self.cog: Cog = cog
-        self.owner_id: Optional[int] = owner_id
-        self.index: int = index
-        self.length: int = length
+    async def page_turn(self, interaction: discord.Interaction, step: int) -> None:  # noqa: ARG002
+        """Not used; :meth:`RedditImageCrawler.on_gallery_page` owns page turns for this view.
 
-    @property
-    def files(self) -> list[discord.File]:
-        """The attachments the current page needs uploaded alongside it."""
-        return []
-
-    def rebuild(self, index: int) -> Self:
-        """Return the same panel showing ``index`` instead."""
-        raise NotImplementedError
-
-    def nav_row(self) -> discord.ui.ActionRow[RedditPagedView]:
-        """The previous/next row.
-
-        Kept outside the container, matching :class:`KumaHelpPanel` — navigation acts *on* the panel
-        rather than being part of what it is showing, and the accent border is what says so.
-
-        Returns
-        -------
-        :class:`discord.ui.ActionRow`
-            The row, ready to add to the view.
-
-        """
-        return discord.ui.ActionRow(
-            PageButton(step=-1, label="Previous", emoji="\U00002b05"),
-            PageButton(step=1, label="Next", emoji="\U000027a1"),
-        )
-
-    def page_footer(self) -> str:
-        """The `n/total` line under the panel."""
-        return f"-# Page {self.index + 1}/{self.length} {self.cog.unicode.middle_dot} Kuma Kuma Bear"
-
-    async def turn(self, *, interaction: discord.Interaction, step: int) -> None:
-        """Redraw the panel on a neighbouring page, wrapping at both ends.
+        The inherited implementation drives :class:`NavButton` state this view does not build, so it
+        is stubbed out rather than left to raise on the attributes it expects.
 
         Parameters
         ----------
         interaction: :class:`discord.Interaction`
-            The button press to respond to.
+            The component interaction; unused.
         step: :class:`int`
-            How far to move, signed; `-1` and `1` are the only callers.
+            The offset that would have been applied; unused.
 
         """
-        panel: Self = self.rebuild((self.index + step) % self.length)
-        # Replace the old page's attachments so no orphan uploads linger.
-        await interaction.response.edit_message(view=panel, attachments=panel.files)
+        LOGGER.warning("<%s.%s> | Page turns are handled by the cog listener.", type(self).__name__, "page_turn")
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Rejects anyone but the person who asked for the panel."""
-        if self.owner_id is None or interaction.user.id == self.owner_id:
-            return True
-        await interaction.response.send_message(
-            content=f"That panel isn't yours! {self.cog.emoji_table.kuma_shrug} Ask me for your own.",
-            ephemeral=True,
-        )
-        return False
+    def navigation_row(self) -> discord.ui.ActionRow[KumaLayoutView]:
+        """Build the paging row; each button names the page it renders in its `custom_id`.
 
-
-class RedditPost(RedditPagedView):
-    """One Reddit submission as a Components V2 container.
-
-    The Components V2 counterpart of :class:`RedditEmbed`. The title carries the permalink as a
-    masked link, the age is a live `<t:…:R>` rather than a footer frozen at send time, and the image
-    is a single item :class:`discord.ui.MediaGallery`, which renders at the size `set_image` did.
-
-    .. warning::
-        A paged post must use **remote URLs**. A :class:`discord.File` is consumed by the send that
-        uploads it, so re-attaching it on a page turn raises; the crawler sends one page and never
-        turns it, which is why the attachment path is safe there.
-
-    """
-
-    def __init__(
-        self,
-        *,
-        cog: Cog,
-        posts: Sequence[RedditPostData],
-        index: int = 0,
-        owner_id: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> None:
-        """Build the post.
-
-        Parameters
-        ----------
-        cog: :class:`KumaCog`
-            The parent Cog; supplies the emoji and unicode tables.
-        posts: :class:`Sequence[RedditPostData]`
-            The submissions to show. Paging buttons appear only when there is more than one.
-        index: :class:`int`, optional
-            Which submission to render, by default 0.
-        owner_id: :class:`Optional[int]`, optional
-            Who may page it, by default `None` — the crawler's webhook post has no buttons to gate.
-        timeout: :class:`Optional[float]`, optional
-            Seconds of inactivity before the buttons stop responding, by default `None` (never),
-            matching the paginators this replaces.
+        Returns
+        -------
+        :class:`discord.ui.ActionRow`
+            The row holding the paging buttons.
 
         """
-        super().__init__(cog=cog, owner_id=owner_id, index=index, length=len(posts), timeout=timeout)
-        self.posts: Sequence[RedditPostData] = posts
-
-        post: RedditPostData = posts[index]
-        container = discord.ui.Container(accent_colour=discord.Color.orange())
-        container.add_item(discord.ui.TextDisplay(f"## [{link_label(post.title[:TITLE_LIMIT])}]({post.permalink})"))
-        container.add_item(discord.ui.TextDisplay(self._details(post)))
-
-        links: str = self._links(post)
-        if links:
-            container.add_item(discord.ui.TextDisplay(links))
-
-        # Held so the 413 retry can repoint the image without rebuilding the whole view.
-        self.gallery_item = discord.MediaGalleryItem(post.media)
-        container.add_item(discord.ui.MediaGallery(self.gallery_item))
-
-        if self.length > 1:
-            container.add_item(discord.ui.Separator())
-            container.add_item(discord.ui.TextDisplay(self.page_footer()))
-
-        self.add_item(container)
-        if self.length > 1:
-            self.add_item(self.nav_row())
-
-    @property
-    def files(self) -> list[discord.File]:
-        """The attachment the current page needs uploaded alongside it, if it is not a remote URL."""
-        media: Union[str, discord.File] = self.posts[self.index].media
-        return [media] if isinstance(media, discord.File) else []
-
-    def rebuild(self, index: int) -> RedditPost:
-        """Return the same post showing ``index`` instead."""
-        return RedditPost(cog=self.cog, posts=self.posts, index=index, owner_id=self.owner_id, timeout=self.timeout)
-
-    def use_remote_media(self, url: str) -> None:
-        """Repoint the image at its source URL so the post can be re-sent carrying no attachment.
-
-        The 413 escape hatch: Discord refused the upload, but it will happily unfurl the same image
-        off Reddit's CDN.
-
-        Parameters
-        ----------
-        url: :class:`str`
-            The original image URL.
-
-        """
-        self.posts[self.index].media = url
-        self.gallery_item.media = url
-
-    def _details(self, post: RedditPostData) -> str:
-        """The subtext line under the title — where it came from, how old it is, how big it is."""
-        parts: list[str] = [
-            f"{self.cog.unicode.right_hook_arrow} [/r/{post.sub}]({REDDIT_BASE_URL}/r/{post.sub}/new/)",
-            f"<t:{int(post.created.timestamp())}:R>",
-        ]
-        if post.img_info is not None and post.img_info.width and post.img_info.height:
-            parts.append(f"{post.img_info.width}x{post.img_info.height}")
-        return f"-# {f' {self.cog.unicode.middle_dot} '.join(parts)}"
-
-    def _links(self, post: RedditPostData) -> str:
-        """The jump links back through the day's posts; empty when the crawler has sent none yet."""
-        links: list[str] = []
-        if post.first_post_url is not None:
-            links.append(f"{self.cog.unicode.star} [First of the day]({post.first_post_url})")
-        if post.previous_post_url is not None:
-            links.append(f"\U00002b05 [Previous post]({post.previous_post_url})")
-        return f" {self.cog.unicode.middle_dot} ".join(links)
-
-
-class RedditPagePanel(RedditPagedView):
-    """Pre-rendered text pages in a Components V2 container.
-
-    The Components V2 counterpart of the `KumaEmbed` + :class:`KumaView` pairing used for the
-    listings and the crawler metrics.
-
-    .. warning::
-        Discord's 4000 character budget is **not** enforced by discord.py, and `content_length()`
-        counts `TextDisplay` content only. Pages are built by the caller, so the caller owns the
-        budget; :attr:`PAGE_LIMIT` is what the cog's own callers slice to.
-
-    """
-
-    def __init__(
-        self,
-        *,
-        cog: Cog,
-        title: str,
-        pages: Sequence[str],
-        index: int = 0,
-        owner_id: Optional[int] = None,
-        timeout: Optional[float] = None,
-    ) -> None:
-        """Build the panel.
-
-        Parameters
-        ----------
-        cog: :class:`KumaCog`
-            The parent Cog; supplies the emoji and unicode tables.
-        title: :class:`str`
-            The heading, repeated on every page.
-        pages: :class:`Sequence[str]`
-            The pre-formatted page bodies. Paging buttons appear only when there is more than one.
-        index: :class:`int`, optional
-            Which page to render, by default 0.
-        owner_id: :class:`Optional[int]`, optional
-            Who may page it, by default `None` (anyone).
-        timeout: :class:`Optional[float]`, optional
-            Seconds of inactivity before the buttons stop responding, by default `None` (never).
-
-        """
-        super().__init__(cog=cog, owner_id=owner_id, index=index, length=len(pages), timeout=timeout)
-        self.title: str = title
-        self.pages: Sequence[str] = pages
-
-        container = discord.ui.Container(accent_colour=discord.Color.orange())
-        container.add_item(discord.ui.TextDisplay(f"## {title}"))
-        container.add_item(discord.ui.Separator())
-        container.add_item(discord.ui.TextDisplay(pages[index]))
-
-        if self.length > 1:
-            container.add_item(discord.ui.Separator())
-            container.add_item(discord.ui.TextDisplay(self.page_footer()))
-
-        self.add_item(container)
-        if self.length > 1:
-            self.add_item(self.nav_row())
-
-    def rebuild(self, index: int) -> RedditPagePanel:
-        """Return the same panel showing ``index`` instead."""
-        return RedditPagePanel(
-            cog=self.cog,
-            title=self.title,
-            pages=self.pages,
-            index=index,
-            owner_id=self.owner_id,
-            timeout=self.timeout,
+        return discord.ui.ActionRow(
+            discord.ui.Button(
+                style=discord.ButtonStyle.blurple,
+                label="Previous",
+                emoji="\U00002b05",
+                disabled=self.indx == 0,
+                custom_id=f"{GALLERY_PAGE_PREFIX}{max(self.indx - 1, 0)}",
+            ),
+            discord.ui.Button(
+                style=discord.ButtonStyle.blurple,
+                label="Next",
+                emoji="\U000027a1",
+                disabled=self.indx == self.c_length - 1,
+                custom_id=f"{GALLERY_PAGE_PREFIX}{min(self.indx + 1, self.c_length - 1)}",
+            ),
         )
 
 
@@ -974,11 +863,10 @@ class RedditImageCrawler(Cog):
 
     Periodically crawls configured subreddits for new image submissions,
     filters out duplicates via sha256 hashing and (optionally) pixel edge comparison,
-    then delivers each post as a :class:`RedditEmbed` through its mapped Discord webhook.
+    then delivers each post as a :class:`RedditPost` through its mapped Discord webhook.
     """
 
     _reddit: asyncpraw.Reddit
-    # _sessions: aiohttp.ClientSession
 
     def __init__(self, bot: Kuma_Kuma) -> None:
         super().__init__(bot=bot)
@@ -1000,7 +888,7 @@ class RedditImageCrawler(Cog):
         # Edge Detection comparison.
         self.array_bin: Path = self.file_dir.joinpath("reddit_array.bin")
         self.pixel_cords_array: list[bytes] = []
-        self.image_comp = ImageComparison()
+        self.image_comp: ImageComparison = ImageComparison()
 
         # This is how many posts in each subreddit the script will look back.
         # By default the subreddit script looks at subreddits in `NEW` listing order.
@@ -1017,7 +905,7 @@ class RedditImageCrawler(Cog):
 
         # This forces the timezone to change based upon your OS for better readability in logs.
         # This script uses `UTC` for functionality purposes.
-        self.system_tz = tzlocal.get_localzone()
+        self.system_tz: tzinfo = tzlocal.get_localzone()
 
         # Purely used to fill out the user_agent parameter of PRAW.
         self.sys_os: str = sys.platform.title()
@@ -1026,9 +914,6 @@ class RedditImageCrawler(Cog):
 
         # Default value; change in `reddit_cog.ini`.
         self.user_name: str = "Reddit Crawler"
-
-        # Comparison placeholders through Emojis, keyed per user to prevent cross-contamination.
-        self.reaction_compare_urls: dict[int, list[str]] = {}
 
         # Guild webhook fetches cached per guild id for autocomplete; see WEBHOOK_CACHE_TTL.
         self._guild_webhook_cache: dict[int, tuple[float, list[discord.Webhook]]] = {}
@@ -1053,53 +938,6 @@ class RedditImageCrawler(Cog):
                 ids.add(int(segments[-2]))
         return ids
 
-    # ?CV2: Reaction comparison disabled; use /hash_comparison or /edge_comparison instead.
-    #     @commands.Cog.listener("on_reaction_add")
-    #     async def on_reaction_compare(self, reaction: discord.Reaction, user: discord.User) -> None:
-    #         """Reacting :white_check_mark: on two of the crawler's own posts compares their images.
-    #
-    #         .. note::
-    #             Scoped to messages *this crawler* sent. It used to answer anywhere in any guild the bot
-    #             could see, so a ✅ on an unrelated message downloaded whatever URL it could scrape out of
-    #             it. Comparing arbitrary images is what `hash_comparison` and `edge_comparison` are for.
-    #
-    #         Parameters
-    #         ----------
-    #         reaction: :class:`discord.Reaction`
-    #             The Discord Reaction object.
-    #         user: :class:`discord.User`
-    #             The Discord User object.
-    #
-    #         """
-    #         if user.bot or not (isinstance(reaction.emoji, str) and reaction.emoji == COMPARE_EMOJI):
-    #             return
-    #
-    #         # Our posts go out through a webhook, so `webhook_id` is set and is what identifies them.
-    #         if reaction.message.webhook_id is None or reaction.message.webhook_id not in self.crawler_webhook_ids():
-    #             return
-    #
-    #         url: Optional[str] = None
-    #         if reaction.message.embeds and reaction.message.embeds[0].image.url is not None:
-    #             url = reaction.message.embeds[0].image.url
-    #         elif reaction.message.content:
-    #             url = reaction.message.content.split("\n")[-1]
-    #
-    #         if url is None:
-    #             return
-    #
-    #         user_urls: list[str] = self.reaction_compare_urls.setdefault(user.id, [])
-    #         user_urls.append(url)
-    #         with contextlib.suppress(discord.HTTPException):
-    #             await reaction.message.remove_reaction(emoji=COMPARE_EMOJI, member=user)
-    #
-    #         if len(user_urls) >= 2:
-    #             await self._compare_urls(url_one=user_urls[0], url_two=user_urls[1])
-    #             await reaction.message.channel.send(
-    #                 content=f"{user.mention}\n**URL One**: {user_urls[0]}\n**URL Two**: {user_urls[1]}\n**Results:** {self.image_comp.results}",  # noqa: E501
-    #                 delete_after=15,
-    #             )
-    #             del self.reaction_compare_urls[user.id]
-
     async def cog_load(self) -> None:
         """Creates the Sqlite tables if not present.
 
@@ -1113,6 +951,7 @@ class RedditImageCrawler(Cog):
             await conn.execute(SUBREDDIT_SETUP_SQL)
             await conn.execute(WEBHOOK_SETUP_SQL)
             await conn.execute(METRICS_SETUP_SQL)
+            await conn.execute(GALLERY_SETUP_SQL)
 
         # self._sessions = aiohttp.ClientSession(headers={"User-Agent": self.user_agent})
 
@@ -1152,7 +991,7 @@ class RedditImageCrawler(Cog):
         if xy_binfind is not None:
             await self.save_array()
         await self._reddit.close()
-        if self.check_loop.is_running():
+        if self.check_loop.is_running() is True:
             self.check_loop.cancel()
 
     async def _ini_load(self) -> None:
@@ -1293,7 +1132,7 @@ class RedditImageCrawler(Cog):
     async def check_loop(self) -> None:
         """Crawl subreddits for new images and refresh autocomplete data."""
         # Helps keep our Autocomplete up to date. Beats calling it every time the slash command runs.
-        if self.recent_edit:
+        if self.recent_edit is True:
             self.subreddits = await self._get_all_subreddits()
             self.webhooks = await self._get_all_webhooks()
             self.recent_edit = False
@@ -1313,6 +1152,11 @@ class RedditImageCrawler(Cog):
         self.json_save()
         if xy_binfind is not None:
             await self.save_array()
+
+        pruned: int = await self.prune_galleries()
+        if pruned:
+            LOGGER.debug("<%s.%s> | Pruned %s stale gallery page(s).", __class__.__name__, "check_loop", pruned)
+
         if count >= 1:
             LOGGER.debug("<%s.%s> | Finished sending %s %s.", __class__.__name__, "check_loop", count, "Images" if count > 1 else "Image")
         else:
@@ -1322,6 +1166,48 @@ class RedditImageCrawler(Cog):
     async def before_check_loop(self) -> None:
         """Wait for the bot to be ready before starting the crawler."""
         await self.bot.wait_until_ready()
+
+    @commands.Cog.listener("on_interaction")
+    async def on_gallery_page(self, interaction: discord.Interaction) -> None:
+        """Turn a crawler gallery to the page named by the pressed button's `custom_id`.
+
+        The pages are read back from the database rather than a view held in memory, so an old post
+        still turns after a restart.
+
+        .. note::
+            Anyone who can see the post can turn it, and the turn edits the shared channel message
+            for everyone; there is no per-viewer page state. This listener bypasses
+            :meth:`KumaLayoutView.interaction_check`, so any gate on who may page belongs here.
+
+        Parameters
+        ----------
+        interaction: :class:`discord.Interaction`
+            The component interaction; ignored unless its `custom_id` matches :attr:`GALLERY_PAGE_REGEX`.
+
+        """
+        if interaction.type is not discord.InteractionType.component or interaction.message is None:
+            return
+
+        custom_id: str = str((interaction.data or {}).get("custom_id", ""))
+        match: Optional[re.Match[str]] = GALLERY_PAGE_REGEX.fullmatch(custom_id)
+        if match is None:
+            return
+
+        rows: list[GalleryPageRow] = await self.get_gallery_pages(message_id=interaction.message.id)
+        if not rows:
+            await interaction.response.send_message(
+                content=f"That gallery is too old for me to page through anymore. {self.emoji_table.kuma_tear}",
+                ephemeral=True,
+                delete_after=self.message_timeout,
+            )
+            return
+
+        containers: list[RedditPostContainer] = [RedditPostContainer.from_row(row) for row in rows]
+        view: RedditGalleryView = await RedditGalleryView(cog=self, owner=self.bot.user, timeout=None).add_containers(
+            containers,
+            position=int(match.group("POSITION")),
+        )
+        await interaction.response.edit_message(view=view)
 
     async def _get_subreddit(self, name: str) -> Optional[Row]:
         """Get a Row from the Subreddit Table.
@@ -1525,6 +1411,95 @@ class RedditImageCrawler(Cog):
             res: list[Row] = await conn.fetchall("""SELECT name, id, url FROM webhook""")
             return [Webhook(name=entry["name"], url=entry["url"], id=entry["id"]) for entry in res]
 
+    async def _add_gallery_pages(self, message_id: int, containers: Sequence[RedditPostContainer]) -> None:
+        """Store a sent gallery's pages so they can be rebuilt after a restart.
+
+        Parameters
+        ----------
+        message_id: :class:`int`
+            The Discord message the gallery was sent as.
+        containers: :class:`Sequence[RedditPostContainer]`
+            The gallery pages, in display order.
+
+        """
+        rows: list[tuple[object, ...]] = [
+            (
+                message_id,
+                position,
+                container.sub,
+                container.title,
+                container.permalink,
+                container.created.timestamp(),
+                container.media,
+                None if container.img_info is None else container.img_info.width,
+                None if container.img_info is None else container.img_info.height,
+                container.first_post_url,
+                container.previous_post_url,
+            )
+            for position, container in enumerate(containers)
+        ]
+        async with self.bot.pool.acquire() as conn:
+            await conn.executemany(
+                """INSERT INTO gallery_page
+                (message_id, position, subreddit, title, permalink, created, media_url, width, height, first_post_url, previous_post_url)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(message_id, position) DO NOTHING""",
+                rows,
+            )
+
+    async def get_gallery_pages(self, message_id: int) -> list[GalleryPageRow]:
+        """Gets a sent gallery's stored pages in display order.
+
+        Parameters
+        ----------
+        message_id: :class:`int`
+            The Discord message the gallery was sent as.
+
+        Returns
+        -------
+        :class:`list[GalleryPageRow]`
+            The pages; empty when the gallery is unknown or has been pruned.
+
+        """
+        async with self.bot.pool.acquire() as conn:
+            res: list[Row] = await conn.fetchall(
+                """SELECT message_id, position, subreddit, title, permalink, created, media_url, width, height,
+                first_post_url, previous_post_url FROM gallery_page WHERE message_id = ? ORDER BY position""",
+                message_id,
+            )
+        return [
+            GalleryPageRow(
+                message_id=row["message_id"],
+                position=row["position"],
+                subreddit=row["subreddit"],
+                title=row["title"],
+                permalink=row["permalink"],
+                created=row["created"],
+                media_url=row["media_url"],
+                width=row["width"],
+                height=row["height"],
+                first_post_url=row["first_post_url"],
+                previous_post_url=row["previous_post_url"],
+            )
+            for row in res
+        ]
+
+    async def prune_galleries(self) -> int:
+        """Drop stored pages for galleries older than :attr:`GALLERY_MAX_AGE_DAYS`.
+
+        A snowflake sorts by creation time, so the cutoff is compared against `message_id`
+        directly rather than storing a second timestamp column.
+
+        Returns
+        -------
+        :class:`int`
+            The number of rows removed.
+
+        """
+        cutoff: datetime = datetime.now(tz=UTC) - timedelta(days=GALLERY_MAX_AGE_DAYS)
+        async with self.bot.pool.acquire() as conn:
+            cur = await conn.execute("""DELETE FROM gallery_page WHERE message_id < ?""", discord.utils.time_snowflake(cutoff))
+            return cur.get_cursor().rowcount
+
     async def get_guild_webhooks(self, *, guild: discord.Guild, member: discord.Member) -> list[discord.Webhook]:
         """Gets the Guilds usable webhooks, limited to what the member can see and manage.
 
@@ -1620,9 +1595,9 @@ class RedditImageCrawler(Cog):
             else:
                 return img_url_to_send
 
-            # NOTE: asyncpraw listings are lazy - the actual HTTP request fires here during
-            # iteration (via _next_batch), NOT when .new()/.hot()/.top() was called above.
-            # A network timeout therefore surfaces inside this loop, so it must stay in the try.
+            # asyncpraw listings are lazy — the actual HTTP request fires here during iteration
+            # (via _next_batch), not when .new()/.hot()/.top() was called above, so a network
+            # timeout surfaces inside this loop and it must stay in the try.
             async for submission in res:
                 post_time: datetime = submission.created_datetime
                 if last_check is not None and post_time < last_check:
@@ -1678,10 +1653,7 @@ class RedditImageCrawler(Cog):
             return img_url_to_send
 
         except asyncprawcore.exceptions.ServerError as e:
-            # Reddit-side 5xx (500/502/503) raised while lazily paging the listing. asyncprawcore
-            # already retried internally before giving up. A `ServerError` is a `ResponseException`,
-            # NOT a `RequestException`, so it would otherwise escape both handlers and abort the
-            # whole media handler run. Return partial results and let the next cycle retry.
+            # Reddit-side 5xx (500/502/503) raised
             LOGGER.warning(
                 "<%s.%s> | Reddit returned a <ServerError> while paging /r/%s, returning %s partial result(s). | Error: %s",
                 __class__.__name__,
@@ -1693,9 +1665,7 @@ class RedditImageCrawler(Cog):
             return img_url_to_send
 
         except asyncprawcore.exceptions.RequestException as e:
-            # Transient DNS/network/timeout while lazily paging the listing. Return whatever we
-            # gathered before the failure and let the next cycle retry - one timeout should not
-            # abort the entire media handler run (which is what happened before this handler).
+            # Transient DNS/network/timeout
             LOGGER.warning(
                 "<%s.%s> | Connection failed while paging /r/%s, returning %s partial result(s). | Error: %s",
                 __class__.__name__,
@@ -1722,8 +1692,8 @@ class RedditImageCrawler(Cog):
             The number of images sent.
 
         """
-        count = 0
-        dup_count = 0
+        count: int = 0
+        dup_count: int = 0
 
         LOGGER.debug(
             "<%s.%s> | Starting... | Delay %s | # of subreddits %s",
@@ -1738,12 +1708,11 @@ class RedditImageCrawler(Cog):
             webhook_url: str = entry["webhook_url"]
             LOGGER.debug("<%s.%s> | Looking @ %s with %s", __class__.__name__, "subreddit_media_handler", sub, webhook_url)
             if not webhook_url:
-                LOGGER.debug("No Webhook URL for %s, skipping...", sub)
+                LOGGER.debug("<%s.%s> | No Webhook URL for %s, skipping...", __class__.__name__, "subreddit_media_handler", sub)
                 continue
 
-            if self.interrupt_loop:
+            if self.interrupt_loop is True:
                 self.interrupt_loop = False
-                # Fixed: two placeholders with no arguments caused a traceback in logging.
                 LOGGER.warning(
                     "<%s.%s> | The Media Handler loop was interrupted. | Subreddit: %s | Images sent: %s",
                     __class__.__name__,
@@ -1787,6 +1756,9 @@ class RedditImageCrawler(Cog):
             sub_images: int = 0
             sub_dups: int = 0
             sub_sent: int = 0
+
+            # Each entry is (submission, remote_url, image_bytes, image_info).
+            survivors: list[tuple[Submission, str, bytes, ImageInfo]] = []
 
             for submission, img_url in submissions:
                 if img_url in self.url_list:
@@ -1832,19 +1804,51 @@ class RedditImageCrawler(Cog):
                 self.url_list.add(img_url)
                 count += 1
                 sub_sent += 1
+                survivors.append((submission, img_url, img_data, img_info))
 
+            # Turn the list into a mapping.
+            # - dict{reddit submission permalink : (Submission, img_url, img_data, img_info)}
+            groups: dict[str, list[tuple[Submission, str, bytes, ImageInfo]]] = {}
+            for item in survivors:
+                groups.setdefault(item[0].permalink, []).append(item)
+
+            for images in groups.values():
+                submission = images[0][0]
                 first_post: Optional[tuple[date, str]] = self.daily_first_post.get(sub)
-                post_data: RedditPostData = RedditPostData.from_submission(
-                    sub=sub,
-                    submission=submission,
-                    media=discord.File(fp=io.BytesIO(img_data), filename=media_filename(img_url)),
-                    img_info=img_info,
-                    first_post_url=(None if first_post is None else first_post[1]),
-                    previous_post_url=self.last_message_jump.get(sub),
-                )
-                post: RedditPost = RedditPost(cog=self, posts=[post_data])
 
-                msg: Optional[discord.WebhookMessage] = await self.webhook_send(url=webhook_url, view=post, img_url=img_url)
+                if len(images) == 1:
+                    # Single image — send as an attachment.
+                    _, img_url, img_data, img_info = images[0]
+                    post_container: RedditPostContainer = RedditPostContainer.from_submission(
+                        sub=sub,
+                        submission=submission,
+                        media=img_url,
+                        img_info=img_info,
+                        first_post_url=(None if first_post is None else first_post[1]),
+                        previous_post_url=self.last_message_jump.get(sub),
+                    )
+                    container_view: KumaLayoutView = await KumaLayoutView(cog=self, owner=self.bot.user, timeout=None).add_containers(
+                        post_container
+                    )
+                    msg: Optional[discord.WebhookMessage] = await self.webhook_send(url=webhook_url, view=container_view)
+                else:
+                    # Gallery — remote URLs so page turns can rebuild the view.
+                    gallery_posts: list[RedditPostContainer] = [
+                        RedditPostContainer.from_submission(
+                            sub=sub,
+                            submission=submission,
+                            media=url,
+                            img_info=info,
+                            first_post_url=(None if first_post is None else first_post[1]),
+                            previous_post_url=self.last_message_jump.get(sub),
+                        )
+                        for _, url, _, info in images
+                    ]
+                    container_view = await RedditGalleryView(cog=self, owner=self.bot.user, timeout=None).add_containers(gallery_posts)
+                    msg = await self.webhook_send(url=webhook_url, view=container_view)
+                    if msg is not None:
+                        await self._add_gallery_pages(message_id=msg.id, containers=gallery_posts)
+
                 if msg is not None:
                     today: date = datetime.now(tz=UTC).date()
                     self.last_message_jump[sub] = msg.jump_url
@@ -1895,10 +1899,10 @@ class RedditImageCrawler(Cog):
         Returns
         -------
         :class:`ImageInfo`
-            An ImageInfo dataclass to access the image properties and edge results.
+            An `ImageInfo` instance to access the image properties and edge results.
 
         """
-        img_info = ImageInfo()
+        img_info: ImageInfo = ImageInfo()
         stime: float = time.time()
         source: Image.Image = Image.open(fp=io.BytesIO(initial_bytes=img_data))
         img_info.width = source.width
@@ -1998,7 +2002,9 @@ class RedditImageCrawler(Cog):
                 # This allows us to only get Images.
                 if "e" in img and img["e"] == "Image":
                     # example 's': {'y': 2340, 'x': 1080, 'u': 'https://preview.redd.it/...'}, 'id': '0u8xnxknijha1'}
-                    _urls.append(img["s"]["u"])  # noqa: PERF401
+                    # Reddit hands these preview urls back HTML-escaped (`&amp;` in the query string);
+                    # unescape or the dropped query params make the fetch 404.
+                    _urls.append(html.unescape(img["s"]["u"]))  # noqa: PERF401
         return _urls
 
     async def convert_gallery_submissions(self, submission: Submission) -> list[str]:
@@ -2024,11 +2030,14 @@ class RedditImageCrawler(Cog):
         if hasattr(submission, "url") and submission.url.lower().find("gallery") != -1:
             res: dict = submission.__dict__
             if "crosspost_parent_list" in res:
-                data: dict = res["crosspost_parent_list"][0]["media_metadata"]
-                # We know inside the __dict__["crosspost_parent_list"][0] attribute that it may have a key value "media_metadata"
-                # we are going to "spoof" the objects attribute to use in get_media_metadata_urls() by setting it from the __dict__ key.
-                setattr(submission, "media_metadata", data)  # noqa: B010
-                _urls = await self.get_media_metadata_urls(submission=submission)
+                parents: list = res["crosspost_parent_list"]
+                # The parent list can be empty and the first parent need not carry `media_metadata`
+                # (the docstring notes the key is not guaranteed); guard both before spoofing it.
+                if len(parents) > 0 and "media_metadata" in parents[0]:
+                    data: dict = parents[0]["media_metadata"]
+                    # Spoof the attribute from the __dict__ key so get_media_metadata_urls() can read it.
+                    setattr(submission, "media_metadata", data)  # noqa: B010
+                    _urls = await self.get_media_metadata_urls(submission=submission)
 
             # Edge case; some gallery's apparently have a proper "media_metadata" url.
             elif hasattr(submission, "media_metadata"):
@@ -2071,7 +2080,7 @@ class RedditImageCrawler(Cog):
             return req
 
         LOGGER.warning("<%s.%s> | URL: %s is not an image.", __class__.__name__, "get_url_req", img_url)
-        LOGGER.debug("URL: %s | Req Headers: %s", img_url, req.headers)
+        LOGGER.debug("<%s.%s> | URL: %s | Req Headers: %s", __class__.__name__, "get_url_req", img_url, req.headers)
         return False
 
     async def save_array(self) -> None:
@@ -2084,7 +2093,7 @@ class RedditImageCrawler(Cog):
             self.pixel_cords_array.pop(0)
 
         data: bytes = b"".join(self.pixel_cords_array)
-        LOGGER.debug("Writing our Pixel Array to `reddit_array.bin` || bytes %s", len(data))
+        LOGGER.debug("<%s.%s> | Writing our Pixel Array to `reddit_array.bin` | bytes %s", __class__.__name__, "save_array", len(data))
         await asyncio.to_thread(self.array_bin.write_bytes, data)
 
     async def read_array(self) -> None:
@@ -2096,17 +2105,19 @@ class RedditImageCrawler(Cog):
             self.array_bin.touch()
 
         data: bytes = await asyncio.to_thread(self.array_bin.read_bytes)
-        LOGGER.debug("Loading array from file | bytes %s", len(data))
+        LOGGER.debug("<%s.%s> | Loading array from file | bytes %s", __class__.__name__, "read_array", len(data))
         # We unpack our array len; each entry is prefixed with a 4 byte count,
         # we *2 to account for 2 bytes per value stored, 2 values go into a single tuple().
         self.pixel_cords_array = []
-        total_pos = 0
+        total_pos: int = 0
         while total_pos < len(data):
             cord_len: int = struct.unpack("<I", data[total_pos : total_pos + 4])[0] * 2
             # We increment total_pos +4 to pass our array len blob.
             self.pixel_cords_array.append(data[total_pos : total_pos + cord_len + 4])
             total_pos += cord_len + 4
-        LOGGER.debug("Reading our Array File... | total entries %s", len(self.pixel_cords_array))
+        LOGGER.debug(
+            "<%s.%s> | Reading our Array File... | total entries %s", __class__.__name__, "read_array", len(self.pixel_cords_array)
+        )
 
     async def hash_process(self, data: bytes) -> bool:
         """Checks the sha256 of the supplied image data against our `hash_list`.
@@ -2161,8 +2172,8 @@ class RedditImageCrawler(Cog):
         self,
         url: str,
         content: Optional[str] = None,
-        view: Optional[RedditPost] = None,
-        img_url: Optional[str] = None,
+        view: Optional[KumaLayoutView] = None,
+        # img_url: Optional[str] = None,
     ) -> Optional[discord.WebhookMessage]:
         """Sends the content or view to the Discord Webhook url provided.
 
@@ -2172,10 +2183,8 @@ class RedditImageCrawler(Cog):
             The Webhook URL to use.
         content: :class:`Optional[str]`, optional
             The message content to send to the url, by default `None`.
-        view: :class:`Optional[RedditPost]`, optional
+        view: :class:`Optional[KumaLayoutView]`, optional
             The Components V2 view to send to the url, by default `None`.
-        img_url: :class:`Optional[str]`, optional
-            The original image URL for 413 retry fallback, by default `None`.
 
         Returns
         -------
@@ -2183,10 +2192,11 @@ class RedditImageCrawler(Cog):
             The sent message if the webhook was sent successfully, otherwise `None`.
 
         """
-        webhook: discord.Webhook = discord.Webhook.from_url(url=url, session=self.bot.session)
+        webhook: discord.Webhook = discord.Webhook.from_url(url=url, client=self.bot)
         try:
             if view is not None:
-                return await webhook.send(view=view, files=view.files, username=self.user_name, wait=True)
+                # return await webhook.send(view=view, files=view.files, username=self.user_name, wait=True)
+                return await webhook.send(view=view, username=self.user_name, wait=True)
             if content is not None:
                 return await webhook.send(content=content, username=self.user_name, wait=True)
         except discord.NotFound:
@@ -2200,20 +2210,20 @@ class RedditImageCrawler(Cog):
             self.recent_edit = True
         except discord.HTTPException as e:
             # 413 Payload Too Large — retry with the remote URL instead of the file attachment.
-            if e.status == 413 and view is not None and img_url is not None:
-                LOGGER.warning(
-                    "<%s.%s> | 413 Payload Too Large; retrying with remote URL. | %s",
-                    __class__.__name__,
-                    "webhook_send",
-                    img_url,
-                )
-                view.use_remote_media(img_url)
-                try:
-                    return await webhook.send(view=view, username=self.user_name, wait=True)
-                except (discord.HTTPException, ValueError) as retry_e:
-                    LOGGER.warning("<%s.%s> | Retry also failed. | %s", __class__.__name__, "webhook_send", retry_e)
-            else:
-                LOGGER.warning("<%s.%s> | Webhook not sent. | %s", __class__.__name__, "webhook_send", e)
+            # if e.status == 413 and view is not None and img_url is not None:
+            #     LOGGER.warning(
+            #         "<%s.%s> | 413 Payload Too Large; retrying with remote URL. | %s",
+            #         __class__.__name__,
+            #         "webhook_send",
+            #         img_url,
+            #     )
+            #     view.use_remote_media(img_url)
+            #     try:
+            #         return await webhook.send(view=view, username=self.user_name, wait=True)
+            #     except (discord.HTTPException, ValueError) as retry_e:
+            #         LOGGER.warning("<%s.%s> | Retry also failed. | %s", __class__.__name__, "webhook_send", retry_e)
+            # else:
+            LOGGER.warning("<%s.%s> | Webhook not sent. | %s", __class__.__name__, "webhook_send", e)
         except ValueError as e:
             LOGGER.warning("<%s.%s> | Webhook not sent. | %s", __class__.__name__, "webhook_send", e)
         return None
@@ -2320,38 +2330,6 @@ class RedditImageCrawler(Cog):
             img_two: Image.Image = Image.open(fp=io.BytesIO(await res_two.read()))
             self.image_comp.compare(source=img_one, comparison=img_two)
 
-    # ?CV2: _send_paginated_list replaced by _paginate_lines + RedditPagePanel.
-    #     async def _send_paginated_list(self, context: Context, title: str, entries: list[str], per_page: int = 15) -> discord.Message:
-    #         """Sends the entries as :class:`KumaEmbed` pages, using a :class:`KumaView` to navigate when there is more than one page.
-    #
-    #         Parameters
-    #         ----------
-    #         context: :class:`Context`
-    #             The invocation context to send the message to.
-    #         title: :class:`str`
-    #             The title for each embed page.
-    #         entries: :class:`list[str]`
-    #             The pre-formatted lines to display; must not be empty.
-    #         per_page: :class:`int`, optional
-    #             The number of entries per embed page, by default 15.
-    #
-    #         Returns
-    #         -------
-    #         :class:`discord.Message`
-    #             The sent message.
-    #
-    #         """
-    #         pages: list[list[str]] = [entries[idx : idx + per_page] for idx in range(0, len(entries), per_page)]
-    #         embeds: list[KumaEmbed] = [KumaEmbed(cog=self, title=title, description="\n".join(page)) for page in pages]
-    #         for idx, embed in enumerate(embeds):
-    #             embed.set_footer(text=f"{idx + 1}/{len(embeds)} | Kuma Kuma Bear")
-    #
-    #         first: KumaEmbed = embeds[0]
-    #         if len(embeds) > 1:
-    #             view = KumaView(owner=context.author, cog=self, embeds=embeds, timeout=None)
-    #             return await context.send(embed=first, files=first.attachments, view=view)
-    #         return await context.send(embed=first, files=first.attachments)
-
     @staticmethod
     def _paginate_lines(entries: list[str], limit: int = PAGE_LIMIT) -> list[str]:
         """Chunk pre-formatted lines into pages that fit within the CV2 character budget.
@@ -2389,6 +2367,9 @@ class RedditImageCrawler(Cog):
     @app_commands.describe(sub="The subreddit name.")
     @app_commands.describe(count="The number of submissions to retrieve, default is 5.")
     @app_commands.describe(order_type="Either `New, Hot or Top`")
+    @app_commands.describe(ephemeral="Hide the response so only you can see it (default True).")
+    @app_commands.describe(access="Who can use the buttons — Public (anyone), Preview (no one), or Only Me (default).")
+    @app_commands.autocomplete(sub=autocomplete_subreddit)
     # @app_commands.autocomplete(order_type=autocomplete_submission_type)
     async def get_subreddit(
         self,
@@ -2396,8 +2377,11 @@ class RedditImageCrawler(Cog):
         sub: str,
         order_type: Literal["New", "Hot", "Top"] = "New",
         count: app_commands.Range[int, 0, 100] = 5,
+        timeout: Optional[float] = 180.0,  # noqa: ASYNC109
+        ephemeral: bool = True,
+        access: PanelAccess = PanelAccess.only_me,
     ) -> discord.Message:
-        """Retrieve and paginate a subreddit's recent submissions."""
+
         status: int = await self.check_subreddit(subreddit=sub)
         if status != 200:
             return await context.send(
@@ -2412,9 +2396,12 @@ class RedditImageCrawler(Cog):
                 delete_after=self.message_timeout,
             )
 
-        posts: list[RedditPostData] = [RedditPostData.from_submission(sub=sub, submission=submission, media=url) for submission, url in res]
-        post: RedditPost = RedditPost(cog=self, posts=posts, owner_id=context.author.id, timeout=None)
-        return await context.send(view=post)
+        posts: list[RedditPostContainer] = [
+            RedditPostContainer.from_submission(sub=sub, submission=submission, media=url) for submission, url in res
+        ]
+        owner: Optional[discord.Member | discord.User | discord.ClientUser] = access.owner(user=context.author, bot=self.bot)
+        view: KumaLayoutView = await KumaLayoutView(cog=self, owner=owner, timeout=timeout).add_containers(posts)
+        return await context.send(view=view, ephemeral=ephemeral)
 
     @commands.hybrid_command(help="Add a subreddit to the DB", aliases=["rsadd", "rsa"])
     @app_commands.describe(
@@ -2584,7 +2571,9 @@ class RedditImageCrawler(Cog):
         )
 
     @commands.hybrid_command(help="List of subreddits", aliases=["rslist", "rsl"])
-    async def list_subreddit(self, context: Context) -> discord.Message:
+    @app_commands.describe(ephemeral="Hide the response so only you can see it (default True).")
+    @app_commands.describe(access="Who can use the buttons — Public (anyone), Preview (no one), or Only Me (default).")
+    async def list_subreddit(self, context: Context, ephemeral: bool = True, access: PanelAccess = PanelAccess.only_me) -> discord.Message:
         """List all subreddits and their linked webhooks."""
         res: list[SubRedditTable] = await self._get_all_subreddits()
         entries: list[str] = []
@@ -2601,8 +2590,10 @@ class RedditImageCrawler(Cog):
             )
         pages: list[str] = self._paginate_lines(entries)
         title: str = f"__Current Subreddit List__ (total: {len(entries)})"
-        panel: RedditPagePanel = RedditPagePanel(cog=self, title=title, pages=pages, owner_id=context.author.id, timeout=None)
-        return await context.send(view=panel)
+        containers = [RedditTextPanel(title=title, body=entry) for entry in pages]
+        owner: Optional[discord.Member | discord.User | discord.ClientUser] = access.owner(user=context.author, bot=self.bot)
+        view: KumaLayoutView = await KumaLayoutView(cog=self, owner=owner, timeout=None).add_containers(containers)
+        return await context.send(view=view, ephemeral=ephemeral)
 
     @commands.hybrid_command(help="Info about a subreddit", aliases=["rsinfo", "rsi"])
     @app_commands.describe(sub="The sub Reddit name.")
@@ -2722,22 +2713,24 @@ class RedditImageCrawler(Cog):
         entries: list[str] = [f"**{entry['name']}** ({entry['id']})\n> `{entry['url']}`" for entry in self.webhooks]
         pages: list[str] = self._paginate_lines(entries)
         title: str = f"__Current Webhook List__ (total: {len(entries)})"
-        panel: RedditPagePanel = RedditPagePanel(cog=self, title=title, pages=pages, owner_id=context.author.id, timeout=None)
-        return await context.send(view=panel)
+        containers = [RedditTextPanel(title=title, body=entry) for entry in pages]
+        # Webhook URLs are sensitive, so this stays owner-gated and ephemeral.
+        view: KumaLayoutView = await KumaLayoutView(cog=self, owner=context.author, timeout=None).add_containers(containers)
+        return await context.send(view=view, ephemeral=True)
 
     @commands.hybrid_command(help="Start/Stop the Crawler loop", aliases=["rsloop"])
     @app_commands.default_permissions(administrator=True)
     async def scrape_loop(self, context: Context, util: Literal["start", "stop", "restart"]) -> discord.Message:
         """Start, stop or restart the crawler loop."""
         if util == "start":
-            if self.check_loop.is_running():
+            if self.check_loop.is_running() is True:
                 status = f"already running. {self.emoji_table.kuma_chuckle}"
             else:
                 self.check_loop.start()
                 status = f"starting up! {self.emoji_table.kuma_wow}"
 
         elif util == "stop":
-            if self.check_loop.is_running():
+            if self.check_loop.is_running() is True:
                 self.interrupt_loop = True
                 self.check_loop.cancel()
                 status = f"stopping. {self.emoji_table.kuma_tea}"
@@ -2791,8 +2784,16 @@ class RedditImageCrawler(Cog):
 
     @commands.hybrid_command(help="View crawler metrics for subreddits", aliases=["rsstats", "rsmetrics"])
     @app_commands.describe(sub="Filter to a specific subreddit (optional).")
+    @app_commands.describe(ephemeral="Hide the response so only you can see it (default True).")
+    @app_commands.describe(access="Who can use the buttons — Public (anyone), Preview (no one), or Only Me (default).")
     @app_commands.autocomplete(sub=autocomplete_subreddit)
-    async def crawler_stats(self, context: Context, sub: Optional[str] = None) -> discord.Message:
+    async def crawler_stats(
+        self,
+        context: Context,
+        sub: Optional[str] = None,
+        ephemeral: bool = True,
+        access: PanelAccess = PanelAccess.only_me,
+    ) -> discord.Message:
         """Show crawler metrics, optionally filtered to one subreddit."""
         async with self.bot.pool.acquire() as conn:
             if sub:
@@ -2803,9 +2804,9 @@ class RedditImageCrawler(Cog):
                 )
             else:
                 rows = await conn.fetchall(
-                    """SELECT subreddit, SUM(posts_seen) as posts_seen, SUM(images_found) as images_found,
-                    SUM(duplicates_skipped) as duplicates_skipped, SUM(webhooks_sent) as webhooks_sent,
-                    COUNT(*) as runs, MAX(run_at) as last_run
+                    """SELECT subreddit, SUM(posts_seen) AS posts_seen, SUM(images_found) AS images_found,
+                    SUM(duplicates_skipped) AS duplicates_skipped, SUM(webhooks_sent) AS webhooks_sent,
+                    COUNT(*) AS runs, MAX(run_at) AS last_run
                     FROM crawler_metrics GROUP BY subreddit ORDER BY last_run DESC""",
                 )
 
@@ -2814,6 +2815,8 @@ class RedditImageCrawler(Cog):
                 content=f"No crawler metrics recorded yet. {self.emoji_table.kuma_shrug}",
                 delete_after=self.message_timeout,
             )
+
+        owner: Optional[discord.Member | discord.User | discord.ClientUser] = access.owner(user=context.author, bot=self.bot)
 
         if sub:
             # Per-subreddit detail — one page per crawl run.
@@ -2827,10 +2830,9 @@ class RedditImageCrawler(Cog):
                 )
                 for row in rows
             ]
-            panel: RedditPagePanel = RedditPagePanel(
-                cog=self, title=f"/r/{sub} — Crawl Runs", pages=pages, owner_id=context.author.id, timeout=None
-            )
-            return await context.send(view=panel)
+            containers: list[RedditTextPanel] = [RedditTextPanel(title=f"/r/{sub} — Crawl Runs", body=entry) for entry in pages]
+            view: KumaLayoutView = await KumaLayoutView(cog=self, owner=owner, timeout=None).add_containers(containers)
+            return await context.send(view=view, ephemeral=ephemeral)
 
         # Summary view — one page per subreddit.
         pages = [
@@ -2845,127 +2847,9 @@ class RedditImageCrawler(Cog):
             )
             for row in rows
         ]
-        panel = RedditPagePanel(cog=self, title="__Crawler Metrics__", pages=pages, owner_id=context.author.id, timeout=None)
-        return await context.send(view=panel)
-
-    @commands.is_owner()
-    @commands.hybrid_command(help="Preview the Components V2 Reddit views", aliases=["rspreview"])
-    @app_commands.describe(shape="Which view to render; omit for all of them.")
-    async def reddit_preview(
-        self,
-        context: Context,
-        shape: Literal["all", "post", "gallery", "list", "stats"] = "all",
-    ) -> Optional[discord.Message]:
-        """Render each Components V2 view against made up data.
-
-        There is no way to eyeball the crawler's post without waiting for a crawl to find something
-        new, and no way at all to see a shape that is not wired up yet. Everything here is local — no
-        Reddit call, no image download — so the layout can be judged offline and in one message each.
-
-        .. note::
-            The paged post deliberately uses avatar URLs rather than attachments. A
-            :class:`discord.File` is consumed by the send that uploads it, so a paged post must point
-            at remote media; see the warning on :class:`RedditPost`.
-
-        Parameters
-        ----------
-        context: :class:`Context`
-            The invocation context.
-        shape: :class:`Literal["all", "post", "gallery", "list", "stats"]`, optional
-            Which view to render, by default "all".
-
-        Returns
-        -------
-        :class:`Optional[discord.Message]`
-            The last message sent.
-
-        """
-        now: datetime = datetime.now(tz=UTC)
-        mentions: discord.AllowedMentions = discord.AllowedMentions.none()
-        sent: Optional[discord.Message] = None
-
-        if shape in {"all", "post"}:
-            # The crawler's own shape: one in-line attachment, the day's jump links, a resolution.
-            # The title carries an `[OC]` tag on purpose — it is what `link_label` exists for.
-            post = RedditPost(
-                cog=self,
-                posts=[
-                    RedditPostData(
-                        sub="EarthPorn",
-                        title="[OC] Sunrise over a lake I will never find again",
-                        permalink=f"{REDDIT_BASE_URL}/r/EarthPorn/comments/preview/",
-                        created=now - timedelta(hours=3),
-                        media=discord.File(fp=self.resources.banner, filename=media_filename(self.resources.banner.name)),
-                        img_info=ImageInfo(width=1920, height=1080, edge_res=False),
-                        first_post_url=context.message.jump_url,
-                        previous_post_url=context.message.jump_url,
-                    ),
-                ],
-            )
-            sent = await context.send(view=post, files=post.files, allowed_mentions=mentions)
-
-        if shape in {"all", "gallery"}:
-            # Avatars stand in for Reddit's CDN: three real URLs that need no network of our own.
-            icon: Optional[discord.Asset] = context.guild.icon if context.guild is not None else None
-            fallback: str = context.author.default_avatar.url
-            urls: list[str] = [
-                context.author.display_avatar.url,
-                self.bot.user.display_avatar.url if self.bot.user is not None else fallback,
-                icon.url if icon is not None else fallback,
-            ]
-            gallery = RedditPost(
-                cog=self,
-                posts=[
-                    RedditPostData(
-                        sub="aww",
-                        title=f"Preview submission {number} of {len(urls)}",
-                        permalink=f"{REDDIT_BASE_URL}/r/aww/comments/preview{number}/",
-                        created=now - timedelta(minutes=number * 20),
-                        media=url,
-                    )
-                    for number, url in enumerate(iterable=urls, start=1)
-                ],
-                owner_id=context.author.id,
-            )
-            sent = await context.send(view=gallery, allowed_mentions=mentions)
-
-        if shape in {"all", "list"}:
-            # `list_subreddit`'s entry shape, split across two pages so the buttons have work to do.
-            entries: list[str] = [
-                f"\U00002705 - **/r/**`{name}` \U00002192 `crawler-{index % 3}`" if index % 4 else f"\U0000274c - **/r/**`{name}`"
-                for index, name in enumerate(("EarthPorn", "aww", "CozyPlaces", "AnalogCommunity", "Cinemagraphs", "ImaginaryLandscapes"))
-            ]
-            listing = RedditPagePanel(
-                cog=self,
-                title=f"__Current Subreddit List__ (total: {len(entries)})",
-                pages=["\n".join(entries[:3]), "\n".join(entries[3:])],
-                owner_id=context.author.id,
-            )
-            sent = await context.send(view=listing, allowed_mentions=mentions)
-
-        if shape in {"all", "stats"}:
-            # `crawler_stats` fields become a bullet list — markdown tables do not render in Discord,
-            # and Components V2 has no inline fields to replace them with.
-            stats = RedditPagePanel(
-                cog=self,
-                title="__Crawler Metrics__",
-                pages=[
-                    (
-                        f"### /r/{name}\n"
-                        f"- **Total Runs** — {runs}\n"
-                        f"- **Posts Seen** — {runs * 30}\n"
-                        f"- **Images Found** — {runs * 7}\n"
-                        f"- **Duplicates** — {runs * 5}\n"
-                        f"- **Sent** — {runs * 2}\n"
-                        f"- **Last Run** — <t:{int((now - timedelta(minutes=runs)).timestamp())}:R>"
-                    )
-                    for name, runs in (("EarthPorn", 142), ("aww", 87), ("CozyPlaces", 31))
-                ],
-                owner_id=context.author.id,
-            )
-            sent = await context.send(view=stats, allowed_mentions=mentions)
-
-        return sent
+        containers = [RedditTextPanel(title="__Crawler Metrics__", body=entry) for entry in pages]
+        view = await KumaLayoutView(cog=self, owner=owner, timeout=None).add_containers(containers)
+        return await context.send(view=view, ephemeral=ephemeral)
 
 
 async def setup(bot: Kuma_Kuma) -> None:  # noqa: D103
