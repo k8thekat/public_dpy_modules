@@ -21,6 +21,8 @@ Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import datetime
 import inspect
 import io
@@ -52,8 +54,7 @@ if TYPE_CHECKING:
 
     from kuma_kuma import Kuma_Kuma
     from utils import KumaContext as Context
-    from utils._types import EmbedParams, GitHubIssueSubmissionResponse
-    from utils.ui import ViewParams, ViewParamsPartial
+    from utils._types import EmbedParams, GitHubIssueSubmissionResponse, ViewParams, ViewParamsPartial
 
 
 ErrorAliases = (discord.errors.HTTPException, discord.errors.NotFound, TypeError, ValueError, discord.errors.DiscordException)
@@ -73,14 +74,14 @@ class CDNAsset(NamedTuple):
 
     Attributes
     ----------
-    kind: :class:`Literal["emoji", "sticker"]`
+    kind : :class:`Literal["emoji", "sticker"]`
         Whether this asset is an emoji or a sticker.
-    id: :class:`int`
+    id : :class:`int`
         The snowflake ID of the asset.
-    animated: :class:`bool`
+    animated : :class:`bool`
         Best-guess animation state. ``True`` when the query string contains
         ``animated=true``, the extension is ``.gif``, or the extension is
-        ambiguous (``.webp`` without a query param) — the caller should probe
+        ambiguous (``.webp`` without a query param) - the caller should probe
         with :meth:`KumaCog.resolve_cdn_emoji` to confirm.
 
     """
@@ -99,7 +100,7 @@ def parse_cdn_assets(content: str) -> list[CDNAsset]:
 
     Parameters
     ----------
-    content: :class:`str`
+    content : :class:`str`
         The message text to scan.
 
     Returns
@@ -121,7 +122,7 @@ def parse_cdn_assets(content: str) -> list[CDNAsset]:
 
         kind: Literal["emoji", "sticker"] = "emoji" if asset_type == "emojis" else "sticker"
         # Query param is authoritative; .gif is a certain yes; .webp is ambiguous so
-        # default to True — resolve_cdn_emoji will probe and fall back on a 415.
+        # default to True - resolve_cdn_emoji will probe and fall back on a 415.
         animated: bool = "animated=true" in query or extension != "png"
         assets.append(CDNAsset(kind=kind, id=asset_id, animated=animated))
 
@@ -135,11 +136,11 @@ def get_latest_commits(url: str, repo: Repo, branch: str, max_count: int = 5) ->
     ----------
     url: : :class:`str`
         The base url of the github repository.
-    repo: :class:`git.Repo`
+    repo : :class:`git.Repo`
         The git repository to pull commits from.
-    branch: :class:`str`
+    branch : :class:`str`
         The branch to pull commits from.
-    max_count: :class:`int`, optional
+    max_count : :class:`int`, optional
         The max number of github commit's to collect, by default 5.
 
     Returns
@@ -197,16 +198,16 @@ class YoinkEmbed(KumaEmbed):
 
     Parameters
     ----------
-    cog: :class:`KumaCog`
+    cog : :class:`KumaCog`
         The parent Cog, passed through to :class:`KumaEmbed`.
-    emoji: :class:`Optional[discord.PartialEmoji | discord.Emoji]`
+    emoji : :class:`Optional[discord.PartialEmoji | discord.Emoji]`
         The emoji to display. Sets the title, image, ID, and animated fields.
-    sticker: :class:`Optional[Union[discord.StickerItem, discord.Sticker]]`
+    sticker : :class:`Optional[Union[discord.StickerItem, discord.Sticker]]`
         The sticker to display. Sets the title, image, ID, and description fields.
-    image_data: :class:`Optional[bytes]`
+    image_data : :class:`Optional[bytes]`
         Pre-fetched image bytes from a CDN probe. When present the copy paths
         skip a second ``emoji.read()`` call.
-    **kwargs: :class:`Unpack[EmbedParams]`
+    **kwargs : :class:`Unpack[EmbedParams]`
         Any additional keyword arguments forwarded to :class:`KumaEmbed`.
 
     """
@@ -332,12 +333,8 @@ class YoinkView(KumaView):
     embeds: Sequence[YoinkEmbed]
 
     def __init__(self, **kwargs: Unpack[ViewParams]) -> None:
-        # Pass embeds so KumaView handles prev/next removal when len <= 1.
         super().__init__(**kwargs)
         self.options: list[discord.SelectOption] = self.guild_options()
-        # Decorator-defined buttons are added to self.children by the discord.py metaclass,
-        # not via add_item(), so they are absent from self.components. Extend explicitly so
-        # reset_view() can restore them.
         self.components.extend([self.copy_to_guild, self.to_app_emoji])
 
     def guild_options(self) -> list[discord.SelectOption]:
@@ -363,10 +360,6 @@ class YoinkView(KumaView):
         item.disabled = True
         self.reset_callback.disabled = False
 
-        # One embed carries either a sticker or an emoji, never both. The old shape ran the sticker
-        # branch and then fell into the emoji `else`, so copying a sticker always finished by trying
-        # to answer an interaction it had already deferred — an `InteractionResponded` every time,
-        # and the "Oops" branch could never be reached by an emoji embed either.
         embed: YoinkEmbed = self.embeds[self.indx]
         if embed.sticker is not None:
             # StickerItem is a lightweight stub; fetch the full object. Sticker subclasses are already complete.
@@ -411,12 +404,12 @@ class YoinkView(KumaView):
                 return
 
             if embed.sticker is not None:
-                image = await self.cog.get_request(url=str(embed.sticker.url))
-                if image is None:
+                res = await self.cog.get_request(url=str(embed.sticker.url))
+                if res is None:
                     await interaction.followup.send(content="Failed to fetch sticker image.", ephemeral=True)
                     return
                 name = re.sub(r"[^\w]", "_", embed.sticker.name)[:32]
-                app_emoji = await self.cog.bot.create_application_emoji(name=name, image=image)
+                app_emoji = await self.cog.bot.create_application_emoji(name=name, image=res)
                 await interaction.followup.send(content=f"Created application emoji {app_emoji}.", ephemeral=True)
 
         except ErrorAliases as e:
@@ -495,7 +488,7 @@ class GithubIssueSubmissionModal(discord.ui.Modal):
         """Assembles the issue body from the body field and the source link.
 
         Kept out of :meth:`on_submit` so the assembly can be read and tested without an interaction.
-        This is GitHub flavoured markdown, not Discord's, so a `---` rule renders here — the opposite
+        This is GitHub flavoured markdown, not Discord's, so a `---` rule renders here - the opposite
         of everywhere else in this repo.
 
         Returns
@@ -528,7 +521,7 @@ class GithubIssueSubmissionModal(discord.ui.Modal):
         data: dict[str, Union[str, list]] = {
             "title": modified_title,
             "body": self.build_body(),
-            # `assignees`, not `assigness` — GitHub drops unknown fields without complaining, so
+            # `assignees`, not `assigness` - GitHub drops unknown fields without complaining, so
             # every issue opened this way came out unassigned. Taken from the configured repo owner
             # rather than a hardcoded name, since that is who the token belongs to.
             "assignees": [self.bot.config.github_owner],
@@ -607,9 +600,9 @@ def _paginate_log_entries(entries: list[str], *, budget: int = LOG_PAGE_BUDGET) 
 
     Parameters
     ----------
-    entries: :class:`list[str]`
+    entries : :class:`list[str]`
         Coloured log entries, one string per record.
-    budget: :class:`int`, optional
+    budget : :class:`int`, optional
         Maximum characters of log text per page, by default :attr:`LOG_PAGE_BUDGET`.
 
     Returns
@@ -682,7 +675,7 @@ class LogFileButton(discord.ui.Button["LogPanel"]):
             return
 
         await interaction.response.send_message(
-            content=f"Full log — `{log_path.name}` · captured <t:{int(datetime.datetime.now(tz=datetime.UTC).timestamp())}:f>",
+            content=f"Full log - `{log_path.name}` · captured <t:{int(datetime.datetime.now(tz=datetime.UTC).timestamp())}:f>",
             file=log_file,
             ephemeral=True,
         )
@@ -693,19 +686,19 @@ class LogPanel(discord.ui.LayoutView):
 
     Parameters
     ----------
-    cog: :class:`KumaCog`
+    cog : :class:`KumaCog`
         The parent cog.
-    owner_id: :class:`int`
+    owner_id : :class:`int`
         Who may press the buttons.
-    pages: :class:`Sequence[str]`
+    pages : :class:`Sequence[str]`
         Pre-formatted code-block pages of log content.
-    log_path: :class:`Path`
+    log_path : :class:`Path`
         Path to the log file for the Get File button.
-    filter_label: :class:`Optional[str]`, optional
+    filter_label : :class:`Optional[str]`, optional
         The active level filter shown in the heading, by default ``None``.
-    index: :class:`int`, optional
+    index : :class:`int`, optional
         Which page to render, by default ``0``.
-    timeout: :class:`Optional[float]`, optional
+    timeout : :class:`Optional[float]`, optional
         View timeout, by default ``120.0``.
 
     """
@@ -779,6 +772,135 @@ class LogPanel(discord.ui.LayoutView):
             return True
         await interaction.response.send_message(content="That panel isn't yours.", ephemeral=True)
         return False
+
+
+# ---------------------------------------------------------------------------
+#  fnsearch helpers
+# ---------------------------------------------------------------------------
+
+_FN_SEARCH_SKIP: set[str] = {".venv", "venv", "__pycache__", "node_modules", ".git", ".mypy_cache", ".ruff_cache", "dist", "cache"}
+_FN_SEARCH_MAX_RESULTS: int = 15
+
+
+class _FnMatch(NamedTuple):
+    """A single function or method matched by :func:`_search_repo`.
+
+    Attributes
+    ----------
+    file : :class:`str`
+        Repo-relative file path.
+    line : :class:`int`
+        Start line (1-indexed, includes decorators).
+    end_line : :class:`int`
+        End line (1-indexed, inclusive).
+    qualified_name : :class:`str`
+        ``ClassName.method`` or bare ``function_name``.
+    source : :class:`str`
+        The full extracted source text.
+
+    """
+
+    file: str
+    line: int
+    end_line: int
+    qualified_name: str
+    source: str
+
+
+def _walk_functions(
+    node: ast.AST,
+    class_name: Optional[str] = None,
+) -> list[tuple[Union[ast.FunctionDef, ast.AsyncFunctionDef], Optional[str]]]:
+    """Yield ``(func_node, enclosing_class_name)`` for every definition in *node*.
+
+    Recurses into classes to capture methods and into functions to capture
+    closures, carrying the innermost enclosing class name forward.
+
+    """
+    results: list[tuple[Union[ast.FunctionDef, ast.AsyncFunctionDef], Optional[str]]] = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.ClassDef):
+            results.extend(_walk_functions(child, class_name=child.name))
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            results.append((child, class_name))
+            # Nested functions keep the enclosing class context
+            results.extend(_walk_functions(child, class_name=class_name))
+    return results
+
+
+def _search_repo(root: Path, name: str) -> list[_FnMatch]:
+    """Parse every ``.py`` file under *root* and collect functions matching *name*.
+
+    Parameters
+    ----------
+    root : :class:`~pathlib.Path`
+        The repository root to search.
+    name : :class:`str`
+        Function name to match.  Dotted form ``Class.method`` restricts
+        results to that class.  Matching is case-insensitive; exact hits
+        sort before substring hits.
+
+    Returns
+    -------
+    list[:class:`_FnMatch`]
+        Matched functions, exact-first then alphabetical, capped at
+        :data:`_FN_SEARCH_MAX_RESULTS`.
+
+    """
+    matches: list[_FnMatch] = []
+    name_lower: str = name.lower()
+
+    # Support Class.method queries
+    class_filter: Optional[str] = None
+    search_name: str = name_lower
+    if "." in name:
+        class_filter, search_name = name.rsplit(".", maxsplit=1)
+        class_filter = class_filter.lower()
+
+    for py_file in sorted(root.rglob("*.py")):
+        parts: tuple[str, ...] = py_file.relative_to(root).parts
+        if any(p.startswith(".") or p in _FN_SEARCH_SKIP for p in parts):
+            continue
+
+        try:
+            source: str = py_file.read_text(encoding="utf-8")
+            tree: ast.Module = ast.parse(source, filename=str(py_file))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+
+        source_lines: list[str] = source.splitlines(keepends=True)
+
+        for func_node, enclosing_class in _walk_functions(tree):
+            fn_name_lower: str = func_node.name.lower()
+
+            # Class filter; skip if the enclosing class doesn't match
+            if class_filter is not None and (enclosing_class is None or enclosing_class.lower() != class_filter):
+                continue
+
+            if fn_name_lower != search_name and search_name not in fn_name_lower:
+                continue
+
+            # Pull decorators into the extracted source
+            start_line: int = func_node.lineno
+            if func_node.decorator_list:
+                start_line = func_node.decorator_list[0].lineno
+            end_line: int = func_node.end_lineno or func_node.lineno
+
+            fn_source: str = "".join(source_lines[start_line - 1 : end_line]).rstrip()
+            rel_path: str = str(py_file.relative_to(root))
+            qualified: str = f"{enclosing_class}.{func_node.name}" if enclosing_class else func_node.name
+
+            matches.append(_FnMatch(
+                file=rel_path,
+                line=start_line,
+                end_line=end_line,
+                qualified_name=qualified,
+                source=fn_source,
+            ))
+
+    # Exact matches first, then partials; alphabetical within each group
+    matches.sort(key=lambda m: (search_name != m.qualified_name.rsplit(".", maxsplit=1)[-1].lower(), m.file, m.line))
+    return matches[:_FN_SEARCH_MAX_RESULTS]
 
 
 class Utility(Cog):
@@ -872,7 +994,7 @@ class Utility(Cog):
 
         # An `Intents` object reprs as all ~20 flags, most of them False, which is a wall of noise in
         # an embed. The three privileged ones are the only ones that have to be granted in the
-        # developer portal, so they are the useful thing to report — with the raw bitfield alongside,
+        # developer portal, so they are the useful thing to report - with the raw bitfield alongside,
         # which is what the portal and `Intents._from_value()` actually speak.
         privileged: dict[str, bool] = {
             "members": self.bot.intents.members,
@@ -1045,6 +1167,75 @@ class Utility(Cog):
         await context.reply(content=final_url)
         return None
 
+    @commands.command(name="fnsearch", aliases=["fns"])
+    async def fnsearch(self, context: Context, name: str, *, repo: Optional[str] = None) -> Optional[discord.Message]:
+        """Search a project repo for a function by name and display its full source.
+
+        Uses the ``ast`` module to locate functions and methods, including
+        decorators.  Supports dotted queries like ``Utility.ping`` to narrow
+        by enclosing class.  Partial (substring) matches are included when no
+        exact match exists.
+
+        Falls back to a file attachment when the combined output exceeds
+        Discord's character limit.
+
+        Parameters
+        ----------
+        context : :class:`~utils.KumaContext`
+            The invocation context.
+        name : :class:`str`
+            The function or method name to search for.  Use ``Class.method``
+            to restrict to a specific class.
+        repo : :class:`str`, optional
+            Absolute path to the repo root, by default the bot's own repo.
+
+        Examples
+        --------
+        - ``.fns ping`` --- find every function named ``ping``
+        - ``.fns Utility.ping`` --- only the ``ping`` method on ``Utility``
+        - ``.fns setup`` --- find all ``setup()`` functions across the repo
+        - ``.fns purge /home/kat/gitHub/other_project`` --- search a different repo
+
+        """
+        root: Path = Path(repo) if repo else Path(__file__).resolve().parent.parent
+        if not root.is_dir():
+            return await context.reply(
+                content=f"Directory not found: `{root}` {self.emoji_table.kuma_hmm}",
+                delete_after=self.message_timeout,
+            )
+
+        LOGGER.info("<%s.fnsearch> | Searching | name: %s, root: %s", __class__.__name__, name, root)
+
+        # Offload synchronous file I/O and AST parsing to a thread
+        matches: list[_FnMatch] = await asyncio.to_thread(_search_repo, root, name)
+
+        if not matches:
+            return await context.reply(
+                content=f"No functions matching **{name}** found. {self.emoji_table.kuma_shrug}",
+                delete_after=self.message_timeout,
+            )
+
+        # Build output; one block per match with a file:line header
+        blocks: list[str] = []
+        for m in matches:
+            header: str = f"# {m.file}:{m.line} --- {m.qualified_name}"
+            blocks.append(f"{header}\n{m.source}")
+
+        combined: str = "\n\n".join(blocks)
+        match_count: int = len(matches)
+        label: str = f"**{match_count}** match{'es' if match_count != 1 else ''}"
+
+        # If it fits in a message, send inline as a code block
+        formatted: str = code_block(combined, "py")
+        if len(formatted) <= 1950:
+            return await context.reply(content=f"{label} for **{name}**:\n{formatted}")
+
+        # Too long; send as a .py file attachment with a summary line
+        filename: str = f"{name.replace('.', '_')}_results.py"
+        file: discord.File = discord.File(fp=io.BytesIO(combined.encode()), filename=filename)
+        summary: str = ", ".join(f"`{m.qualified_name}` ({m.file}:{m.line})" for m in matches)
+        return await context.reply(content=f"{label} for **{name}**: {summary}", file=file)
+
     @app_commands.checks.has_permissions(manage_emojis_and_stickers=True)
     async def yoink(self, interaction: discord.Interaction, message: discord.Message) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -1135,11 +1326,11 @@ class Utility(Cog):
 
         Parameters
         ----------
-        context: :class:`Context`
+        context : :class:`Context`
             The invoking command context.
-        entries: :class:`int`, optional
+        entries : :class:`int`, optional
             How many of the most recent records to show, by default 15.
-        levels: :class:`Optional[str]`, optional
+        levels : :class:`Optional[str]`, optional
             Only show these levels, by default ``None`` (all). Space or comma
             separated, e.g. ``ERROR WARNING``.
 

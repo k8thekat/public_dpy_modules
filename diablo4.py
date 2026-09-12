@@ -22,14 +22,14 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 import discord
 from discord import app_commands
 
-from utils import KumaCog as Cog
+from utils import KumaCog as Cog, PanelAccess
 
 if TYPE_CHECKING:
     from kuma_kuma import Kuma_Kuma
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
-# Guarded imports — the cog degrades gracefully when d4-cauldron
+# Guarded imports - the cog degrades gracefully when d4-cauldron
 # or its optional AI layer is absent.
 try:
     from d4data.handler import Cauldron
@@ -198,7 +198,7 @@ def _format_affix_line(affix: dict[str, Any]) -> str:
     parts: list[str] = [f"{indicator} **{name}**"]
 
     if value is not None:
-        parts.append(f"— {value:g}")
+        parts.append(f"- {value:g}")
 
     if natural_range:
         lo, hi = natural_range
@@ -233,9 +233,9 @@ class ItemFieldSelect(discord.ui.Select["ItemView"]):
 
     def __init__(self, *, item_data: dict[str, Any]) -> None:
         options: list[discord.SelectOption] = [
-            discord.SelectOption(label="Name", value="name", description=str(item_data.get("name") or "—")[:100]),
+            discord.SelectOption(label="Name", value="name", description=str(item_data.get("name") or "-")[:100]),
             discord.SelectOption(label="Item Power", value="item_power", description=str(item_data.get("item_power", 800))),
-            discord.SelectOption(label="Quality", value="quality", description=str(item_data.get("quality") or "—")[:100]),
+            discord.SelectOption(label="Quality", value="quality", description=str(item_data.get("quality") or "-")[:100]),
             discord.SelectOption(label="Upgrade Level", value="upgrade", description=str(item_data.get("upgrade", 0))),
         ]
 
@@ -245,7 +245,7 @@ class ItemFieldSelect(discord.ui.Select["ItemView"]):
             desc: str = source
             stats: list[dict[str, Any]] = affix.get("stats", [])
             if stats and stats[0].get("value") is not None:
-                desc += f" — {stats[0]['value']:g}"
+                desc += f" - {stats[0]['value']:g}"
             options.append(discord.SelectOption(label=affix_name[:100], value=f"affix:{idx}", description=desc[:100]))
             if len(options) >= 25:
                 break
@@ -265,7 +265,7 @@ class ItemEditModal(discord.ui.Modal):
 
     def __init__(self, *, field_key: str, current_value: str, item_view: ItemView) -> None:
         pretty: str = field_key.replace("affix:", "Affix #")
-        super().__init__(title=f"Edit — {pretty}"[:45])
+        super().__init__(title=f"Edit - {pretty}"[:45])
         self.field_key: str = field_key
         self._item_view: ItemView = item_view
         self._text_input: discord.ui.TextInput = discord.ui.TextInput(
@@ -288,7 +288,7 @@ class ItemView(discord.ui.LayoutView):
     """Displays a parsed D4 item with edit and save controls.
 
     .. warning::
-        Components V2 — cannot carry ``content`` or ``embeds``.
+        Components V2 - cannot carry ``content`` or ``embeds``.
 
     """
 
@@ -296,7 +296,7 @@ class ItemView(discord.ui.LayoutView):
         self,
         *,
         cog: Diablo4Cog,
-        owner: Union[discord.User, discord.Member],
+        owner: Optional[Union[discord.User, discord.Member, discord.ClientUser]],
         item_data: dict[str, Any],
         notes: Optional[list[str]] = None,
         image_url: Optional[str] = None,
@@ -304,7 +304,7 @@ class ItemView(discord.ui.LayoutView):
     ) -> None:
         super().__init__(timeout=cog.message_timeout)
         self.cog: Diablo4Cog = cog
-        self.owner: Union[discord.User, discord.Member] = owner
+        self.owner: Optional[Union[discord.User, discord.Member, discord.ClientUser]] = owner
         self.item_data: dict[str, Any] = item_data
         self.notes: list[str] = notes or []
         self.image_url: Optional[str] = image_url
@@ -322,9 +322,9 @@ class ItemView(discord.ui.LayoutView):
 
         container: discord.ui.Container = discord.ui.Container(accent_colour=color)
 
-        # Header — name, slot, power, quality, masterwork
+        # Header - name, slot, power, quality, masterwork
         name: str = data.get("name") or "Unknown Item"
-        slot: str = data.get("slot") or "—"
+        slot: str = data.get("slot") or "-"
         item_power: int = data.get("item_power", 0)
         upgrade: int = data.get("upgrade", 0)
         quality_label: str = quality or "Unknown"
@@ -350,7 +350,7 @@ class ItemView(discord.ui.LayoutView):
 
         container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
 
-        # Affixes — split regular affixes from aspects
+        # Affixes - split regular affixes from aspects
         affixes: list[dict[str, Any]] = data.get("affixes", [])
         if affixes:
             regular_lines: list[str] = []
@@ -388,7 +388,7 @@ class ItemView(discord.ui.LayoutView):
                 socket_parts.append(f"💎 {gem_name}")
             container.add_item(discord.ui.TextDisplay("\n".join(socket_parts)))
 
-        # Footer — roll quality, extraction notes, saved status
+        # Footer - roll quality, extraction notes, saved status
         container.add_item(discord.ui.Separator())
         footer_parts: list[str] = []
         avg_quality: Optional[float] = data.get("average_roll_quality")
@@ -418,7 +418,13 @@ class ItemView(discord.ui.LayoutView):
         self.add_item(button_row)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Only the triggering user can interact."""
+        """Only the triggering user can interact, unless the panel is public (owned by the bot)."""
+        # No owner is a preview; no one may interact.
+        if self.owner is None:
+            return False
+        # A panel owned by the bot is public; anyone may interact.
+        if isinstance(self.owner, discord.ClientUser):
+            return True
         if interaction.user.id != self.owner.id:
             await interaction.response.send_message(
                 content=f"That isn't your item panel {self.cog.emoji_table.kuma_shrug}",
@@ -467,7 +473,7 @@ class ItemView(discord.ui.LayoutView):
                     if stats:
                         stats[0]["value"] = numeric
                 except ValueError:
-                    # Not a number — update the affix name instead.
+                    # Not a number - update the affix name instead.
                     affixes[idx]["name"] = new_value
         elif field_key in ("item_power", "upgrade"):
             try:
@@ -494,7 +500,7 @@ class ItemView(discord.ui.LayoutView):
                 )
             self._build_layout()
             await interaction.response.edit_message(view=self)
-        except Exception as exc:  # noqa: BLE001 — user-facing recovery; we log and show a message
+        except Exception as exc:  # noqa: BLE001 - user-facing recovery; we log and show a message
             LOGGER.warning("<%s.%s> | Save failed | Error: %s", "ItemView", "_handle_save", exc)
             await interaction.response.send_message(
                 content=f"Failed to save that item {self.cog.emoji_table.kuma_sad}",
@@ -518,7 +524,7 @@ class ItemView(discord.ui.LayoutView):
             self.item_db_id = None
             self._build_layout()
             await interaction.response.edit_message(view=self)
-        except Exception as exc:  # noqa: BLE001 — user-facing recovery; we log and show a message
+        except Exception as exc:  # noqa: BLE001 - user-facing recovery; we log and show a message
             LOGGER.warning("<%s.%s> | Delete failed | Error: %s", "ItemView", "_handle_delete", exc)
             await interaction.response.send_message(
                 content=f"Failed to delete that item {self.cog.emoji_table.kuma_sad}",
@@ -553,7 +559,7 @@ class Diablo4Cog(Cog, name="Diablo4"):
             try:
                 self._handler = await Cauldron().build()
                 LOGGER.info("<%s.%s> | d4-cauldron handler loaded", __class__.__name__, "cog_load")
-            except Exception:  # noqa: BLE001 — startup recovery; handler is optional
+            except Exception:  # noqa: BLE001 - startup recovery; handler is optional
                 LOGGER.warning(
                     "<%s.%s> | Failed to initialise d4-cauldron handler",
                     __class__.__name__,
@@ -573,7 +579,9 @@ class Diablo4Cog(Cog, name="Diablo4"):
     @d4.command(name="parse", description="Extract item data from a tooltip screenshot.")
     @app_commands.describe(
         image="A screenshot of the item tooltip.",
-        method="Processing method — Auto picks the best available.",
+        method="Processing method - Auto picks the best available.",
+        ephemeral="Hide the response so only you can see it (default False).",
+        access="Who can use the buttons: Public (anyone), Preview (no one), or Only Me (default).",
     )
     @app_commands.choices(
         method=[
@@ -582,17 +590,28 @@ class Diablo4Cog(Cog, name="Diablo4"):
             app_commands.Choice(name="Pixel Analysis (Pillow)", value="tooltip"),
         ]
     )
-    async def parse_item(self, interaction: discord.Interaction, image: discord.Attachment, method: str = "auto") -> None:
+    async def parse_item(
+        self,
+        interaction: discord.Interaction,
+        image: discord.Attachment,
+        method: str = "auto",
+        ephemeral: bool = False,
+        access: PanelAccess = PanelAccess.only_me,
+    ) -> None:
         """Parse a D4 tooltip screenshot into structured item data.
 
         Parameters
         ----------
-        interaction: :class:`discord.Interaction`
+        interaction : :class:`discord.Interaction`
             The invoking interaction.
-        image: :class:`discord.Attachment`
+        image : :class:`discord.Attachment`
             Screenshot of the in-game tooltip.
-        method: :class:`str`, optional
+        method : :class:`str`, optional
             Which pipeline to use, by default ``"auto"``.
+        ephemeral : :class:`bool`, optional
+            Hide the response so only the invoker can see it, by default ``False``.
+        access : :class:`PanelAccess`, optional
+            Who may use the buttons - the invoker, anyone, or no one, by default :attr:`PanelAccess.only_me`.
 
         """
         # Resolve auto before validation so the check matches the actual pipeline.
@@ -603,7 +622,7 @@ class Diablo4Cog(Cog, name="Diablo4"):
                 method = "tooltip"
             else:
                 await interaction.response.send_message(
-                    f"No processing backend available — install `d4-cauldron` or `Pillow` {self.emoji_table.kuma_sad}",
+                    f"No processing backend available - install `d4-cauldron` or `Pillow` {self.emoji_table.kuma_sad}",
                     ephemeral=True,
                 )
                 return
@@ -619,7 +638,7 @@ class Diablo4Cog(Cog, name="Diablo4"):
 
         if method == "tooltip" and not HAS_D4_TOOLTIP:
             await interaction.response.send_message(
-                f"Pixel Analysis requires Pillow — `pip install Pillow` {self.emoji_table.kuma_sad}",
+                f"Pixel Analysis requires Pillow - `pip install Pillow` {self.emoji_table.kuma_sad}",
                 ephemeral=True,
             )
             return
@@ -628,7 +647,7 @@ class Diablo4Cog(Cog, name="Diablo4"):
         remaining: Optional[float] = self._cooldowns.check(interaction.user.id)
         if remaining is not None:
             await interaction.response.send_message(
-                f"On cooldown — try again in **{remaining:.0f}s** {self.emoji_table.kuma_shrug}",
+                f"On cooldown - try again in **{remaining:.0f}s** {self.emoji_table.kuma_shrug}",
                 ephemeral=True,
             )
             return
@@ -642,12 +661,12 @@ class Diablo4Cog(Cog, name="Diablo4"):
             )
             return
 
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=ephemeral)
         self._cooldowns.trigger(interaction.user.id)
 
         try:
             result: ParseResult = await self._process_image(image=image, method=method)
-        except Exception as exc:  # noqa: BLE001 — parse pipeline can fail many ways; reset cooldown and report
+        except Exception as exc:  # noqa: BLE001 - parse pipeline can fail many ways; reset cooldown and report
             self._cooldowns.reset(interaction.user.id)
             LOGGER.warning("<%s.%s> | Parse failed | Error: %s", __class__.__name__, "parse_item", exc)
             await interaction.followup.send(
@@ -658,19 +677,19 @@ class Diablo4Cog(Cog, name="Diablo4"):
 
         view: ItemView = ItemView(
             cog=self,
-            owner=interaction.user,
+            owner=access.owner(user=interaction.user, bot=self.bot),
             item_data=result.item_data,
             notes=result.notes,
             image_url=image.url,
         )
-        await interaction.followup.send(view=view)
+        await interaction.followup.send(view=view, ephemeral=ephemeral)
 
     @d4.command(name="inventory", description="Browse your saved items.")
     async def inventory(self, interaction: discord.Interaction) -> None:
         """List items saved to the database.
 
         .. note::
-            Scaffolding — the full inventory browser with filtering and
+            Scaffolding - the full inventory browser with filtering and
             comparison is a future addition.
 
         """
@@ -679,7 +698,7 @@ class Diablo4Cog(Cog, name="Diablo4"):
 
         if not items:
             await interaction.response.send_message(
-                f"No saved items yet — use `/d4 parse` to get started {self.emoji_table.kuma_happy}",
+                f"No saved items yet - use `/d4 parse` to get started {self.emoji_table.kuma_happy}",
                 ephemeral=True,
             )
             return
@@ -688,10 +707,10 @@ class Diablo4Cog(Cog, name="Diablo4"):
         lines: list[str] = [f"## {self.emoji_table.kuma_peak} Your Items"]
         for item in items[:25]:
             name: str = item.get("name") or "Unknown"
-            quality: str = item.get("quality") or "—"
+            quality: str = item.get("quality") or "-"
             power: int = item.get("item_power", 0)
             row_id: int = item["id"]
-            lines.append(f"**{name}** — {quality} · {power} IP · `#{row_id}`")
+            lines.append(f"**{name}** - {quality} · {power} IP · `#{row_id}`")
 
         if len(items) > 25:
             lines.append(f"-# …and {len(items) - 25} more")
@@ -703,9 +722,9 @@ class Diablo4Cog(Cog, name="Diablo4"):
 
         Parameters
         ----------
-        image: :class:`discord.Attachment`
+        image : :class:`discord.Attachment`
             The uploaded screenshot.
-        method: :class:`str`
+        method : :class:`str`
             ``"vision"`` for AI extraction or ``"tooltip"`` for Pillow pixel
             analysis. Auto-resolution happens in the command before this is
             called.
@@ -717,7 +736,7 @@ class Diablo4Cog(Cog, name="Diablo4"):
             return await self._process_vision(image_bytes=image_bytes, filename=image.filename)
         if method == "tooltip":
             return await self._process_tooltip(image_bytes=image_bytes)
-        # TODO: Local LLM pipeline (Ollama) — would require a vision-capable
+        # TODO: Local LLM pipeline (Ollama) - would require a vision-capable
         # model (e.g. llava) and the /api/generate endpoint with the `images`
         # parameter. The extraction prompt would mirror vision.py's.
         msg: str = f"Unknown processing method: {method}"
@@ -740,14 +759,14 @@ class Diablo4Cog(Cog, name="Diablo4"):
             temp_path.unlink(missing_ok=True)
 
         if item is None:
-            msg = "Vision extraction returned no item — " + "; ".join(notes)
+            msg = "Vision extraction returned no item - " + "; ".join(notes)
             raise RuntimeError(msg)
 
         return ParseResult(item_data=item.to_dict(), method="vision", notes=notes)
 
     async def _process_tooltip(self, *, image_bytes: bytes) -> ParseResult:
-        """Pillow-based structural extraction — no external API needed."""
-        from PIL import Image as PILImage  # noqa: PLC0415 — guarded optional import
+        """Pillow-based structural extraction - no external API needed."""
+        from PIL import Image as PILImage  # noqa: PLC0415 - guarded optional import
 
         img: PILImage.Image = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
         # parse_tooltip is synchronous pixel work; keep the event loop free.

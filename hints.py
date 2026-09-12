@@ -33,12 +33,12 @@ from discord.ext import commands
 from utils import ROTATE_WINDOW, KumaCog as Cog
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Coroutine, Iterator
     from sqlite3 import Row
 
     from kuma_kuma import Kuma_Kuma
 
-LOGGER = logging.getLogger()
+LOGGER = logging.getLogger(__name__)
 
 # The table lives with the cog rather than in core, as it is the Hints feature's own state.
 HINTS_SETUP_SQL: str = """
@@ -85,7 +85,7 @@ PANEL_TIMEOUT: float = 300.0
 
 
 class HintButton(discord.ui.Button):
-    """A button that hands its press to the owning view via ``action``.
+    """A button that fires its ``on_press`` callable when clicked.
 
     Built imperatively, so there is no layout to declare with ``@discord.ui.button``.
 
@@ -94,22 +94,18 @@ class HintButton(discord.ui.Button):
     def __init__(
         self,
         *,
-        action: str,
+        on_press: Callable[[discord.Interaction], Coroutine[Any, Any, None]],
         label: str,
         style: discord.ButtonStyle = discord.ButtonStyle.secondary,
         emoji: Optional[str] = None,
         disabled: bool = False,
     ) -> None:
         super().__init__(label=label, style=style, emoji=emoji, disabled=disabled)
-        self.action: str = action
+        self.on_press: Callable[[discord.Interaction], Coroutine[Any, Any, None]] = on_press
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        """Hands the press to the owning view."""
-        # `self.view` is set by discord.py when the item is added, at any nesting depth.
-        view: Optional[Union[HintView, HintsPanel]] = self.view  # type: ignore[assignment]
-        if view is None:
-            return
-        await view._dispatch(interaction=interaction, action=self.action)  # noqa: SLF001 - the view owns this button.
+        """Fires the callable assigned at construction."""
+        await self.on_press(interaction)
 
 
 class Hint(NamedTuple):
@@ -117,19 +113,19 @@ class Hint(NamedTuple):
 
     Attributes
     ----------
-    key: :class:`str`
+    key : :class:`str`
         Stable identifier stored in the database; namespace by cog (``ffxiv.watchlist``).
-    text: :class:`str`
+    text : :class:`str`
         The advice, one sentence.
-    label: :class:`str`
+    label : :class:`str`
         Short name for the ``/hints`` panel.
-    url: :class:`Optional[str]`
+    url : :class:`Optional[str]`
         Renders a ``Learn more`` link button when set.
-    style: :class:`Optional[HintStyle]`
+    style : :class:`Optional[HintStyle]`
         Override the render for this hint alone.
-    retire_at: :class:`int`
+    retire_at : :class:`int`
         Times to show before retiring, by default :attr:`DEFAULT_RETIRE_AT`.
-    cog_wide: :class:`bool`
+    cog_wide : :class:`bool`
         Offer after any of the declaring cog's commands, by default False.
 
     """
@@ -174,7 +170,7 @@ class HintRecord:
         if self.dismissed is True:
             return "Dismissed"
         if self.retired is True:
-            return f"Seen {self.seen} of {self.retire_at} — retired"
+            return f"Seen {self.seen} of {self.retire_at} - retired"
         return f"Seen {self.seen} of {self.retire_at}"
 
 
@@ -192,7 +188,7 @@ def render_hint(*, hint: Hint, emoji: str, style: HintStyle, final: bool) -> str
 
 
 class HintView(discord.ui.View):
-    """The buttons under a hint — deliberately small.
+    """The buttons under a hint - deliberately small.
 
     ``Remind me later`` only appears on the last showing; before then there is nothing to put off.
 
@@ -204,9 +200,9 @@ class HintView(discord.ui.View):
         self.hint: Hint = hint
         self.user_id: int = user_id
 
-        self.add_item(HintButton(action="got_it", label="Got it", style=discord.ButtonStyle.success))
+        self.add_item(HintButton(on_press=self._got_it, label="Got it", style=discord.ButtonStyle.success))
         if final is True:
-            self.add_item(HintButton(action="later", label="Remind me later"))
+            self.add_item(HintButton(on_press=self._later, label="Remind me later"))
         if hint.url is not None:
             # A link button fires no interaction, so it needs no handler.
             self.add_item(discord.ui.Button(label="Learn more", style=discord.ButtonStyle.link, url=hint.url))
@@ -221,25 +217,25 @@ class HintView(discord.ui.View):
             return False
         return True
 
-    async def _dispatch(self, *, interaction: discord.Interaction, action: str) -> None:
-        """Applies a press, then retires the view."""
-        if action == "got_it":
-            await self.cog.dismiss(user_id=self.user_id, key=self.hint.key)
-            note: str = f"Got it — you won't see that one again. {self.cog.emoji_table.kuma_happy}"
-        elif action == "later":
-            await self.cog.remind_later(user_id=self.user_id, key=self.hint.key)
-            note = f"Sure — I'll show that one once more. {self.cog.emoji_table.kuma_peak}"
-        else:
-            return
+    async def _got_it(self, interaction: discord.Interaction) -> None:
+        """Dismisses the hint permanently and retires the view."""
+        await self.cog.dismiss(user_id=self.user_id, key=self.hint.key)
+        note: str = f"Got it - you won't see that one again. {self.cog.emoji_table.kuma_happy}"
+        self.stop()
+        await interaction.response.edit_message(view=None)
+        await interaction.followup.send(content=note, ephemeral=True)
 
-        # One press settles it either way, so take the buttons off.
+    async def _later(self, interaction: discord.Interaction) -> None:
+        """Grants one more showing and retires the view."""
+        await self.cog.remind_later(user_id=self.user_id, key=self.hint.key)
+        note: str = f"Sure - I'll show that one once more. {self.cog.emoji_table.kuma_peak}"
         self.stop()
         await interaction.response.edit_message(view=None)
         await interaction.followup.send(content=note, ephemeral=True)
 
 
 class HintsPanel(discord.ui.LayoutView):
-    """The ``/hints`` panel — every hint the bot knows and whether it is on for you.
+    """The ``/hints`` panel - every hint the bot knows and whether it is on for you.
 
     Not persistent; custom IDs encode the hint key.
 
@@ -262,13 +258,13 @@ class HintsPanel(discord.ui.LayoutView):
 
         start: int = self.page * HINTS_PER_PAGE
         window: list[tuple[Hint, HintRecord]] = entries[start : start + HINTS_PER_PAGE]
-        if not window:
+        if len(window) == 0:
             container.add_item(discord.ui.TextDisplay("-# No cog has registered a hint yet."))
         for hint, record in window:
             container.add_item(
                 discord.ui.Section(
                     f"**{hint.label}**\n-# {record.status}",
-                    accessory=self._toggle(hint=hint, record=record),
+                    accessory=self._toggle_button(hint=hint, record=record),
                 ),
             )
 
@@ -276,7 +272,7 @@ class HintsPanel(discord.ui.LayoutView):
         container.add_item(discord.ui.TextDisplay(f"-# {self._summary()}"))
         self.add_item(container)
 
-        # Outside the container — these act on the panel, not settings in it.
+        # Outside the container - these act on the panel, not settings in it.
         self.add_item(self._actions())
 
     def _summary(self) -> str:
@@ -286,25 +282,34 @@ class HintsPanel(discord.ui.LayoutView):
         page: str = f" · page {self.page + 1} of {self.pages}" if self.pages > 1 else ""
         return f"{len(self.entries)} hints · {active} active, {dismissed} dismissed{page}"
 
-    def _toggle(self, *, hint: Hint, record: HintRecord) -> HintButton:
+    def _toggle_button(self, *, hint: Hint, record: HintRecord) -> HintButton:
         """Returns the on/off accessory for one hint."""
         on: bool = record.dismissed is False
         return HintButton(
-            action=f"toggle:{hint.key}",
+            on_press=self._make_toggle(hint.key),
             label="On" if on is True else "Off",
             emoji="✔️" if on is True else "✖️",
             style=discord.ButtonStyle.success if on is True else discord.ButtonStyle.secondary,
         )
 
+    def _make_toggle(self, key: str) -> Callable[[discord.Interaction], Coroutine[Any, Any, None]]:
+        """Returns a callback that toggles one hint and refreshes the panel."""
+
+        async def _toggle(interaction: discord.Interaction) -> None:
+            await self.cog.toggle(user_id=self.user_id, key=key)
+            await self._refresh(interaction)
+
+        return _toggle
+
     def _actions(self) -> discord.ui.ActionRow:
         """Returns the row of panel-wide actions."""
         row: discord.ui.ActionRow = discord.ui.ActionRow()
         if self.pages > 1:
-            row.add_item(HintButton(action="prev", label="Prev", disabled=self.page == 0))
-            row.add_item(HintButton(action="next", label="Next", disabled=self.page >= self.pages - 1))
-        row.add_item(HintButton(action="all_on", label="Enable all", emoji="✔️", style=discord.ButtonStyle.success))
-        row.add_item(HintButton(action="all_off", label="All off", emoji="✖️"))
-        row.add_item(HintButton(action="reset", label="Reset", emoji="🔄", style=discord.ButtonStyle.danger))
+            row.add_item(HintButton(on_press=self._prev_page, label="Prev", disabled=self.page == 0))
+            row.add_item(HintButton(on_press=self._next_page, label="Next", disabled=self.page >= self.pages - 1))
+        row.add_item(HintButton(on_press=self._enable_all, label="Enable all", emoji="✔️", style=discord.ButtonStyle.success))
+        row.add_item(HintButton(on_press=self._disable_all, label="All off", emoji="✖️"))
+        row.add_item(HintButton(on_press=self._reset_all, label="Reset", emoji="🔄", style=discord.ButtonStyle.danger))
         return row
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -317,27 +322,41 @@ class HintsPanel(discord.ui.LayoutView):
             return False
         return True
 
-    async def _dispatch(self, *, interaction: discord.Interaction, action: str) -> None:
-        """Applies a press and re-renders the panel in place."""
-        page: int = self.page
+    # -- handlers --
 
-        if action.startswith("toggle:"):
-            await self.cog.toggle(user_id=self.user_id, key=action.removeprefix("toggle:"))
-        elif action == "all_on":
-            await self.cog.set_all(user_id=self.user_id, dismissed=False)
-        elif action == "all_off":
-            await self.cog.set_all(user_id=self.user_id, dismissed=True)
-        elif action == "reset":
-            await self.cog.reset(user_id=self.user_id)
-        elif action == "prev":
-            page -= 1
-        elif action == "next":
-            page += 1
-        else:
-            return
-
+    async def _refresh(self, interaction: discord.Interaction, *, page: Optional[int] = None) -> None:
+        """Re-reads the ledger and replaces this panel in place."""
         entries: list[tuple[Hint, HintRecord]] = await self.cog.ledger(user_id=self.user_id)
-        await interaction.response.edit_message(view=HintsPanel(cog=self.cog, user_id=self.user_id, entries=entries, page=page))
+        view: HintsPanel = HintsPanel(
+            cog=self.cog,
+            user_id=self.user_id,
+            entries=entries,
+            page=page if page is not None else self.page,
+        )
+        await interaction.response.edit_message(view=view)
+
+    async def _enable_all(self, interaction: discord.Interaction) -> None:
+        """Turns every hint back on."""
+        await self.cog.set_all(user_id=self.user_id, dismissed=False)
+        await self._refresh(interaction)
+
+    async def _disable_all(self, interaction: discord.Interaction) -> None:
+        """Turns every hint off."""
+        await self.cog.set_all(user_id=self.user_id, dismissed=True)
+        await self._refresh(interaction)
+
+    async def _reset_all(self, interaction: discord.Interaction) -> None:
+        """Wipes the ledger so every hint is new again."""
+        await self.cog.reset(user_id=self.user_id)
+        await self._refresh(interaction)
+
+    async def _prev_page(self, interaction: discord.Interaction) -> None:
+        """Navigates one page back."""
+        await self._refresh(interaction, page=self.page - 1)
+
+    async def _next_page(self, interaction: discord.Interaction) -> None:
+        """Navigates one page forward."""
+        await self._refresh(interaction, page=self.page + 1)
 
 
 class HintsCog(Cog, name="Hints"):
@@ -370,7 +389,7 @@ class HintsCog(Cog, name="Hints"):
 
         Parameters
         ----------
-        cog: :class:`Optional[commands.Cog]`
+        cog : :class:`Optional[commands.Cog]`
             The cog whose command just ran; ``None`` for a command belonging to no cog.
 
         Returns
@@ -388,7 +407,7 @@ class HintsCog(Cog, name="Hints"):
 
         Parameters
         ----------
-        command: :class:`Union[app_commands.Command, app_commands.ContextMenu]`
+        command : :class:`Union[app_commands.Command, app_commands.ContextMenu]`
             The command that just completed.
 
         Returns
@@ -408,7 +427,7 @@ class HintsCog(Cog, name="Hints"):
 
         Parameters
         ----------
-        user_id: :class:`int`
+        user_id : :class:`int`
             The Discord ID.
 
         Returns
@@ -510,15 +529,12 @@ class HintsCog(Cog, name="Hints"):
         """Turns every known hint on or off for a user."""
         keys: list[str] = [hint.key for hint in self.registry()]
         async with self.bot.pool.acquire() as conn:
-            for key in keys:
-                await conn.execute(
-                    """INSERT INTO user_hints (userid, hint_key, dismissed, seen) VALUES (?, ?, ?, 0)
-                       ON CONFLICT (userid, hint_key) DO UPDATE SET dismissed = excluded.dismissed,
-                       seen = CASE WHEN excluded.dismissed = 0 THEN 0 ELSE user_hints.seen END""",
-                    user_id,
-                    key,
-                    int(dismissed),
-                )
+            await conn.executemany(
+                """INSERT INTO user_hints (userid, hint_key, dismissed, seen) VALUES (?, ?, ?, 0)
+                   ON CONFLICT (userid, hint_key) DO UPDATE SET dismissed = excluded.dismissed,
+                   seen = CASE WHEN excluded.dismissed = 0 THEN 0 ELSE user_hints.seen END""",
+                [(user_id, key, int(dismissed)) for key in keys],
+            )
 
     async def reset(self, *, user_id: int) -> None:
         """Clears a user's ledger; every hint is new again."""
@@ -545,11 +561,11 @@ class HintsCog(Cog, name="Hints"):
 
         Parameters
         ----------
-        target: :class:`Union[discord.Interaction, commands.Context]`
+        target : :class:`Union[discord.Interaction, commands.Context]`
             The command being answered.
-        key: :class:`str`
+        key : :class:`str`
             The :attr:`Hint.key` to show.
-        style: :class:`Optional[HintStyle]`, optional
+        style : :class:`Optional[HintStyle]`, optional
             Override the hint's own style and the default.
 
         Returns
@@ -589,13 +605,13 @@ class HintsCog(Cog, name="Hints"):
 
         Parameters
         ----------
-        destination: :class:`discord.abc.Messageable`
+        destination : :class:`discord.abc.Messageable`
             Where to post; typically the thread the hint is about.
-        key: :class:`str`
+        key : :class:`str`
             The :attr:`Hint.key` to show.
-        user: :class:`Union[discord.User, discord.Member]`
+        user : :class:`Union[discord.User, discord.Member]`
             Who the hint is for.
-        style: :class:`Optional[HintStyle]`, optional
+        style : :class:`Optional[HintStyle]`, optional
             Override the hint's own style and the default.
 
         Returns
@@ -624,9 +640,9 @@ class HintsCog(Cog, name="Hints"):
 
         Parameters
         ----------
-        target: :class:`Union[discord.Interaction, commands.Context]`
+        target : :class:`Union[discord.Interaction, commands.Context]`
             The command being answered.
-        cog: :class:`Optional[commands.Cog]`
+        cog : :class:`Optional[commands.Cog]`
             The cog whose command was run.
 
         Returns
@@ -636,7 +652,7 @@ class HintsCog(Cog, name="Hints"):
 
         """
         declared: list[Hint] = self.declared_cog_wide(cog)
-        if not declared:
+        if len(declared) == 0:
             return False
 
         user: Union[discord.User, discord.Member] = target.user if isinstance(target, discord.Interaction) else target.author
@@ -650,7 +666,7 @@ class HintsCog(Cog, name="Hints"):
         # Batch-read rather than one query per hint; filter before picking so a retired pick doesn't skip a turn.
         keys: list[str] = [hint.key for hint in declared]
         # The f-string only builds the right number of `?` placeholders; all values are parameterised.
-        placeholders: str = ",".join("?" * len(keys))
+        placeholders: str = ",".join("?" for _ in keys)
         async with self.bot.pool.acquire() as conn:
             rows: list[Row] = await conn.fetchall(
                 f"""SELECT hint_key, seen, retire_at, dismissed FROM user_hints
@@ -669,7 +685,7 @@ class HintsCog(Cog, name="Hints"):
             )
             if record.active is True:
                 candidates.append(hint)
-        if not candidates:
+        if len(candidates) == 0:
             return False
 
         chosen: Hint = self.rotate_pick(candidates, offset=user.id)
@@ -684,7 +700,7 @@ class HintsCog(Cog, name="Hints"):
 
         Parameters
         ----------
-        context: :class:`commands.Context`
+        context : :class:`commands.Context`
             The command that just succeeded.
 
         """
@@ -702,9 +718,9 @@ class HintsCog(Cog, name="Hints"):
 
         Parameters
         ----------
-        interaction: :class:`discord.Interaction`
+        interaction : :class:`discord.Interaction`
             The interaction that ran the command.
-        command: :class:`Union[app_commands.Command, app_commands.ContextMenu]`
+        command : :class:`Union[app_commands.Command, app_commands.ContextMenu]`
             The command that just succeeded.
 
         """
@@ -769,7 +785,7 @@ class HintsCog(Cog, name="Hints"):
         """Clears the caller's ledger."""
         await self.reset(user_id=interaction.user.id)
         await interaction.response.send_message(
-            content=f"Cleared your hints — you'll see them all again. {self.emoji_table.kuma_star_eye}",
+            content=f"Cleared your hints - you'll see them all again. {self.emoji_table.kuma_star_eye}",
             ephemeral=True,
         )
 

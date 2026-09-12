@@ -190,7 +190,7 @@ class AutoMod(Cog):
     ) -> None:
         """Creates a native Discord AutoMod rule that blocks messages exceeding the mention limit.
 
-        The rule only uses `block_message` — escalation is handled by the
+        The rule only uses `block_message` - escalation is handled by the
         `on_auto_moderation_action` listener based on member tenure.
         """
         if interaction.guild is None:

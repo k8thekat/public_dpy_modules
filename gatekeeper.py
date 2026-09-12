@@ -97,7 +97,7 @@ class Gatekeeper(Cog):
 
     The successor to GatekeeperV2, folded in as a cog rather than run as its own bot. AMP's
     Application Deployment Server (the `ADS` controller instance) owns a fleet of game server
-    instances — Minecraft, Source, Valheim and the rest — and `ampapi` wraps its HTTP API in typed
+    instances - Minecraft, Source, Valheim and the rest - and `ampapi` wraps its HTTP API in typed
     Python. This exposes that fleet to a guild without handing anyone the AMP panel itself.
 
     What it does today:
@@ -110,8 +110,8 @@ class Gatekeeper(Cog):
     - **Console access.** Send a command to an instance's console.
     - **AMP roles.** Duplicate an existing AMP user role as the basis for a new one.
 
-    Where it is going: GatekeeperV2 covered rather more — per-instance permissions tied to Discord
-    roles, display banners, donator perks and server metadata — and those are the shape of what this
+    Where it is going: GatekeeperV2 covered rather more - per-instance permissions tied to Discord
+    roles, display banners, donator perks and server metadata - and those are the shape of what this
     cog is expected to grow into. The command surface here is the subset that has been ported.
 
     .. note::
@@ -191,7 +191,7 @@ class Gatekeeper(Cog):
         """Stops our task loops and un-registers them, so a reload does not stack duplicates in `bot.task_loops`.
 
         A reloaded cog is a new object, so `is_running()` is False on its fresh `Loop` and `cog_load` starts and
-        appends again — the previous entry stays in the list forever unless it is removed here.
+        appends again - the previous entry stays in the list forever unless it is removed here.
 
         The two channel loops are named even though `cog_load` currently leaves them commented out; both guards
         are False for a loop that never started, so un-commenting them up there needs no change down here.
@@ -216,7 +216,7 @@ class Gatekeeper(Cog):
             LOGGER.debug(("Gatekeeper Creds. | Url: %s | User: %s | Token: %s | Path: %s"), url, user, token, file.as_posix())
             if url is None or user is None or password is None or token is None:
                 # Formatted here rather than handed to the exception as logging style `%s` arguments,
-                # which never interpolate — the message reached the console with literal `%s` in it.
+                # which never interpolate - the message reached the console with literal `%s` in it.
                 # Says which options are missing rather than echoing any of their values back.
                 missing: str = ", ".join(
                     name for name, value in (("url", url), ("user", user), ("password", password), ("token", token)) if value is None
@@ -238,9 +238,9 @@ class Gatekeeper(Cog):
 
         Parameters
         ----------
-        query: :class:`str`
+        query : :class:`str`
             What has been typed so far.
-        *fields: :class:`str`
+        *fields : :class:`str`
             The fields to search, e.g. a friendly name and an Instance ID.
 
         Returns
@@ -685,11 +685,11 @@ class Gatekeeper(Cog):
                 delete_after=self.message_timeout,
             )
 
-        # Application info — state, player count, uptime.
+        # Application info - state, player count, uptime.
         status: Status | ActionResultError = await instance.get_application_status()
-        # Instance info — ID, friendly name, description, disk usage.
+        # Instance info - ID, friendly name, description, disk usage.
         info: InstanceTypeAliases | ActionResultError = await instance.get_instance_status()
-        # Metrics — memory, CPU, and the analytics summary.
+        # Metrics - memory, CPU, and the analytics summary.
         analytics: AnalyticsSummary | ActionResultError = await instance.get_analytics_summary()
 
         if isinstance(status, ActionResultError):
@@ -707,7 +707,7 @@ class Gatekeeper(Cog):
 
         # Everything above this line was already being fetched; none of it was ever sent anywhere,
         # which is the whole of "appears to be broken and won't handle a message". Analytics is the
-        # one part allowed to be missing — not every module reports it — so it is a soft failure.
+        # one part allowed to be missing - not every module reports it - so it is a soft failure.
         embed = KumaEmbed(
             cog=self,
             title=f"__{instance.friendly_name}__",
@@ -740,7 +740,7 @@ class Gatekeeper(Cog):
                 analytics,
             )
         elif analytics.top_players:
-            top: str = "\n".join(f"- **{player.username}** — {player.display_session_time}" for player in analytics.top_players[:5])
+            top: str = "\n".join(f"- **{player.username}** - {player.display_session_time}" for player in analytics.top_players[:5])
             embed.add_field(name="Top Players:", value=top, inline=False)
 
         return await context.send(embed=embed, files=embed.attachments, ephemeral=True, delete_after=self.message_timeout)

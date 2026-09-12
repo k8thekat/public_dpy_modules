@@ -346,15 +346,15 @@ class AutoModEmbed(KumaEmbed):
 
         Parameters
         ----------
-        mod_action: :class:`str`
+        mod_action : :class:`str`
             eg. Ban, Kick, Timeout.
-        user: :class:`discord.Member | discord.User`
+        user : :class:`discord.Member | discord.User`
             The Discord User or Member object.
-        guild: :class:`discord.Guild`
+        guild : :class:`discord.Guild`
             The Discord Guild.
-        cog: :class:`Cog`
+        cog : :class:`Cog`
             The Cog using this embed.
-        reason: :class:`Optional[str]`, optional
+        reason : :class:`Optional[str]`, optional
             The reason the User or Member had action taken against them, by default None.
 
         """
@@ -425,7 +425,7 @@ class Moderator(Cog):
 
         Parameters
         ----------
-        guild: :class:`discord.Guild`
+        guild : :class:`discord.Guild`
             The Discord guild to get Moderator settings for.
 
         Returns
@@ -470,14 +470,14 @@ class Moderator(Cog):
 
         Parameters
         ----------
-        guild: :class:`discord.Guild`
+        guild : :class:`discord.Guild`
             The Discord guild object.
-        setting: :class:`str`, optional
+        setting : :class:`str`, optional
             The column name in the moderator table to update (e.g. ``"use_mystbin"``).
             Must be one of :attr:`_MOD_SETTING_COLUMNS`. Required when ``default`` is False.
-        value: :class:`bool`, optional
+        value : :class:`bool`, optional
             The value to write to ``setting``, by default False.
-        default: :class:`bool`, optional
+        default : :class:`bool`, optional
             When True, inserts a new row with default values for the guild instead of
             updating an existing one. Use this for initial guild setup.
 
@@ -556,7 +556,7 @@ class Moderator(Cog):
 
         Parameters
         ----------
-        guild: :class:`discord.Guild`
+        guild : :class:`discord.Guild`
             The Discord guild object.
 
         Returns
@@ -582,11 +582,11 @@ class Moderator(Cog):
 
         Parameters
         ----------
-        user: :class:`Union[discord.User, discord.Member]`
+        user : :class:`Union[discord.User, discord.Member]`
             Whose preference to read.
-        setting: :class:`str`
+        setting : :class:`str`
             The `user_settings` column name.
-        default: :class:`bool`
+        default : :class:`bool`
             The answer when the Preferences cog is not loaded.
 
         Returns
@@ -638,7 +638,7 @@ class Moderator(Cog):
 
         Parameters
         ----------
-        thread: :class:`discord.Thread`
+        thread : :class:`discord.Thread`
             The thread whose title would be rewritten.
 
         Returns
@@ -663,9 +663,9 @@ class Moderator(Cog):
 
         Parameters
         ----------
-        before: :class:`discord.abc.GuildChannel`
+        before : :class:`discord.abc.GuildChannel`
             The channel before the update.
-        after: :class:`discord.abc.GuildChannel`
+        after : :class:`discord.abc.GuildChannel`
             The channel after the update.
 
         """
@@ -719,7 +719,7 @@ class Moderator(Cog):
 
         Parameters
         ----------
-        message: :class:`Message`
+        message : :class:`Message`
             The Discord Message to be converted.
 
         """
@@ -764,7 +764,7 @@ class Moderator(Cog):
 
         Parameters
         ----------
-        message: :class:`discord.Message`
+        message : :class:`discord.Message`
             The Discord message to inspect.
 
         """
@@ -1175,9 +1175,9 @@ class Moderator(Cog):
 
         Parameters
         ----------
-        interaction: :class:`discord.Interaction`
+        interaction : :class:`discord.Interaction`
             The interaction being autocompleted. Unused; the trusted list is global.
-        current: :class:`str`
+        current : :class:`str`
             What has been typed into the parameter so far.
 
         Returns

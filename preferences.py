@@ -103,11 +103,11 @@ class PreferenceChoice(NamedTuple):
 
     Attributes
     ----------
-    value: :class:`str`
+    value : :class:`str`
         What is stored and what the owning cog compares against.
-    label: :class:`str`
+    label : :class:`str`
         The name shown on the select.
-    summary: :class:`str`
+    summary : :class:`str`
         The line beneath the name.
 
     """
@@ -124,15 +124,15 @@ class Preference(NamedTuple):
 
     Attributes
     ----------
-    key: :class:`str`
+    key : :class:`str`
         Stable identifier stored in the database; namespace by cog (``claude.verbosity``).
-    label: :class:`str`
+    label : :class:`str`
         Short name for the ``/preferences`` panel.
-    summary: :class:`str`
+    summary : :class:`str`
         Line beneath the name.
-    default: :class:`str`
+    default : :class:`str`
         What :meth:`Preferences.value` answers when nothing is stored.
-    choices: :class:`tuple[PreferenceChoice, ...]`
+    choices : :class:`tuple[PreferenceChoice, ...]`
         The values on offer, in select list order.
 
     """
@@ -204,7 +204,7 @@ class PreferenceSelect(discord.ui.Select["PreferencesPanel"]):
 
 
 class PreferencesPanel(discord.ui.LayoutView):
-    """A user's preferences panel — a ``Section`` per column with its toggle beside it.
+    """A user's preferences panel - a ``Section`` per column with its toggle beside it.
 
     Not persistent; ``/preferences`` is cheap to re-run.
 
@@ -219,11 +219,11 @@ class PreferencesPanel(discord.ui.LayoutView):
 
         Parameters
         ----------
-        cog: :class:`Preferences`
+        cog : :class:`Preferences`
             The owning cog.
-        user: :class:`Union[User, discord.Member]`
+        user : :class:`Union[User, discord.Member]`
             Whose preferences are shown.
-        settings: :class:`UserSettings`
+        settings : :class:`UserSettings`
             The switch row, already read.
 
         Returns
@@ -284,7 +284,7 @@ class PreferencesPanel(discord.ui.LayoutView):
         container.add_item(discord.ui.TextDisplay(f"-# {self._summary()}"))
         self.add_item(container)
 
-        # Outside the container — Reset acts on the panel, not a setting in it.
+        # Outside the container - Reset acts on the panel, not a setting in it.
         self.add_item(
             discord.ui.ActionRow().add_item(
                 PreferenceButton(action="reset", label="Reset", emoji="🔄", style=discord.ButtonStyle.danger),
@@ -357,7 +357,7 @@ class Preferences(Cog):
 
     """
 
-    # Allowed column names for UPDATE — guards against SQL injection via the setting parameter.
+    # Allowed column names for UPDATE - guards against SQL injection via the setting parameter.
     _USER_SETTING_COLUMNS: frozenset[str] = frozenset(USER_SETTING_DEFAULTS)
 
     preferences = app_commands.Group(
@@ -378,7 +378,7 @@ class Preferences(Cog):
 
         Parameters
         ----------
-        conn: :class:`Connection`
+        conn : :class:`Connection`
             The connection to migrate on; taken so this runs inside the caller's transaction.
 
         """
@@ -397,7 +397,7 @@ class Preferences(Cog):
 
         Parameters
         ----------
-        user: :class:`Union[User, discord.Member]`
+        user : :class:`Union[User, discord.Member]`
             The Discord user object.
 
         Returns
@@ -439,13 +439,13 @@ class Preferences(Cog):
 
         Parameters
         ----------
-        user: :class:`Union[User, discord.Member]`
+        user : :class:`Union[User, discord.Member]`
             The Discord user object.
-        setting: :class:`Optional[str]`, optional
+        setting : :class:`Optional[str]`, optional
             Column name to update; must be in :attr:`_USER_SETTING_COLUMNS`, by default None.
-        value: :class:`bool`, optional
+        value : :class:`bool`, optional
             The value to write, by default False.
-        default: :class:`bool`, optional
+        default : :class:`bool`, optional
             Insert a default row instead of updating, by default False.
 
         Returns
@@ -500,7 +500,7 @@ class Preferences(Cog):
 
         Parameters
         ----------
-        user: :class:`Union[User, discord.Member]`
+        user : :class:`Union[User, discord.Member]`
             The Discord user object.
 
         Returns
@@ -535,9 +535,9 @@ class Preferences(Cog):
 
         Parameters
         ----------
-        user: :class:`Union[User, discord.Member]`
+        user : :class:`Union[User, discord.Member]`
             The Discord user object.
-        setting: :class:`str`
+        setting : :class:`str`
             The column name to read.
 
         Returns
@@ -571,7 +571,7 @@ class Preferences(Cog):
 
         Parameters
         ----------
-        user: :class:`discord.abc.Snowflake`
+        user : :class:`discord.abc.Snowflake`
             Anything carrying the Discord ID.
 
         Returns
@@ -597,9 +597,9 @@ class Preferences(Cog):
 
         Parameters
         ----------
-        user: :class:`discord.abc.Snowflake`
+        user : :class:`discord.abc.Snowflake`
             Anything carrying the Discord ID.
-        key: :class:`str`
+        key : :class:`str`
             The :attr:`Preference.key` to read.
 
         Returns
@@ -634,11 +634,11 @@ class Preferences(Cog):
 
         Parameters
         ----------
-        user: :class:`discord.abc.Snowflake`
+        user : :class:`discord.abc.Snowflake`
             Anything carrying the Discord ID.
-        key: :class:`str`
+        key : :class:`str`
             The :attr:`Preference.key` to write.
-        value: :class:`str`
+        value : :class:`str`
             One of the declared :attr:`Preference.choices`.
 
         Returns

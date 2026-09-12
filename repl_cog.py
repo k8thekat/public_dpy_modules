@@ -72,9 +72,9 @@ class Repl(Cog):
 
         Parameters
         ----------
-        context: :class:`Context`
+        context : :class:`Context`
             The context the session was started from.
-        reason: :class:`str`
+        reason : :class:`str`
             Why the session is ending, as a fragment: "timed out", "you asked".
 
         """
@@ -82,7 +82,7 @@ class Repl(Cog):
         reference: Optional[discord.Message] = session["message"] if session is not None else None
         with contextlib.suppress(discord.HTTPException):
             await context.send(
-                content=f"Exiting the `REPL` session — {reason}. {self.emoji_table.kuma_shrug}",
+                content=f"Exiting the `REPL` session - {reason}. {self.emoji_table.kuma_shrug}",
                 reference=reference,
             )
 
@@ -105,7 +105,7 @@ class Repl(Cog):
             # "`_`": None, Unsure what this variable was being used for.
         }
 
-        # Keyed by author, so this has to *check* by author too — it looked the channel ID up in a
+        # Keyed by author, so this has to *check* by author too - it looked the channel ID up in a
         # dict of user IDs, never matched, and a second `repl` quietly replaced the first session's
         # bookkeeping while the first loop carried on running against it.
         existing: Optional[Session] = self._sessions.get(ctx.author.id)
@@ -153,7 +153,7 @@ class Repl(Cog):
 
             # Whatever did not win is cancelled on every path out of here. `wait_for` registers a
             # listener on the bot and only drops it when its future resolves, so a task left pending
-            # goes on running its check against a session that has already been closed — and the
+            # goes on running its check against a session that has already been closed - and the
             # check reaches into `_sessions` for an entry that is no longer there.
             for task in pending:
                 task.cancel()

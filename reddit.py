@@ -193,13 +193,13 @@ class ImageComparison:
 
     Attributes
     ----------
-    match_percent: :class:`int`
+    match_percent : :class:`int`
         This is the percentage base match value, results must be this or higher. Defaults to 90%.
-    line_detect: :class:`int`
+    line_detect : :class:`int`
         This is the 0-255 value we use to determine if the pixel is a "line". Defaults to 128.
-    sample_percent: :class:`int`
+    sample_percent : :class:`int`
         This is the % of edge cords to use for comparison. Defaults to 10%.
-    sample_dimensions: :class:`tuple[int, int]`
+    sample_dimensions : :class:`tuple[int, int]`
         This is the default resolution to scale all images down to (or up). Defaults to (500, 500).
 
     """
@@ -249,7 +249,7 @@ class ImageComparison:
 
         Parameters
         ----------
-        percent: :class:`int`, optional
+        percent : :class:`int`, optional
             0-100 Percent value, by default 90.
 
         Raises
@@ -268,7 +268,7 @@ class ImageComparison:
 
         Parameters
         ----------
-        line_value: :class:`int`, optional
+        line_value : :class:`int`, optional
             0-255 Pixel value, by default 128.
 
         Raises
@@ -289,7 +289,7 @@ class ImageComparison:
 
         Parameters
         ----------
-        percent: :class:`int`, optional
+        percent : :class:`int`, optional
             0-100 Percent value, by default 10.
 
         Raises
@@ -312,7 +312,7 @@ class ImageComparison:
 
         Parameters
         ----------
-        dimensions: :class:`tuple[int, int]`, optional
+        dimensions : :class:`tuple[int, int]`, optional
             The dimensions to scale images to, by default (500, 500).
 
         Raises
@@ -332,7 +332,7 @@ class ImageComparison:
 
         Parameters
         ----------
-        image: :class:`Image.Image`
+        image : :class:`Image.Image`
             PIL Image.
 
         Returns
@@ -352,9 +352,9 @@ class ImageComparison:
 
         Parameters
         ----------
-        image: :class:`Image.Image`
+        image : :class:`Image.Image`
             PIL Image.
-        img_filter: :class:`ImageFilter.Filter`, optional
+        img_filter : :class:`ImageFilter.Filter`, optional
             PIL Image Filter, by default ImageFilter.FIND_EDGES.
 
         Returns
@@ -381,15 +381,15 @@ class ImageComparison:
 
         Parameters
         ----------
-        source: :class:`Image.Image`
+        source : :class:`Image.Image`
             PIL Image.
-        comparison: :class:`Optional[Image.Image]`, optional
+        comparison : :class:`Optional[Image.Image]`, optional
             PIL Image, the image to scale down, by default `None`.
-        sampling: :class:`Resampling`, optional
+        sampling : :class:`Resampling`, optional
             PIL Resampling, by default Resampling.BICUBIC.
-        scale_percent: :class:`int`, optional
+        scale_percent : :class:`int`, optional
             The percentage to resize the image when `image_size` is `None`, by default 50.
-        image_size: :class:`Optional[tuple[int, int]]`, optional
+        image_size : :class:`Optional[tuple[int, int]]`, optional
             The dimensions to scale the image down (or up) to, set to `None` to use source image dimensions, by default (500, 500).
 
         Returns
@@ -420,7 +420,7 @@ class ImageComparison:
 
         Parameters
         ----------
-        image: :class:`Image.Image`
+        image : :class:`Image.Image`
             PIL Image.
 
         Returns
@@ -456,9 +456,9 @@ class ImageComparison:
 
         Parameters
         ----------
-        image: :class:`Image.Image`
+        image : :class:`Image.Image`
             PIL Image.
-        cords: :class:`tuple[int, int]`
+        cords : :class:`tuple[int, int]`
             X,Y coordinates.
 
         Returns
@@ -488,11 +488,11 @@ class ImageComparison:
 
         Parameters
         ----------
-        image: :class:`Image.Image`
+        image : :class:`Image.Image`
             PIL Image.
-        cords: :class:`tuple[int, int]`
+        cords : :class:`tuple[int, int]`
             X,Y coordinates.
-        distance: :class:`int`, optional
+        distance : :class:`int`, optional
             Radius from (X,Y), by default 3.
 
         Returns
@@ -522,11 +522,11 @@ class ImageComparison:
 
         Parameters
         ----------
-        source: :class:`Image.Image`
+        source : :class:`Image.Image`
             PIL Image.
-        comparison: :class:`Image.Image`
+        comparison : :class:`Image.Image`
             PIL Image.
-        resize_dimensions: :class:`Optional[tuple[int, int]]`, optional
+        resize_dimensions : :class:`Optional[tuple[int, int]]`, optional
             The dimensions to scale the image down (or up) to, set to `None` to use source image dimensions, by default (500, 500).
 
         Returns
@@ -576,7 +576,7 @@ def link_label(text: str) -> str:
 
     Parameters
     ----------
-    text: :class:`str`
+    text : :class:`str`
         The title, or any other string being used as the label of a `[label](url)`.
 
     Returns
@@ -596,7 +596,7 @@ def media_filename(img_url: str) -> str:
 
     Parameters
     ----------
-    img_url: :class:`str`
+    img_url : :class:`str`
         The source URL of the image.
 
     Returns
@@ -627,9 +627,9 @@ class RedditTextPanel(KumaContainer):
 
         Parameters
         ----------
-        title: :class:`str`
+        title : :class:`str`
             The heading, repeated on every page.
-        body: :class:`str`
+        body : :class:`str`
             The body of the Container.
 
         """
@@ -730,7 +730,7 @@ class RedditPostContainer(KumaContainer):
 
         Parameters
         ----------
-        row: :class:`GalleryPageRow`
+        row : :class:`GalleryPageRow`
             The stored page, as returned by :meth:`RedditImageCrawler.get_gallery_pages`.
 
         Returns
@@ -770,17 +770,17 @@ class RedditPostContainer(KumaContainer):
 
         Parameters
         ----------
-        sub: :class:`str`
+        sub : :class:`str`
             The subreddit name the submission belongs to, without the leading `/r/`.
-        submission: :class:`Submission`
+        submission : :class:`Submission`
             The asyncpraw Submission; provides the title, permalink and creation timestamp.
-        media: :class:`str`
+        media : :class:`str`
             The image to show, as a remote URL.
-        img_info: :class:`Optional[ImageInfo]`, optional
+        img_info : :class:`Optional[ImageInfo]`, optional
             The resolution information of the image, by default `None`.
-        first_post_url: :class:`Optional[str]`, optional
+        first_post_url : :class:`Optional[str]`, optional
             A jump link to the first post sent today for this subreddit, by default `None`.
-        previous_post_url: :class:`Optional[str]`, optional
+        previous_post_url : :class:`Optional[str]`, optional
             A jump link to the previous Discord message sent for this subreddit, by default `None`.
 
         Returns
@@ -823,9 +823,9 @@ class RedditGalleryView(KumaLayoutView):
 
         Parameters
         ----------
-        interaction: :class:`discord.Interaction`
+        interaction : :class:`discord.Interaction`
             The component interaction; unused.
-        step: :class:`int`
+        step : :class:`int`
             The offset that would have been applied; unused.
 
         """
@@ -1181,7 +1181,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        interaction: :class:`discord.Interaction`
+        interaction : :class:`discord.Interaction`
             The component interaction; ignored unless its `custom_id` matches :attr:`GALLERY_PAGE_REGEX`.
 
         """
@@ -1214,7 +1214,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        name: :class:`str`
+        name : :class:`str`
             Name of the Subreddit.
 
         Returns
@@ -1231,7 +1231,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        name: :class:`str`
+        name : :class:`str`
             Name of the Subreddit.
 
         Returns
@@ -1251,7 +1251,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        name: :class:`str`
+        name : :class:`str`
             Name of the Subreddit.
 
         Returns
@@ -1301,9 +1301,9 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        name: :class:`str`
+        name : :class:`str`
             Name of the Subreddit.
-        webhook: :class:`Union[int, str]`
+        webhook : :class:`Union[int, str]`
             Webhook name, url, ID or the string "none" to unset.
 
         Returns
@@ -1331,7 +1331,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        arg: :class:`Union[str, int, None]`
+        arg : :class:`Union[str, int, None]`
             Supports webhook name, id or url queries.
 
         Returns
@@ -1354,9 +1354,9 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        name: :class:`str`
+        name : :class:`str`
             A string to represent the Webhook URL in the table.
-        url: :class:`str`
+        url : :class:`str`
             Discord webhook URL.
 
         Returns
@@ -1379,7 +1379,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        arg: :class:`Union[int, str]`
+        arg : :class:`Union[int, str]`
             Supports Webhook ID, Name or URL.
 
         Returns
@@ -1416,9 +1416,9 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        message_id: :class:`int`
+        message_id : :class:`int`
             The Discord message the gallery was sent as.
-        containers: :class:`Sequence[RedditPostContainer]`
+        containers : :class:`Sequence[RedditPostContainer]`
             The gallery pages, in display order.
 
         """
@@ -1451,7 +1451,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        message_id: :class:`int`
+        message_id : :class:`int`
             The Discord message the gallery was sent as.
 
         Returns
@@ -1509,9 +1509,9 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        guild: :class:`discord.Guild`
+        guild : :class:`discord.Guild`
             The guild to fetch webhooks from.
-        member: :class:`discord.Member`
+        member : :class:`discord.Member`
             The member to permission-check each webhook's channel against.
 
         Returns
@@ -1560,13 +1560,13 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        sub: :class:`str`
+        sub : :class:`str`
             The subreddit to check. Do not include the `/r/`. eg `NoStupidQuestions`.
-        order_type: :class:`str`
+        order_type : :class:`str`
             The subreddit listing order; either `New`, `Hot` or `Top`.
-        count: :class:`Optional[int]`, optional
+        count : :class:`Optional[int]`, optional
             The number of submissions to look back through, by default `submission_limit` (30).
-        last_check: :class:`Optional[datetime]`, optional
+        last_check : :class:`Optional[datetime]`, optional
             Ignore submissions created before this time, by default `None`.
 
         Returns
@@ -1683,7 +1683,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        last_check: :class:`datetime`
+        last_check : :class:`datetime`
             Ignore submissions created before this time.
 
         Returns
@@ -1891,9 +1891,9 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        img_url: :class:`str`
+        img_url : :class:`str`
             Web url to the Image, used for logging.
-        img_data: :class:`bytes`
+        img_data : :class:`bytes`
             Image data to check.
 
         Returns
@@ -1959,9 +1959,9 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        array: :class:`bytes`
+        array : :class:`bytes`
             A binary representation of pixel cords.
-        edges: :class:`bytes`
+        edges : :class:`bytes`
             A binary representation of pixel cords.
 
         Returns
@@ -1985,7 +1985,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        submission: :class:`Submission`
+        submission : :class:`Submission`
             The subreddit Submission.
 
         Returns
@@ -2017,7 +2017,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        submission: :class:`Submission`
+        submission : :class:`Submission`
             The subreddit Submission.
 
         Returns
@@ -2049,9 +2049,9 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        img_url: :class:`str`
+        img_url : :class:`str`
             Web URL for the image.
-        ignore_validation: :class:`bool`, optional
+        ignore_validation : :class:`bool`, optional
             Ignore header check on web request for `image`, by default `False`.
 
         Returns
@@ -2124,7 +2124,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        data: :class:`bytes`
+        data : :class:`bytes`
             The image data.
 
         Returns
@@ -2150,7 +2150,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        img_data: :class:`bytes`
+        img_data : :class:`bytes`
             The image data.
 
         Returns
@@ -2179,11 +2179,11 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        url: :class:`str`
+        url : :class:`str`
             The Webhook URL to use.
-        content: :class:`Optional[str]`, optional
+        content : :class:`Optional[str]`, optional
             The message content to send to the url, by default `None`.
-        view: :class:`Optional[KumaLayoutView]`, optional
+        view : :class:`Optional[KumaLayoutView]`, optional
             The Components V2 view to send to the url, by default `None`.
 
         Returns
@@ -2238,7 +2238,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        subreddit: :class:`str`
+        subreddit : :class:`str`
             What the user typed.
 
         Returns
@@ -2259,7 +2259,7 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        subreddit: :class:`str`
+        subreddit : :class:`str`
             The subreddit to check. Do not include the `/r/`. eg `NoStupidQuestions`.
 
         Returns
@@ -2317,9 +2317,9 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        url_one: :class:`str`
+        url_one : :class:`str`
             Image url.
-        url_two: :class:`str`
+        url_two : :class:`str`
             Image url.
 
         """
@@ -2336,9 +2336,9 @@ class RedditImageCrawler(Cog):
 
         Parameters
         ----------
-        entries: :class:`list[str]`
+        entries : :class:`list[str]`
             The pre-formatted lines to paginate.
-        limit: :class:`int`, optional
+        limit : :class:`int`, optional
             Maximum characters per page, by default :attr:`PAGE_LIMIT`.
 
         Returns

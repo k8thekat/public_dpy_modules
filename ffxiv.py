@@ -74,7 +74,7 @@ from moogle_intuition.modules import (
     SpearFishing,
 )
 
-from utils import FFXIVResources, KumaCog as Cog, KumaContext as Context, KumaEmbed as Embed
+from utils import FFXIVResources, KumaCog as Cog, KumaContext as Context, KumaEmbed as Embed, PanelAccess
 from utils._types import Metrics
 
 if TYPE_CHECKING:
@@ -144,21 +144,21 @@ class ViewParams(TypedDict):
 
     Params
     ------
-    cog: :class:`FFXIV`
+    cog : :class:`FFXIV`
         The Cog that dispatched the view.
-    xivuser: :class:`XIVUser`
+    xivuser : :class:`XIVUser`
         The XIV User object associated to the `owner` of the :class:`View`.
-    recent_interaction: :class:`discord.Message`
+    recent_interaction : :class:`discord.Message`
         The most recent :class:`discord.Interaction` that sent content..
-    components: :class:`NotRequired[list[discord.ui.Item]]`
+    components : :class:`NotRequired[list[discord.ui.Item]]`
         Any Items to pre-append to the View and display.
-    owner: :class:`discord.Member | discord.User`
+    owner : :class:`discord.Member | discord.User`
         The Member or User who dispatched the view/interaction.
-    embeds: :class:`NotRequired[Sequence[MoogleEmbed | ItemEmbed] | None]`
+    embeds : :class:`NotRequired[Sequence[MoogleEmbed | ItemEmbed] | None]`
         The Embeds associated with the view, if applicable.
     dispatched_by: Optional[BaseView | discord.ui.Button[BaseView]]
         The Object that dispatched the View..
-    timeout: :class:`NotRequired[float | None]`
+    timeout : :class:`NotRequired[float | None]`
         Default View timeout parameter.
     """
 
@@ -170,8 +170,8 @@ class ViewParams(TypedDict):
     "The most recent :class:`discord.Interaction` that sent content.."
     components: NotRequired[list[discord.ui.Item]]
     "Any Items to pre-append to the View and display during `__init__`"
-    owner: discord.Member | discord.User
-    "The Member or User who dispatched the view/interaction."
+    owner: Optional[discord.Member | discord.User | discord.ClientUser]
+    "The invoker; the bot for a public view, or ``None`` for a preview no one may interact with."
     embeds: Sequence[MoogleEmbed | ItemEmbed] | None
     "The Embeds associated with the view, if applicable."
     dispatched_by: Optional[BaseView | discord.ui.Button[BaseView]]
@@ -185,21 +185,21 @@ class ViewParamsPartial(TypedDict):
 
     Params
     ------
-    cog: :class:`FFXIV`
+    cog : :class:`FFXIV`
         The Cog that dispatched the view.
-    xivuser: :class:`XIVUser`
+    xivuser : :class:`XIVUser`
         The XIV User object associated to the `owner` of the :class:`View`.
-    owner: :class:`discord.Member | discord.User`
+    owner : :class:`discord.Member | discord.User`
         The Member or User who dispatched the view/interaction.
-    recent_interaction: :class:`NotRequired[discord.Message]`
+    recent_interaction : :class:`NotRequired[discord.Message]`
         The most recent :class:`discord.Interaction` that sent content..
-    components: :class:`NotRequired[list[discord.ui.Item]]`
+    components : :class:`NotRequired[list[discord.ui.Item]]`
         Any Items to pre-append to the View and display.
-    embeds: :class:`NotRequired[Sequence[MoogleEmbed | ItemEmbed] | None]`
+    embeds : :class:`NotRequired[Sequence[MoogleEmbed | ItemEmbed] | None]`
         The Embeds associated with the view, if applicable.
-    dispatched_by: :class:`NotRequired[Optional[BaseView | discord.ui.Button[BaseView]]]`
+    dispatched_by : :class:`NotRequired[Optional[BaseView | discord.ui.Button[BaseView]]]`
         The Object that dispatched the View..
-    timeout: :class:`NotRequired[float | None]`
+    timeout : :class:`NotRequired[float | None]`
         Default View timeout parameter.
 
     """
@@ -208,8 +208,8 @@ class ViewParamsPartial(TypedDict):
     "The Cog that dispatched the view."
     xivuser: XIVUser
     "The XIV User object associated to the `owner` of the :class:`View`."
-    owner: discord.Member | discord.User
-    "The Member or User who dispatched the view/interaction."
+    owner: Optional[discord.Member | discord.User | discord.ClientUser]
+    "The invoker; the bot for a public view, or ``None`` for a preview no one may interact with."
     recent_interaction: NotRequired[Optional[discord.Interaction]]
     "The most recent :class:`discord.Interaction` that sent content.."
     components: NotRequired[list[discord.ui.Item]]
@@ -335,7 +335,7 @@ class XIVUser:
 
         Parameters
         ----------
-        item: :class:`WatchList`
+        item : :class:`WatchList`
             _description_.
 
         Returns
@@ -377,15 +377,15 @@ class XIVUser:
 
         Parameters
         ----------
-        pool: :class:`asqlite.Pool`
+        pool : :class:`asqlite.Pool`
             _description_.
-        user: :class:`discord.User | discord.Member`
+        user : :class:`discord.User | discord.Member`
             _description_.
-        datacenter: :class:`DataCenter`, optional
+        datacenter : :class:`DataCenter`, optional
             _description_, by default DataCenter.Crystal.
-        guild: :class:`discord.Guild | None`, optional
+        guild : :class:`discord.Guild | None`, optional
             _description_, by default None.
-        language: :class:`Language`, optional
+        language : :class:`Language`, optional
             _description_, by default Language.English.
 
         Returns
@@ -527,11 +527,11 @@ class MoogleEmbed(Embed):
 
         Parameters
         ----------
-        text: :class:`Optional[str]`, optional
+        text : :class:`Optional[str]`, optional
             The text parameter for `super().set_footer()`, by default "Moogles Intuition".
-        icon_url: :class:`_type_`, optional
+        icon_url : :class:`_type_`, optional
             The icon url parameter for `super().set_footer()`, by default "attachment://footer-icon.png".
-        timestamp: :class:`bool`, optional
+        timestamp : :class:`bool`, optional
             Add a `discord timestamp` of when the embed was sent to the end of the `text` parameter, by default False.
 
         Returns
@@ -617,13 +617,13 @@ class ItemEmbed(MoogleEmbed):
 
         Parameters
         ----------
-        cog: :class:`FFXIV`
+        cog : :class:`FFXIV`
             The FFXIV cog class.
-        item: :class:`Item`
+        item : :class:`Item`
             The FFXIV Item to base the Embed off of.
-        add_links: :class:`bool`, optional
+        add_links : :class:`bool`, optional
             Adds pre-filled links to the bottom of the Embed (just above the footer), by default True.
-        **kwargs: :class:`Unpack[EmbedParams]`
+        **kwargs : :class:`Unpack[EmbedParams]`
             Any keyword args for `discord.Embed` class creation.
 
         """
@@ -753,11 +753,11 @@ class ItemEmbed(MoogleEmbed):
 
         Parameters
         ----------
-        value: :class:`Optional[str]`
+        value : :class:`Optional[str]`
             The value parameter for `View.insert_field_at()`, default is None.
-        index: :class:`int`, optional
+        index : :class:`int`, optional
             The index to insert the field at, limit is 25; default is 25.
-        inline: :class:`bool`, optional
+        inline : :class:`bool`, optional
             If the field should be `inline` or not. default is False.
 
         """
@@ -787,7 +787,7 @@ class ItemEmbed(MoogleEmbed):
 
         Parameters
         ----------
-        inline: :class:`bool`, optional
+        inline : :class:`bool`, optional
             If the field should be `inline` or not, default is `False`.
 
         Returns
@@ -815,13 +815,13 @@ class ItemEmbed(MoogleEmbed):
 
         Parameters
         ----------
-        shops: :class:`list[Vendor]`
+        shops : :class:`list[Vendor]`
             The list of Vendor information.
-        limit: :class:`int`, optional
+        limit : :class:`int`, optional
             Limit of Vendor entries to parse, by default 3.
-        name: :class:`Literal["Vendors", "Tradeshops"]`
+        name : :class:`Literal["Vendors", "Tradeshops"]`
             The name of the shop.
-        inline: :class:`bool`, optional
+        inline : :class:`bool`, optional
             If the field should be `inline` or not, default is `False`.
 
         Returns
@@ -869,7 +869,7 @@ class ItemEmbed(MoogleEmbed):
 
         Parameters
         ----------
-        data: :class:`CurrencySpender`
+        data : :class:`CurrencySpender`
             The results from the Currency function.
 
         Returns
@@ -954,10 +954,12 @@ class FishingEmbed(ItemEmbed):
         if len(angler_data.restrictions) >= 1:
             data.append(f"Restrictions: **{','.join(angler_data.restrictions)}**")
 
-        data.extend([
-            f"Hook time: **~{angler_data.hook_time}**",
-            f"Best Bait: **{best_bait.bait_name.title()}** [{best_bait.hook_percent * 100}%]",
-        ])
+        data.extend(
+            [
+                f"Hook time: **~{angler_data.hook_time}**",
+                f"Best Bait: **{best_bait.bait_name.title()}** [{best_bait.hook_percent * 100}%]",
+            ]
+        )
 
         general_fields: list[str] = []
         # place_name = "UNK"
@@ -1080,17 +1082,17 @@ class UniversalisEmbed(ItemEmbed):
 
         Parameters
         ----------
-        cog: :class:`Cog`
+        cog : :class:`Cog`
             FFXIV Cog.
-        item: :class:`Item`
+        item : :class:`Item`
             The XIV Item.
-        world_or_dc: :class:`World | DataCenter`
+        world_or_dc : :class:`World | DataCenter`
             The :class:`XIVUser` or supplied `World | DataCenter`.
-        cur_listings: :class:`list[CurrentDataEntries]`
+        cur_listings : :class:`list[CurrentDataEntries]`
             The array of Current Listing data to format for an Embed field.
-        hist_listings: :class:`list[HistoryDataEntries]`
+        hist_listings : :class:`list[HistoryDataEntries]`
             The array of History Listing data to format for an Embed field.
-        **kwargs: :class:`Unpack[EmbedParams]`
+        **kwargs : :class:`Unpack[EmbedParams]`
             Any addition `discord.Embed` parameters.
 
         """
@@ -1460,27 +1462,27 @@ class BaseView(discord.ui.View):
 
     Attributes
     ----------
-    owner: :class:`discord.Member | discord.User`
+    owner : :class:`discord.Member | discord.User`
         The Discord User or Member who started the interaction.
-    xivuser: :class:`XIVUser`
+    xivuser : :class:`XIVUser`
         The Database XIV User.
-    cog: :class:`FFXIV`
+    cog : :class:`FFXIV`
         A pointer for useful functionality if needed.
-    recent_interaction: :class:`Optional[discord.Interaction]`
+    recent_interaction : :class:`Optional[discord.Interaction]`
         The most recent :class:`discord.Interaction` that sent content, if applicable, by default `None`.
-    components: :class:`list[discord.ui.Item[Any]]`
+    components : :class:`list[discord.ui.Item[Any]]`
         A list of Items to be added to the view.
-    dispatched_by: :class:`Optional[BaseView | discord.ui.Button[BaseView]]`
+    dispatched_by : :class:`Optional[BaseView | discord.ui.Button[BaseView]]`
         Any embeds attached to the view..
-    embeds: :class:`Optional[Sequence[MoogleEmbed | ItemEmbed | UniversalisEmbed | RecipeEmbed | FishingEmbed | CurrencyEmbed]]`
+    embeds : :class:`Optional[Sequence[MoogleEmbed | ItemEmbed | UniversalisEmbed | RecipeEmbed | FishingEmbed | CurrencyEmbed]]`
         The Embeds related to the View, if applicable.
-    indx: :class:`int`
+    indx : :class:`int`
         Index key for Embeds[], by default is 0.
 
     """
 
-    owner: discord.Member | discord.User
-    "The Discord User."
+    owner: Optional[discord.Member | discord.User | discord.ClientUser]
+    "The invoker; the bot for a public view, or ``None`` for a preview no one may interact with."
     xivuser: XIVUser
     "The Database FFXIV User."
     cog: FFXIV
@@ -1507,7 +1509,7 @@ class BaseView(discord.ui.View):
         You cannot set this value larger than the len(self.embeds)-1.
 
         .. note::
-            Clamps to `len(self.embeds) - 1`, not `len(self.embeds)` — the latter is one past the end
+            Clamps to `len(self.embeds) - 1`, not `len(self.embeds)` - the latter is one past the end
             and would raise an :class:`IndexError` on the very lookup this property exists to make safe.
         """
         if self.embeds is not None and self._indx > len(self.embeds) - 1:
@@ -1530,7 +1532,7 @@ class BaseView(discord.ui.View):
     def __init__(
         self,
         xivuser: XIVUser,
-        owner: discord.Member | discord.User,
+        owner: Optional[discord.Member | discord.User | discord.ClientUser],
         cog: FFXIV,
         *,
         embeds: Optional[Sequence[MoogleEmbed | ItemEmbed]] = None,
@@ -1543,21 +1545,21 @@ class BaseView(discord.ui.View):
 
         Parameters
         ----------
-        owner: :class:`discord.Member | discord.User`
+        owner : :class:`discord.Member | discord.User`
             The Discord User or Member who started the interaction.
-        xivuser: :class:`XIVUser`
+        xivuser : :class:`XIVUser`
             The Database XIV User.
-        cog: :class:`FFXIV | Cog`
+        cog : :class:`FFXIV | Cog`
             A pointer for useful functionality if needed.
-        recent_interaction: :class:`Optional[discord.Interaction]`
+        recent_interaction : :class:`Optional[discord.Interaction]`
             The most recent :class:`discord.Interaction` that sent content, if applicable, by default `None`.
-        components: :class:`list[discord.ui.Item[Any]]`
+        components : :class:`list[discord.ui.Item[Any]]`
             A list of Items to be added to the view.
-        dispatched_by: :class:`Optional[BaseView | discord.ui.Button[BaseView]]`
+        dispatched_by : :class:`Optional[BaseView | discord.ui.Button[BaseView]]`
             Any embeds attached to the view..
-        embeds: :class:`Optional[Sequence[MoogleEmbed | ItemEmbed]]`
+        embeds : :class:`Optional[Sequence[MoogleEmbed | ItemEmbed]]`
             The Embeds related to the View, if applicable.
-        timeout: :class:`Optional[float]`
+        timeout : :class:`Optional[float]`
             Timeout in seconds from last interaction with the UI before no longer accepting input.
             If `None` then the timeout is 180 seconds.
             - Default is 180 seconds.
@@ -1598,9 +1600,9 @@ class BaseView(discord.ui.View):
 
         Parameters
         ----------
-        use_default: :class:`bool`, optional
+        use_default : :class:`bool`, optional
             If you want the default :class:`discord.SelectOption` to match the :class:`XIVUser.datacenter`, by default False.
-        sort: :class:`bool`, optional
+        sort : :class:`bool`, optional
             To sort the listings or not.
 
         Returns
@@ -1628,7 +1630,7 @@ class BaseView(discord.ui.View):
 
         Parameters
         ----------
-        datacenter: :class:`DataCenter`
+        datacenter : :class:`DataCenter`
             A :class:`DataCenter` object to get a list of :class:`World` belonging to the :class:`DataCenter` object.
             - See :class:`DataCenterToWorlds.get_worlds()`
 
@@ -1656,7 +1658,7 @@ class BaseView(discord.ui.View):
 
         Parameters
         ----------
-        use_default: :class:`bool`, optional
+        use_default : :class:`bool`, optional
             If you want the default :class:`discord.SelectOption` to match the :class:`XIVUser.language`, by default False.
 
         Returns
@@ -1713,7 +1715,7 @@ class BaseView(discord.ui.View):
 
         self.recent_interaction = interaction
         # Guard against underflow: on the first page there is nothing to go back to, and decrementing
-        # would leave indx at -1, which silently renders `embeds[-1]` — the *last* page.
+        # would leave indx at -1, which silently renders `embeds[-1]` - the *last* page.
         if self.indx > 0:
             self.indx -= 1
 
@@ -1824,6 +1826,13 @@ class BaseView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         LOGGER.debug("<%s.%s>", __class__.__name__, "interaction_check")
+        # No owner is a preview; no one may interact.
+        if self.owner is None:
+            return False
+        # A view owned by the bot is public; anyone may interact.
+        if isinstance(self.owner, discord.ClientUser):
+            self.recent_interaction = interaction
+            return await super().interaction_check(interaction)
         if interaction.user != self.owner:
             await interaction.response.send_message(
                 content=f"Yea, you know this doesn't belong to you..{self.cog.emoji_table.kuma_chuckle}",
@@ -1888,7 +1897,7 @@ class ItemView(BaseView):
 
     Attributes
     ----------
-    item: :class:`Item`
+    item : :class:`Item`
         The Moogle's Intuition Item, if applicable.
 
     """
@@ -1901,9 +1910,9 @@ class ItemView(BaseView):
 
         Parameters
         ----------
-        item: :class:`Item`
+        item : :class:`Item`
             TThe Moogle's Intuition Item.
-        **kwargs: :class:`ViewParams`
+        **kwargs : :class:`ViewParams`
             Any additional args needed to build the :class:`BaseView` object.
 
         """
@@ -2878,9 +2887,9 @@ class FFXIV(Cog):
 
         Parameters
         ----------
-        emoji: :class:`str | int`
+        emoji : :class:`str | int`
             The Emoji name or ID.
-        inline: :class:`bool`, optional
+        inline : :class:`bool`, optional
             If we want an "inline" emoji str to use or not, by default True.
 
         Returns
@@ -3024,6 +3033,10 @@ class FFXIV(Cog):
 
     @app_commands.command(name="xivitem", description="Get an FFXIV Item.")
     @app_commands.autocomplete(query=autocomp_item_list)
+    @app_commands.describe(
+        ephemeral="Hide the response so only you can see it (default True).",
+        access="Who can use the buttons: Public (anyone), Preview (no one), or Only Me (default).",
+    )
     async def item(
         self,
         interaction: discord.Interaction,
@@ -3031,6 +3044,7 @@ class FFXIV(Cog):
         *,
         timeout: Optional[float] = 180.0,  # noqa: ASYNC109
         ephemeral: bool = True,
+        access: PanelAccess = PanelAccess.only_me,
     ) -> None:
         await interaction.response.defer(thinking=True, ephemeral=ephemeral)
 
@@ -3052,10 +3066,11 @@ class FFXIV(Cog):
         if timeout == 0:
             timeout = None
 
+        owner: Optional[discord.Member | discord.User | discord.ClientUser] = access.owner(user=interaction.user, bot=self.bot)
         view = ItemView(
             item=item,
             cog=self,
-            owner=interaction.user,
+            owner=owner,
             xivuser=user,
             embeds=[embed],
             timeout=timeout,
@@ -3074,6 +3089,10 @@ class FFXIV(Cog):
     @app_commands.command(name="xivmb", description="Get Universalis information for Item.")
     @app_commands.describe(world="If a World is supplied, it will overwrite the DataCenter parameter.")
     @app_commands.describe(listing_count="The number of Universalis listings to fetch.")
+    @app_commands.describe(
+        ephemeral="Hide the response so only you can see it (default True).",
+        access="Who can use the buttons: Public (anyone), Preview (no one), or Only Me (default).",
+    )
     @app_commands.autocomplete(query=autocomp_item_list)
     @app_commands.autocomplete(world=autocomp_worlds)
     async def mb_item(
@@ -3085,8 +3104,10 @@ class FFXIV(Cog):
         datacenter: Optional[DataCenter],
         world: Optional[str],
         listing_count: int = 60,
+        ephemeral: bool = True,
+        access: PanelAccess = PanelAccess.only_me,
     ) -> None:
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True, ephemeral=ephemeral)
         try:
             results = self.moogle.get_item(query, limit_results=25)
             if len(results) == 1:
@@ -3109,14 +3130,14 @@ class FFXIV(Cog):
                 item = self.moogle.get_item(select.values[0], limit_results=1)
 
         except MoogleLookupError:
-            await interaction.followup.send(content=f"Failed to lookup Item: {query}", ephemeral=True)
+            await interaction.followup.send(content=f"Failed to lookup Item: {query}", ephemeral=ephemeral)
             try:
                 await interaction.delete_original_response()
             except:  # noqa: E722 # Don't care as I just want to remove the original message, if it fails idgaf.
                 return
             return
         except TimeoutError:
-            await interaction.followup.send(content="Failed to make a selection in time...", ephemeral=True)
+            await interaction.followup.send(content="Failed to make a selection in time...", ephemeral=ephemeral)
             return
 
         # our generic incremet for query tracking metrics.
@@ -3176,7 +3197,8 @@ class FFXIV(Cog):
             )
             embeds.append(embed)
 
-        view = UniversalisView(item=item, cog=self, xivuser=user, owner=interaction.user, embeds=embeds, dispatched_by=None)
+        owner: Optional[discord.Member | discord.User | discord.ClientUser] = access.owner(user=interaction.user, bot=self.bot)
+        view = UniversalisView(item=item, cog=self, xivuser=user, owner=owner, embeds=embeds, dispatched_by=None)
 
         await interaction.edit_original_response(
             content="Results:",
@@ -3187,6 +3209,10 @@ class FFXIV(Cog):
 
     @app_commands.autocomplete(world=autocomp_worlds)
     @app_commands.command(name="xivcurrency", description="Get items available to purchase per Currency.")
+    @app_commands.describe(
+        ephemeral="Hide the response so only you can see it (default True).",
+        access="Who can use the buttons: Public (anyone), Preview (no one), or Only Me (default).",
+    )
     async def currency(
         self,
         interaction: discord.Interaction,
@@ -3196,6 +3222,8 @@ class FFXIV(Cog):
         datacenter: Optional[DataCenter],
         world: Optional[str],
         sale_threshold: int = 1,
+        ephemeral: bool = True,
+        access: PanelAccess = PanelAccess.only_me,
     ) -> None:
         if query.value == 0:
             await interaction.response.send_message(
@@ -3204,10 +3232,10 @@ class FFXIV(Cog):
                 delete_after=self.message_timeout,
             )
             return
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True, ephemeral=ephemeral)
         reply: discord.WebhookMessage = await interaction.followup.send(
             content=f"Processing... {RESOURCES.emojis.moogle2}.",
-            ephemeral=True,
+            ephemeral=ephemeral,
             wait=True,
         )
 
@@ -3244,7 +3272,7 @@ class FFXIV(Cog):
 
             await interaction.followup.send(
                 content=f"{RESOURCES.emojis.error_icon} Failed to find results for {query.name}",
-                ephemeral=True,
+                ephemeral=ephemeral,
             )
             return
 
@@ -3269,7 +3297,8 @@ class FFXIV(Cog):
         # user: XIVUser = await self.get_ffxiv_user(ctx=interaction)
         embed: ItemEmbed = embeds[0]
         embed.set_footer(text=f"1 out of {len(embeds)} | Moogles Intuition")
-        view = CurrencyView(embeds=embeds, cog=self, xivuser=user, owner=interaction.user, timeout=0, dispatched_by=None)
+        owner: Optional[discord.Member | discord.User | discord.ClientUser] = access.owner(user=interaction.user, bot=self.bot)
+        view = CurrencyView(embeds=embeds, cog=self, xivuser=user, owner=owner, timeout=0, dispatched_by=None)
 
         async with self._reply_lock:
             self.reply_messages.remove(reply)
@@ -3282,19 +3311,24 @@ class FFXIV(Cog):
         )
 
     @app_commands.command(name="xiv_user", description="Update your FFXIV user profile.")
-    async def user(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(
+        ephemeral="Hide the response so only you can see it (default True).",
+        access="Who can use the buttons: Public (anyone), Preview (no one), or Only Me (default).",
+    )
+    async def user(self, interaction: discord.Interaction, ephemeral: bool = True, access: PanelAccess = PanelAccess.only_me) -> None:
         """Get your FFXIV user information."""
         # Temp user handling.
         user: XIVUser = await self.get_ffxiv_user(ctx=interaction)
 
         moogle_icon = FFXIVResources().get_moogle_icon()
         embed = UserEmbed(cog=self, ffxiv_user=user, user=interaction.user)
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        await interaction.followup.send(embed=embed, ephemeral=True, files=[moogle_icon])
+        await interaction.response.defer(thinking=True, ephemeral=ephemeral)
+        await interaction.followup.send(embed=embed, ephemeral=ephemeral, files=[moogle_icon])
+        owner: Optional[discord.Member | discord.User | discord.ClientUser] = access.owner(user=interaction.user, bot=self.bot)
         view = UserView(
             cog=self,
             xivuser=user,
-            owner=interaction.user,
+            owner=owner,
         )
         await interaction.edit_original_response(embed=embed, view=view)
 
